@@ -128,6 +128,38 @@ uv python install 3.14.7
 uv sync --locked
 ```
 
+## Local inception-board coordination
+
+Use `C:\Projects\localswim-state-store\localswim\localswim.json` as the machine-local
+human/agent board for localswim itself. At the beginning of each Codex run that uses
+this board, read its `port` value and request
+`http://127.0.0.1:<port>/api/v001/status`. Reuse a healthy service; never launch a
+duplicate. Board reads and mutations go through `localswim-cli`, never a direct JSON
+edit. The service runs with `--autopush` because this board's private state-store
+repository is its durable snapshot.
+
+Whenever that service is running, a board-write monitor MUST also be running and
+targeted at the active Codex thread. The shared monitor implementation and its locked
+`watchfiles` environment live in the FGA architecture checkout. Launch it from
+`C:\Projects\FGA\architecture-design` through `uv run --frozen python` as a hidden
+background process after the service is healthy, passing the board's current port and
+`$env:CODEX_THREAD_ID`:
+
+```console
+scripts/watch_localswim.py --board-path C:\Projects\localswim-state-store\localswim\localswim.json --board-label "localswim inception" --thread-id $env:CODEX_THREAD_ID --port 8794 --status-path C:\Temp\localswim-inception-monitor-status.json --target-path C:\Temp\localswim-inception-monitor-target.json --lock-path C:\Temp\localswim-inception-monitor.lock
+```
+
+Redirect standard output to `C:\Temp\localswim-inception-monitor.out.log` and standard
+error to `C:\Temp\localswim-inception-monitor.err.log`; the child process must inherit
+`PYTHONIOENCODING=utf-8`. The board-specific status, target, and lock paths are
+mandatory: reusing the FGA monitor defaults would retarget and displace the separate
+mandatory FGA-board monitor. Invoking the command again with these paths safely
+retargets the existing Inception monitor rather than creating a duplicate. Treat the
+status JSON as the sanitized health handoff. The monitor never reads board content and
+coalesces writes behind a trailing-edge 15-second quiet window. After an alert, inspect
+the persistent board through `localswim-cli`; routine alerts do not justify a GitHub
+visibility query.
+
 ## Git in the Codex sandbox
 
 The workspace may be owned by the interactive Windows account while Codex commands run
