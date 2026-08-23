@@ -14,8 +14,10 @@ serves a local swimlane board from one JSON snapshot.
 - `pyproject.toml` is the single build, dependency, Ruff, formatter, and Pyright
   configuration source; `uv.lock` is committed for reproducible development and CI.
 - `examples/board-description.example.json` and `examples/permissions.example.json`
-  are the human-readable initialization inputs. `examples/board.example.json` is their
-  checked, empty schema-4 output.
+  are generic human-readable initialization inputs. `examples/board.example.json` is
+  their checked, empty schema-4 output.
+- The parallel `examples/*.terry-workflow.json` files preserve Terry's preferred
+  personal workflow, also used by FGA, without making it the generic product default.
 - `docs/ORIENTATION.md` is the contributor map for architecture, data flow, schemas,
   invariants, test coverage, and Windows/Codex environment details.
 - `CONTRIBUTING.md` defines the enforced GitHub branch and pull-request policy.
@@ -46,6 +48,8 @@ serves a local swimlane board from one JSON snapshot.
 - An automation agent must not promote a backlog card to `ready_for_work` without
   explicit permission for that specific card, even though the edge exists for that
   exceptional case. It must never move its own work to `completed`.
+- Keep the checked generic and Terry-workflow examples distinct. Terry's seven-lane
+  workflow is an intentional public example of how he works, not a universal default.
 
 ## Code conventions
 

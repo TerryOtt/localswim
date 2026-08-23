@@ -10,6 +10,18 @@ from localswim import api_endpoint, board_state
 from tests.support import USERS
 
 
+def run_git(cwd: pathlib.Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run one isolated local Git command for autopush integration tests."""
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+
 def make_store(path: pathlib.Path) -> api_endpoint.BoardStore:
     """Persist an empty board and return its store."""
     board = board_state.Board(
@@ -139,6 +151,57 @@ def test_ignored_board_disables_autopush(tmp_path: pathlib.Path) -> None:
     board = tmp_path / "boards" / "private.json"
     board.parent.mkdir()
     assert api_endpoint.push_unavailable(board) == ("the board is ignored by git")
+
+
+def test_autopush_adopts_an_untracked_board_without_staging_other_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "state-store"
+    run_git(tmp_path, "init", "--bare", "--quiet", str(remote))
+    run_git(tmp_path, "init", "--initial-branch=main", "--quiet", str(repo))
+    run_git(repo, "config", "user.name", "localswim test")
+    run_git(repo, "config", "user.email", "localswim@example.invalid")
+    (repo / "anchor.txt").write_text("anchor\n", encoding="utf-8")
+    run_git(repo, "add", "anchor.txt")
+    run_git(repo, "commit", "--quiet", "-m", "Anchor")
+    run_git(repo, "remote", "add", "origin", str(remote))
+    run_git(repo, "push", "--quiet", "--set-upstream", "origin", "main")
+
+    board_path = repo / "localswim" / "board.json"
+    board_path.parent.mkdir()
+    board_state.save(
+        board_state.Board(
+            project="Untracked",
+            users=USERS,
+            browser_user="terry",
+            cli_user="bot",
+            default_owner="bot",
+        ),
+        board_path,
+    )
+    (repo / "unrelated.txt").write_text("must remain untracked\n", encoding="utf-8")
+
+    assert api_endpoint.push_unavailable(board_path) == ""
+    ok, detail = api_endpoint.push_board(board_path)
+
+    assert ok is True
+    assert detail == "committed and pushed"
+    assert run_git(repo, "status", "--short").stdout.splitlines() == ["?? unrelated.txt"]
+    first_head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert run_git(repo, "rev-parse", "@{upstream}").stdout.strip() == first_head
+
+    board = board_state.load(board_path)
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board_state.save(board, board_path)
+    ok, detail = api_endpoint.push_board(board_path)
+
+    assert ok is True
+    assert detail == "committed and pushed"
+    second_head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert second_head != first_head
+    assert run_git(repo, "rev-parse", "@{upstream}").stdout.strip() == second_head
+    assert run_git(repo, "status", "--short").stdout.splitlines() == ["?? unrelated.txt"]
 
 
 def test_autopush_is_disabled_unless_explicitly_enabled(

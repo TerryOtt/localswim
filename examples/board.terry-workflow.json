@@ -1,0 +1,300 @@
+{
+  "schema": 4,
+  "revision": 0,
+  "project": "Terry workflow example",
+  "port": 8793,
+  "policy": {
+    "schema": 6,
+    "note": "Resolved once from board description and name-based permissions during initialization.",
+    "priorities": [
+      {
+        "id": "P0",
+        "label": "On fire"
+      },
+      {
+        "id": "P1",
+        "label": "Urgent"
+      },
+      {
+        "id": "P2",
+        "label": "High"
+      },
+      {
+        "id": "P3",
+        "label": "Normal"
+      },
+      {
+        "id": "P4",
+        "label": "Low"
+      },
+      {
+        "id": "P5",
+        "label": "Only if idle"
+      }
+    ],
+    "lanes": [
+      {
+        "id": "backlog",
+        "label": "Backlog",
+        "create": [
+          "bot",
+          "terry"
+        ],
+        "note": "Someday work selected by the human."
+      },
+      {
+        "id": "ready_for_work",
+        "label": "Ready For Work",
+        "create": [
+          "bot",
+          "terry"
+        ],
+        "note": "Selected work, ordered by priority."
+      },
+      {
+        "id": "in_progress",
+        "label": "In progress",
+        "create": [],
+        "note": "Work actively being performed."
+      },
+      {
+        "id": "blocked",
+        "label": "Blocked",
+        "create": [],
+        "note": "Neither actor can proceed because action depends on an external change."
+      },
+      {
+        "id": "needs_terry_action",
+        "label": "Needs Terry",
+        "create": [],
+        "note": "Bot is stopped until Terry answers, decides, or personally acts."
+      },
+      {
+        "id": "ready_for_review",
+        "label": "Ready for review",
+        "create": [],
+        "note": "Bot believes the work is done and awaits Terry's signoff."
+      },
+      {
+        "id": "completed",
+        "label": "Completed",
+        "create": [],
+        "note": "Signed-off terminal work."
+      }
+    ],
+    "edges": {
+      "terry": [
+        {
+          "from": "backlog",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "backlog",
+          "to": "in_progress"
+        },
+        {
+          "from": "backlog",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "backlog"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "in_progress"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "in_progress",
+          "to": "blocked"
+        },
+        {
+          "from": "in_progress",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_review"
+        },
+        {
+          "from": "blocked",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "blocked",
+          "to": "in_progress"
+        },
+        {
+          "from": "blocked",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "backlog"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "in_progress"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "ready_for_review"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "backlog"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "in_progress"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "completed"
+        }
+      ],
+      "bot": [
+        {
+          "from": "backlog",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "backlog",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "backlog"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "in_progress"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "blocked"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "in_progress",
+          "to": "backlog"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "in_progress",
+          "to": "blocked"
+        },
+        {
+          "from": "in_progress",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_review"
+        },
+        {
+          "from": "blocked",
+          "to": "backlog"
+        },
+        {
+          "from": "blocked",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "blocked",
+          "to": "in_progress"
+        },
+        {
+          "from": "blocked",
+          "to": "needs_terry_action"
+        },
+        {
+          "from": "blocked",
+          "to": "ready_for_review"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "backlog"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "in_progress"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "blocked"
+        },
+        {
+          "from": "needs_terry_action",
+          "to": "ready_for_review"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "backlog"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "in_progress"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "blocked"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "needs_terry_action"
+        }
+      ]
+    },
+    "defaultPriority": "P3"
+  },
+  "users": [
+    {
+      "id": "terry",
+      "label": "Terry",
+      "class": "human",
+      "color": "#2266AA"
+    },
+    {
+      "id": "bot",
+      "label": "Bot",
+      "class": "bot",
+      "color": "#AA6622"
+    }
+  ],
+  "browserUser": "terry",
+  "cliUser": "bot",
+  "defaultOwner": "bot",
+  "nextTicket": 1,
+  "items": []
+}

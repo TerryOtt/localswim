@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "project": "Terry workflow example",
+  "port": 8793,
+  "users": [
+    {
+      "id": "terry",
+      "label": "Terry",
+      "class": "human",
+      "color": "#2266AA"
+    },
+    {
+      "id": "bot",
+      "label": "Bot",
+      "class": "bot",
+      "color": "#AA6622"
+    }
+  ],
+  "browserUser": "terry",
+  "cliUser": "bot",
+  "defaultOwner": "bot",
+  "priorities": [
+    {
+      "id": "P0",
+      "label": "On fire"
+    },
+    {
+      "id": "P1",
+      "label": "Urgent"
+    },
+    {
+      "id": "P2",
+      "label": "High"
+    },
+    {
+      "id": "P3",
+      "label": "Normal"
+    },
+    {
+      "id": "P4",
+      "label": "Low"
+    },
+    {
+      "id": "P5",
+      "label": "Only if idle"
+    }
+  ],
+  "defaultPriority": "P3",
+  "lanes": [
+    {
+      "name": "Backlog",
+      "note": "Someday work selected by the human."
+    },
+    {
+      "name": "Ready For Work",
+      "note": "Selected work, ordered by priority."
+    },
+    {
+      "name": "In progress",
+      "note": "Work actively being performed."
+    },
+    {
+      "name": "Blocked",
+      "note": "Neither actor can proceed because action depends on an external change."
+    },
+    {
+      "id": "needs_terry_action",
+      "name": "Needs Terry",
+      "note": "Bot is stopped until Terry answers, decides, or personally acts."
+    },
+    {
+      "name": "Ready for review",
+      "note": "Bot believes the work is done and awaits Terry's signoff."
+    },
+    {
+      "name": "Completed",
+      "note": "Signed-off terminal work."
+    }
+  ]
+}

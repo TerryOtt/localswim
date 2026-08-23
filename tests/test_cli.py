@@ -174,6 +174,125 @@ def test_read_only_report_works_offline(tmp_path: pathlib.Path) -> None:
     assert "Offline report" in result.stdout
 
 
+def activity_board(path: pathlib.Path) -> None:
+    """Write every persisted activity shape at deterministic timestamps."""
+    board = board_state.Board(
+        project="Activity",
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
+    )
+    board.create("alpha", "Private subject", "ready_for_work", "bot")
+    alpha = board.find("alpha")
+    alpha.history[-1].at = "2026-08-23T10:00:00Z"
+    board.move("alpha", "in_progress", "bot")
+    alpha.history[-1].at = "2026-08-23T10:01:00Z"
+    board.assign("alpha", "terry", "bot")
+    alpha.history[-1].at = "2026-08-23T10:02:00Z"
+    board.set_priority("alpha", "P1", "bot")
+    alpha.history[-1].at = "2026-08-23T10:03:00Z"
+    board.comment("alpha", "private board words", "bot")
+    alpha.comments[-1].at = "2026-08-23T10:04:00Z"
+    board.create("beta", "Later private subject", "backlog", "bot")
+    board.find("beta").history[-1].at = "2026-08-23T10:06:00Z"
+    board_state.save(board, path)
+
+
+def test_activity_between_is_inclusive_chronological_and_sanitized(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+
+    result = run_cli(
+        path,
+        "--activity-between",
+        "2026-08-23T10:01:00Z",
+        "2026-08-23T10:04:00Z",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert [
+        result.stdout.index(kind) for kind in ("moved", "assigned", "prioritized", "commented")
+    ] == sorted(
+        result.stdout.index(kind) for kind in ("moved", "assigned", "prioritized", "commented")
+    )
+    assert "2026-08-23T10:01:00Z" in result.stdout
+    assert "2026-08-23T10:04:00Z" in result.stdout
+    assert "2026-08-23T10:00:00Z" not in result.stdout
+    assert "2026-08-23T10:06:00Z" not in result.stdout
+    assert "private board words" not in result.stdout
+    assert "Private subject" not in result.stdout
+    assert "19 character(s)" in result.stdout
+
+
+def test_activity_since_json_is_composable_and_omits_comment_text(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+
+    result = run_cli(path, "--activity-since", "2026-08-23T10:00:00Z", "--json")
+
+    assert result.returncode == 0, result.stderr
+    events = cast("list[dict[str, Any]]", json.loads(result.stdout))
+    assert [event["kind"] for event in events] == [
+        "created",
+        "moved",
+        "assigned",
+        "prioritized",
+        "commented",
+        "created",
+    ]
+    comment = next(event for event in events if event["kind"] == "commented")
+    assert comment["commentChars"] == 19
+    assert "text" not in comment
+    assert "instant" not in comment
+    assert "sequence" not in comment
+    assert "private board words" not in result.stdout
+    assert "Private subject" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (("--activity-since", "2026-08-23T10:00:00"), "UTC offset"),
+        (
+            (
+                "--activity-between",
+                "2026-08-23T10:01:00Z",
+                "2026-08-23T10:00:00Z",
+            ),
+            "END must not be earlier",
+        ),
+        (
+            (
+                "--activity-since",
+                "2026-08-23T10:00:00Z",
+                "--comment",
+                "alpha",
+                "no",
+            ),
+            "cannot be combined",
+        ),
+    ],
+)
+def test_activity_query_rejects_invalid_or_conflicting_arguments(
+    tmp_path: pathlib.Path,
+    arguments: tuple[str, ...],
+    message: str,
+) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+
+    result = run_cli(path, *arguments)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_cli_migrates_lane_state_and_history_offline(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     with socket.socket() as candidate:

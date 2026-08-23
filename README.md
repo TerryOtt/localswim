@@ -44,6 +44,16 @@ would. Initialization resolves those names, generates readable lane slugs once, 
 collisions, and persists the resolved policy inside the new board. The checked
 [example board](examples/board.example.json) is the resulting valid, empty snapshot.
 
+The generic example stays deliberately small. A second checked
+[Terry workflow description](examples/board-description.terry-workflow.json),
+[permission input](examples/permissions.terry-workflow.json), and generated
+[board](examples/board.terry-workflow.json) preserve Terry's preferred seven-lane
+workflow, also used by FGA:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json --init examples/board-description.terry-workflow.json examples/permissions.terry-workflow.json
+~~~
+
 The important fields are:
 
 | Field | Meaning |
@@ -74,6 +84,21 @@ uv run --frozen localswim-cli boards/my-project.json
 uv run --frozen localswim-cli boards/my-project.json --verify
 uv run --frozen localswim-cli boards/my-project.json --json
 ~~~
+
+Time-bounded activity reports combine card creation, movement, assignment, priority,
+and comment events into one chronological stream:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json --activity-since 2026-08-23T10:53:09-04:00
+uv run --frozen localswim-cli boards/my-project.json --activity-between 2026-08-23T10:53:09-04:00 2026-08-23T11:09:02-04:00 --json
+~~~
+
+Bounds are inclusive and require RFC 3339 timestamps with an explicit UTC offset.
+Output is intentionally safe for coordination: it identifies the card, event, actor,
+and changed lane, owner, or priority, but never emits card prose or comment text.
+Comment events expose only their character count. Events recorded in different history
+arrays at the same instant have deterministic output order, not a recoverable causal
+order.
 
 CLI mutations use the running REST service so browser and CLI writes share validation,
 locking and revision checks:
@@ -167,8 +192,10 @@ uv run --frozen localswim --autopush path/to/board.json
 ~~~
 
 When enabled, the server commits only the board path after five quiet seconds and pushes
-the board repository's current branch. It refuses ignored boards, non-repositories and
-repositories without a remote; it cannot prove that a configured remote is private.
+the board repository's current branch. A valid new board that is not yet tracked is
+adopted on the first pass; unrelated tracked or untracked files remain untouched. The
+server refuses ignored boards, non-repositories and repositories without a remote; it
+cannot prove that a configured remote is private.
 
 ## REST API
 

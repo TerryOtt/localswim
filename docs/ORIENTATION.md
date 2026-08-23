@@ -45,9 +45,8 @@ saved, and only then published as the current in-memory snapshot.
 | `src/localswim/rules.json` | Checked legacy/default policy used by controlled migrations. |
 | `pyproject.toml` | uv build metadata, Python contract, dependencies, Ruff/formatter policy, and strict Pyright policy. |
 | `.python-version` / `uv.lock` | Exact development interpreter and cross-platform dependency lock. |
-| `examples/board-description.example.json` | Human-readable users, priorities, and lane names for initialization. |
-| `examples/permissions.example.json` | Name-based creation and movement permissions for initialization. |
-| `examples/board.example.json` | Empty schema-4 board generated from those inputs. |
+| `examples/*.example.json` | Generic human-readable initialization inputs and their checked empty schema-4 board. |
+| `examples/*.terry-workflow.json` | Terry's preferred seven-lane workflow inputs and their checked empty schema-4 board. |
 | `check.py` | Complete local/CI gate: line endings, Ruff, formatting, strict Pyright, pytest, workflow/shell linting, and US English vocabulary. |
 | `tests/` | Domain, policy, serialization, store, API, CLI, docs, and gate behavior. |
 | `src/localswim/vendor/typefaces/inter/` | Unmodified Inter WOFF2 subsets and their SIL OFL license. |
@@ -166,7 +165,10 @@ linking. Explicit CLI/API links remain available to either authenticated actor.
 
 ## Lane policy and the non-table rule
 
-The FGA/default embedded policy is the executable allow-list. Its lane meanings are:
+Each board's embedded policy is its executable allow-list. The small generic example
+is the product-oriented starting point. The separately checked Terry-workflow example
+preserves Terry's preferred personal workflow, also used by FGA, whose lane meanings
+are:
 
 | Lane | Meaning |
 |---|---|
@@ -255,6 +257,14 @@ mutations do not write the file directly: they locate the running service, fetch
 revision, and use the same REST mutation path as the browser. CLI mutations are always
 attributed to `cliUser`; there is no impersonation flag.
 
+`--activity-since` and `--activity-between` merge creation, movement, assignment,
+priority, and comment audit records into an inclusive chronological report. Their RFC
+3339 bounds must carry an explicit UTC offset. The report intentionally omits card
+subjects, details, and comment text; JSON output is therefore composable without
+turning routine coordination into a prose export. Cross-array events recorded at the
+same instant have a deterministic tie-break order, because the snapshot cannot recover
+their original causal order.
+
 ## Board-data placement
 
 A board contains identities, prose, comments, and audit history. Inside this public
@@ -299,11 +309,12 @@ distinct builds instead of sharing one generic dirty ID.
 five quiet seconds after the latest board write, commits only the board path, and pushes
 the board repository's current branch.
 
-It refuses boards that are ignored, outside a Git repository, or in a repository with
-no remote. It cannot establish that a configured remote is private. A failed push keeps
-the successful local commit so a later push can carry it; the UI reports the failure.
-The ignored `boards/` directory in this public source checkout is therefore for local
-data, not for autopush.
+The first pass adopts an otherwise valid untracked board at that exact path. It neither
+stages nor commits unrelated tracked or untracked files. It refuses boards that are
+ignored, outside a Git repository, or in a repository with no remote. It cannot
+establish that a configured remote is private. A failed push keeps the successful local
+commit so a later push can carry it; the UI reports the failure. The ignored `boards/`
+directory in this public source checkout is therefore for local data, not for autopush.
 
 ## Tests and development gate
 
@@ -314,10 +325,10 @@ The suite spans these boundaries:
 | `test_board.py` | Card operations, transitions, history, links, hierarchy, and sorting. |
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |
 | `test_policy.py` | Policy immutability, strict edge parsing, actor matching, isolation, and reload. |
-| `test_store.py` | Transactionality, revision races, board placement, and autopush startup. |
+| `test_store.py` | Transactionality, revision races, board placement, and autopush integration. |
 | `test_api.py` | Real threaded loopback routes, auth, revisions, redirects, and code restart. |
-| `test_cli.py` | CLI-to-service mutations, initialization, and offline migrations. |
-| `test_docs.py` | Checked initialization inputs and generated example board. |
+| `test_cli.py` | CLI-to-service mutations, activity reports, initialization, and offline migrations. |
+| `test_docs.py` | Checked generic and Terry-workflow initialization inputs and generated boards. |
 | `test_check.py` | Gate line-ending parser. |
 | `conftest.py` | Standard isolated Terry/Bot cast and empty board fixtures. |
 

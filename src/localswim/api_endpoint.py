@@ -366,7 +366,8 @@ def _reexec_if_requested() -> None:
 #
 # **It is OFF unless the process starts with `--autopush`.** A board contains
 # identities, descriptions, comments, and audit history. The server can validate that
-# the board is tracked and has a remote; it cannot prove that remote is private.
+# the board has a usable repository and remote; it cannot prove that remote is private.
+# A valid new board may still be untracked, and autopush adopts only that exact path.
 #
 # **The hole this closes:** the board lived on a NAS and reached GitHub only when
 # Claude happened to be in session and happened to run `git push`. **Terry drags ten
@@ -441,14 +442,19 @@ def push_unavailable(board_path: pathlib.Path) -> str:
 def push_board(board_path: pathlib.Path) -> tuple[bool, str]:
     """Commit the board file and push it. Returns (ok, one-line detail).
 
-    **It stages NOTHING and commits BY PATHSPEC**, which is the safety property rather
-    than a style choice. `git commit -- <board>` ignores the index and takes only that
-    one file. **A stray file in the working tree cannot ride along** -- and one was
-    found in the FGA repo the same day this was written, a 28-byte probe left behind by
-    a `cd` in the wrong shell. `git add -A` in a loop would have published it.
+    **It stages and commits only the exact board path**, which is the safety property
+    rather than a style choice. A stray file in the working tree cannot ride along.
+
+    `git diff` does not report untracked files. The original change check therefore
+    returned clean for a newly initialized board, and autopush announced success while
+    leaving the only snapshot outside Git. Path-bounded porcelain status sees tracked,
+    staged, and untracked changes without widening what the later add may stage.
     """
     cwd = board_path.parent
-    if _git(["diff", "--quiet", "HEAD", "--", str(board_path)], cwd).returncode == 0:
+    status = _git(["status", "--porcelain=v1", "--untracked-files=all", "--", str(board_path)], cwd)
+    if status.returncode != 0:
+        return False, f"git status failed: {status.stderr.strip()[:200]}"
+    if not status.stdout.strip():
         return True, "no board change to commit"
     when = datetime.datetime.now(tz=datetime.UTC).astimezone()
     # Terry's stamp format, from his display preferences: `2026-08-19 02:56pm`.

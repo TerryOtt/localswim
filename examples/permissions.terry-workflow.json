@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "create": {
+    "Backlog": [
+      "Bot",
+      "Terry"
+    ],
+    "Ready For Work": [
+      "Bot",
+      "Terry"
+    ],
+    "In progress": [],
+    "Blocked": [],
+    "Needs Terry": [],
+    "Ready for review": [],
+    "Completed": []
+  },
+  "moves": {
+    "Terry": [
+      { "from": "Backlog", "to": "Ready For Work" },
+      { "from": "Backlog", "to": "In progress" },
+      { "from": "Backlog", "to": "Needs Terry" },
+      { "from": "Ready For Work", "to": "Backlog" },
+      { "from": "Ready For Work", "to": "In progress" },
+      { "from": "Ready For Work", "to": "Needs Terry" },
+      { "from": "In progress", "to": "Ready For Work" },
+      { "from": "In progress", "to": "Blocked" },
+      { "from": "In progress", "to": "Needs Terry" },
+      { "from": "In progress", "to": "Ready for review" },
+      { "from": "Blocked", "to": "Ready For Work" },
+      { "from": "Blocked", "to": "In progress" },
+      { "from": "Blocked", "to": "Needs Terry" },
+      { "from": "Needs Terry", "to": "Backlog" },
+      { "from": "Needs Terry", "to": "Ready For Work" },
+      { "from": "Needs Terry", "to": "In progress" },
+      { "from": "Needs Terry", "to": "Ready for review" },
+      { "from": "Ready for review", "to": "Backlog" },
+      { "from": "Ready for review", "to": "Ready For Work" },
+      { "from": "Ready for review", "to": "In progress" },
+      { "from": "Ready for review", "to": "Completed" }
+    ],
+    "Bot": [
+      { "from": "Backlog", "to": "Ready For Work" },
+      { "from": "Backlog", "to": "Needs Terry" },
+      { "from": "Ready For Work", "to": "Backlog" },
+      { "from": "Ready For Work", "to": "In progress" },
+      { "from": "Ready For Work", "to": "Blocked" },
+      { "from": "Ready For Work", "to": "Needs Terry" },
+      { "from": "In progress", "to": "Backlog" },
+      { "from": "In progress", "to": "Ready For Work" },
+      { "from": "In progress", "to": "Blocked" },
+      { "from": "In progress", "to": "Needs Terry" },
+      { "from": "In progress", "to": "Ready for review" },
+      { "from": "Blocked", "to": "Backlog" },
+      { "from": "Blocked", "to": "Ready For Work" },
+      { "from": "Blocked", "to": "In progress" },
+      { "from": "Blocked", "to": "Needs Terry" },
+      { "from": "Blocked", "to": "Ready for review" },
+      { "from": "Needs Terry", "to": "Backlog" },
+      { "from": "Needs Terry", "to": "Ready For Work" },
+      { "from": "Needs Terry", "to": "In progress" },
+      { "from": "Needs Terry", "to": "Blocked" },
+      { "from": "Needs Terry", "to": "Ready for review" },
+      { "from": "Ready for review", "to": "Backlog" },
+      { "from": "Ready for review", "to": "Ready For Work" },
+      { "from": "Ready for review", "to": "In progress" },
+      { "from": "Ready for review", "to": "Blocked" },
+      { "from": "Ready for review", "to": "Needs Terry" }
+    ]
+  }
+}

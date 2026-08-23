@@ -1579,6 +1579,68 @@ class Comment:
         return cls(at=str(values["at"]), by=str(values["by"]), text=str(values["text"]))
 
 
+@dataclass(frozen=True)
+class ActivityEvent:
+    """One sanitized, time-addressable board event for CLI inspection.
+
+    Comment text is deliberately absent. A board-write monitor needs to identify what
+    changed, not copy private prose into a terminal transcript. The source timestamp is
+    retained verbatim for audit output while `instant` supplies a comparable value.
+    """
+
+    ticket: int
+    item_id: str
+    kind: str
+    at: str
+    instant: datetime.datetime
+    by: str
+    lane_from: str | None = None
+    lane_to: str | None = None
+    owner_from: str | None = None
+    owner_to: str | None = None
+    priority_from: str | None = None
+    priority_to: str | None = None
+    comment_chars: int | None = None
+    sequence: int = 0
+
+    def to_json(self) -> JsonObject:
+        """Return the public CLI shape without the internal sort fields."""
+        out: JsonObject = {
+            "ticket": self.ticket,
+            "id": self.item_id,
+            "kind": self.kind,
+            "at": self.at,
+            "by": self.by,
+        }
+        if self.lane_from is not None:
+            out["from"] = self.lane_from
+        if self.lane_to is not None:
+            out["to"] = self.lane_to
+        if self.owner_from is not None:
+            out["ownerFrom"] = self.owner_from
+        if self.owner_to is not None:
+            out["ownerTo"] = self.owner_to
+        if self.priority_from is not None:
+            out["priorityFrom"] = self.priority_from
+        if self.priority_to is not None:
+            out["priorityTo"] = self.priority_to
+        if self.comment_chars is not None:
+            out["commentChars"] = self.comment_chars
+        return out
+
+    def describe(self) -> str:
+        """One compact human-readable line with no card or comment prose."""
+        base = f"{self.at}  #{self.ticket:04d} {self.item_id}  {self.kind} by {self.by}"
+        if self.kind in {"created", "moved"}:
+            source = self.lane_from if self.lane_from is not None else "(new)"
+            return f"{base}  {source} -> {self.lane_to}"
+        if self.kind == "assigned":
+            return f"{base}  {self.owner_from} -> {self.owner_to}"
+        if self.kind == "prioritized":
+            return f"{base}  {self.priority_from} -> {self.priority_to}"
+        return f"{base}  {self.comment_chars} character(s)"
+
+
 @dataclass
 class Item:
     """One card.
@@ -3390,6 +3452,52 @@ def _add_offline_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_activity_arguments(parser: argparse.ArgumentParser) -> None:
+    """Keep the mutually exclusive read-window flags together."""
+    activity = parser.add_mutually_exclusive_group()
+    activity.add_argument(
+        "--activity-since",
+        metavar="RFC3339_TIMESTAMP",
+        help="list sanitized events at or after one RFC 3339 timestamp",
+    )
+    activity.add_argument(
+        "--activity-between",
+        nargs=2,
+        metavar=("START", "END"),
+        help="list sanitized events in one inclusive RFC 3339 time window",
+    )
+
+
+def _activity_requested(args: argparse.Namespace) -> bool:
+    """Whether this invocation selects either activity report."""
+    return bool(args.activity_since or args.activity_between)
+
+
+def _validate_activity_arguments(args: argparse.Namespace) -> None:
+    """Refuse activity queries combined with any write or integrity operation."""
+    if not _activity_requested(args):
+        return
+    if (
+        args.verify
+        or any(getattr(args, name) for name in MUTATIONS)
+        or any(
+            (
+                args.init,
+                args.embed_policy,
+                args.migrate_lane,
+                args.rename_lane_label,
+                args.migrate_lane_id,
+                args.state,
+                args.priority,
+                args.owner,
+                args.detail,
+                args.detail_file,
+            )
+        )
+    ):
+        raise BoardError("activity queries cannot be combined with writes, migrations, or --verify")
+
+
 def _run_offline_operation(args: argparse.Namespace) -> str | None:
     """Validate and execute exactly one requested offline operation."""
     operations = (
@@ -3411,6 +3519,8 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         or args.owner
         or args.detail
         or args.detail_file
+        or args.activity_since
+        or args.activity_between
     )
     if conflict:
         raise BoardError("offline board setup and migration flags cannot be combined")
@@ -3435,6 +3545,7 @@ def main() -> None:
         action="store_true",
         help="replay every history and refuse a state it disagrees with",
     )
+    _add_activity_arguments(ap)
     _add_offline_arguments(ap)
     ap.add_argument("--move", nargs=2, metavar=("ID", "STATE"), help="move one card")
     ap.add_argument(
@@ -3532,6 +3643,7 @@ def main() -> None:
     args = ap.parse_args()
 
     try:
+        _validate_activity_arguments(args)
         offline_result = _run_offline_operation(args)
     except BoardError as exc:
         ap.error(str(exc))
@@ -3550,7 +3662,15 @@ def main() -> None:
         print(f"  {result}")
         return
 
-    _report(load(args.board), args)
+    board = load(args.board)
+    if _activity_requested(args):
+        try:
+            bounds = _activity_bounds(args)
+            _report_activity(board, *bounds, as_json=bool(args.json))
+        except BoardError as exc:
+            ap.error(str(exc))
+        return
+    _report(board, args)
 
 
 # **ONE TABLE, so a write flag cannot be added in one place and forgotten in another.**
@@ -3593,6 +3713,146 @@ def _detail_text(args: argparse.Namespace) -> str:
     if args.detail_file:
         return args.detail_file.read_text(encoding="utf-8").rstrip("\n")
     return str(args.detail)
+
+
+_RFC3339 = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})")
+
+
+def _parse_activity_bound(raw: str, option: str) -> datetime.datetime:
+    """Parse one strict, offset-bearing RFC 3339 CLI boundary."""
+    if _RFC3339.fullmatch(raw) is None:
+        raise BoardError(f"{option} requires an RFC 3339 timestamp with a UTC offset")
+    try:
+        parsed = datetime.datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise BoardError(f"{option} has an invalid timestamp: {raw!r}") from exc
+    if parsed.utcoffset() is None:
+        raise BoardError(f"{option} requires an RFC 3339 timestamp with a UTC offset")
+    return parsed
+
+
+def _activity_bounds(
+    args: argparse.Namespace,
+) -> tuple[datetime.datetime, datetime.datetime | None]:
+    """Resolve the selected CLI activity window, inclusive at both boundaries."""
+    since = cast("str | None", args.activity_since)
+    if since is not None:
+        return _parse_activity_bound(since, "--activity-since"), None
+    between = cast("list[str] | None", args.activity_between)
+    if between is None:
+        raise BoardError("activity query has no time bounds")
+    start = _parse_activity_bound(between[0], "--activity-between START")
+    end = _parse_activity_bound(between[1], "--activity-between END")
+    if end < start:
+        raise BoardError("--activity-between END must not be earlier than START")
+    return start, end
+
+
+def _event_instant(raw: str, where: str) -> datetime.datetime:
+    """Parse a stored event timestamp and refuse to hide malformed audit data."""
+    instant = parse_stamp(raw)
+    if instant == _BEGINNING_OF_TIME:
+        raise BoardError(f"{where} has an unreadable timestamp {raw!r}")
+    return instant
+
+
+def activity_events(
+    board: Board,
+    start: datetime.datetime,
+    end: datetime.datetime | None,
+) -> list[ActivityEvent]:
+    """Return sanitized events in one inclusive window, oldest first.
+
+    History and comments are separate persisted arrays, so events sharing a one-second
+    timestamp have no recoverable cross-array causal order. Ticket, source sequence,
+    and kind provide a deterministic tie-break without pretending otherwise.
+    """
+    events: list[ActivityEvent] = []
+    for item in board.items:
+        for index, change in enumerate(item.history):
+            instant = _event_instant(change.at, f"{item.id} history[{index}]")
+            if instant < start or (end is not None and instant > end):
+                continue
+            if change.kind == "lane":
+                kind = "created" if change.frm is None else "moved"
+                event = ActivityEvent(
+                    ticket=item.ticket,
+                    item_id=item.id,
+                    kind=kind,
+                    at=change.at,
+                    instant=instant,
+                    by=change.by,
+                    lane_from=change.frm,
+                    lane_to=change.to,
+                    sequence=index,
+                )
+            elif change.kind == "owner":
+                event = ActivityEvent(
+                    ticket=item.ticket,
+                    item_id=item.id,
+                    kind="assigned",
+                    at=change.at,
+                    instant=instant,
+                    by=change.by,
+                    owner_from=change.owner_frm,
+                    owner_to=change.owner_to,
+                    sequence=index,
+                )
+            else:
+                event = ActivityEvent(
+                    ticket=item.ticket,
+                    item_id=item.id,
+                    kind="prioritized",
+                    at=change.at,
+                    instant=instant,
+                    by=change.by,
+                    priority_from=change.priority_frm,
+                    priority_to=change.priority_to,
+                    sequence=index,
+                )
+            events.append(event)
+        for index, comment in enumerate(item.comments):
+            instant = _event_instant(comment.at, f"{item.id} comments[{index}]")
+            if instant < start or (end is not None and instant > end):
+                continue
+            events.append(
+                ActivityEvent(
+                    ticket=item.ticket,
+                    item_id=item.id,
+                    kind="commented",
+                    at=comment.at,
+                    instant=instant,
+                    by=comment.by,
+                    comment_chars=len(comment.text),
+                    sequence=len(item.history) + index,
+                )
+            )
+    return sorted(
+        events, key=lambda event: (event.instant, event.ticket, event.sequence, event.kind)
+    )
+
+
+def _report_activity(
+    board: Board,
+    start: datetime.datetime,
+    end: datetime.datetime | None,
+    *,
+    as_json: bool,
+) -> None:
+    """Print one sanitized activity query in JSON or compact human form."""
+    drift = board.verify()
+    if drift:
+        raise BoardError(f"activity query refused {len(drift)} audit-trail problem(s): {drift[0]}")
+    events = activity_events(board, start, end)
+    if as_json:
+        payload: list[JsonValue] = [cast("JsonValue", event.to_json()) for event in events]
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    if not events:
+        print("  No activity in the requested window.")
+        return
+    for event in events:
+        print(f"  {event.describe()}")
 
 
 def _report(board: Board, args: argparse.Namespace) -> None:
