@@ -352,8 +352,12 @@ def _reexec_if_requested() -> None:
     if not _restart_requested.is_set():
         return
     print("Re-executing with changed Python source.", flush=True)
+    # `argparse` parses these same raw option tokens again in `main`. Do not reuse
+    # `sys.argv[0]`: a uv Windows console shim reports an extensionless launcher path,
+    # which the Python interpreter cannot open as a script.
     os.execv(  # noqa: S606 -- deliberately replace this process with the same interpreter
-        sys.executable, [sys.executable, *sys.argv]
+        sys.executable,
+        [sys.executable, "-m", "localswim.api_endpoint", *sys.argv[1:]],
     )
 
 

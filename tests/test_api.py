@@ -253,7 +253,7 @@ def test_source_startup_problem_reports_child_import_failure(
     assert problem == "startup check failed: NameError: broken startup"
 
 
-def test_requested_restart_reexecs_the_original_python_command(
+def test_requested_restart_reexecs_the_module_with_original_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, list[str]]] = []
@@ -272,7 +272,12 @@ def test_requested_restart_reexecs_the_original_python_command(
     assert calls == [
         (
             api_endpoint.sys.executable,
-            [api_endpoint.sys.executable, *api_endpoint.sys.argv],
+            [
+                api_endpoint.sys.executable,
+                "-m",
+                "localswim.api_endpoint",
+                *api_endpoint.sys.argv[1:],
+            ],
         )
     ]
 
