@@ -1124,7 +1124,7 @@ PAGE = """<!doctype html>
      bar currently has two tiers on purpose rather than by omission. */
   #bar #live, #bar #alerts-wrap, #bar .meta { color: var(--bardim); }
   /* The product wordmark and board name share the approved 15px title typography but
-     have different emphasis. `Localswim` uses the logo's light blue instead of white,
+     have different emphasis. `localswim` uses the logo's light blue instead of white,
      so the static mark and word read as one product identity. The board name retains
      bright white because it is the changing context inside that product. */
   #wordmark, #title { font-weight: 700; letter-spacing: -.01em; font-size: 15px;
@@ -1224,7 +1224,7 @@ PAGE = """<!doctype html>
 
      **The mark is locked to the product name, not the board name.** Putting a board's
      title directly beside the logo made the board look like the product. The wrapper
-     now contains the mark plus the literal `Localswim` wordmark; the board title is a
+     now contains the mark plus the literal `localswim` wordmark; the board title is a
      separate bright-white sibling.
 
      **Both sides of the product lockup use the same 36px separation.** `#bar` supplies
@@ -1694,7 +1694,7 @@ PAGE = """<!doctype html>
 <body>
   <div id="bar">
     <span id="dot"></span>
-    <span id="brandtitle"><span id="brand"></span><span id="wordmark">Localswim</span></span>
+    <span id="brandtitle"><span id="brand"></span><span id="wordmark">localswim</span></span>
     <span id="title">%TITLE%</span>
     <span id="counts"></span>
     <span class="grow"></span>
