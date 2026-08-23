@@ -29,7 +29,7 @@ Repository = "https://github.com/TerryOtt/localswim"
 
 [project.scripts]
 localswim = "localswim.api_endpoint:main"
-localswim-board = "localswim.board_state:main"
+localswim-cli = "localswim.board_state:main"
 
 [dependency-groups]
 dev = [

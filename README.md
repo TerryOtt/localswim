@@ -16,7 +16,7 @@ Clone the repository and create a private board from the checked description and
 name-based permission examples:
 
 ~~~text
-uv run --frozen localswim-board boards/my-project.json --init examples/board-description.example.json examples/permissions.example.json
+uv run --frozen localswim-cli boards/my-project.json --init examples/board-description.example.json examples/permissions.example.json
 ~~~
 
 Then start the service:
@@ -70,21 +70,21 @@ The browser supports creating, moving, editing, assigning, prioritizing and rela
 cards. The CLI can inspect the snapshot while the service is stopped or running:
 
 ~~~console
-uv run --frozen localswim-board boards/my-project.json
-uv run --frozen localswim-board boards/my-project.json --verify
-uv run --frozen localswim-board boards/my-project.json --json
+uv run --frozen localswim-cli boards/my-project.json
+uv run --frozen localswim-cli boards/my-project.json --verify
+uv run --frozen localswim-cli boards/my-project.json --json
 ~~~
 
 CLI mutations use the running REST service so browser and CLI writes share validation,
 locking and revision checks:
 
 ~~~console
-uv run --frozen localswim-board boards/my-project.json --create docs "Write setup docs" --state ready_for_work
-uv run --frozen localswim-board boards/my-project.json --comment docs "First draft is ready"
-uv run --frozen localswim-board boards/my-project.json --move docs in_progress
+uv run --frozen localswim-cli boards/my-project.json --create docs "Write setup docs" --state ready_for_work
+uv run --frozen localswim-cli boards/my-project.json --comment docs "First draft is ready"
+uv run --frozen localswim-cli boards/my-project.json --move docs in_progress
 ~~~
 
-Run **uv run --frozen localswim-board --help** for the complete command list. CLI changes are
+Run **uv run --frozen localswim-cli --help** for the complete command list. CLI changes are
 attributed to cliUser; browser changes are attributed to browserUser. Request bodies
 cannot choose another identity.
 
@@ -93,13 +93,13 @@ permissions travel atomically with its state. With the service stopped, upgrade 
 schema-3 board with the policy it already uses:
 
 ~~~console
-uv run --frozen localswim-board boards/my-project.json --embed-policy path/to/rules.json
+uv run --frozen localswim-cli boards/my-project.json --embed-policy path/to/rules.json
 ~~~
 
 The earlier schema-2 Ready For Work migration also produces a schema-4 board:
 
 ~~~console
-uv run --frozen localswim-board boards/my-project.json --migrate-lane <old-lane-id> ready_for_work
+uv run --frozen localswim-cli boards/my-project.json --migrate-lane <old-lane-id> ready_for_work
 ~~~
 
 Every structural migration refuses a listening board port, validates and replays the
@@ -108,8 +108,8 @@ complete result before replacing the file, and increments the board revision.
 Display renames and identity migrations are deliberately different operations:
 
 ~~~console
-uv run --frozen localswim-board boards/my-project.json --rename-lane-label ready_for_work "Selected Work"
-uv run --frozen localswim-board boards/my-project.json --migrate-lane-id ready_for_work selected_work
+uv run --frozen localswim-cli boards/my-project.json --rename-lane-label ready_for_work "Selected Work"
+uv run --frozen localswim-cli boards/my-project.json --migrate-lane-id ready_for_work selected_work
 ~~~
 
 The first changes only presentation. The second atomically rewrites the embedded
