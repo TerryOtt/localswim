@@ -257,6 +257,11 @@ mutations do not write the file directly: they locate the running service, fetch
 revision, and use the same REST mutation path as the browser. CLI mutations are always
 attributed to `cliUser`; there is no impersonation flag.
 
+The CLI establishes UTF-8 for stdout and stderr before argument parsing. This is a
+correctness boundary, not presentation polish: Windows may otherwise inherit CP1252,
+commit a service mutation, and then raise while printing the Unicode move arrow,
+turning a successful write into an apparent command failure.
+
 `--activity-since` and `--activity-between` merge creation, movement, assignment,
 priority, and comment audit records into an inclusive chronological report. Their RFC
 3339 bounds must carry an explicit UTC offset. The report intentionally omits card

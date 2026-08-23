@@ -51,12 +51,14 @@ import contextlib
 import copy
 import datetime
 import hashlib
+import io
 import itertools
 import json
 import os
 import pathlib
 import re
 import socket
+import sys
 import tempfile
 import time
 import unicodedata
@@ -3535,8 +3537,23 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
     return migrate_lane_id(args.board, *args.migrate_lane_id)
 
 
+def _configure_cli_streams() -> None:
+    """Make every CLI result representable regardless of the inherited locale.
+
+    localswim deliberately prints Unicode, including the move arrow. On Windows a
+    redirected console process can inherit CP1252; the service may then commit a move
+    successfully before the CLI raises ``UnicodeEncodeError`` while reporting it. The
+    command owns its text protocol, so establish UTF-8 before argparse or any result
+    writes to stdout or stderr.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="strict")
+
+
 def main() -> None:
     """A small CLI, so a board can be inspected and moved without the browser."""
+    _configure_cli_streams()
     ap = argparse.ArgumentParser(description="Inspect or update a localswim board.")
     ap.add_argument("board", type=pathlib.Path, help="path to the board JSON")
     ap.add_argument("--json", action="store_true", help="dump the parsed board")

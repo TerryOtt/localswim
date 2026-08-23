@@ -111,7 +111,8 @@ uv run --frozen localswim-cli boards/my-project.json --move docs in_progress
 
 Run **uv run --frozen localswim-cli --help** for the complete command list. CLI changes are
 attributed to cliUser; browser changes are attributed to browserUser. Request bodies
-cannot choose another identity.
+cannot choose another identity. CLI stdout and stderr are always UTF-8, including when
+Windows redirects them through a legacy system encoding.
 
 Schema 4 embeds the complete resolved policy so a board's lane identities and
 permissions travel atomically with its state. With the service stopped, upgrade a

@@ -1,6 +1,7 @@
 """CLI-to-service boundary tests."""
 
 import json
+import os
 import pathlib
 import socket
 import subprocess
@@ -136,6 +137,35 @@ def test_every_cli_mutation_uses_service(served_board: pathlib.Path) -> None:
     assert item.comments[0].by == "bot"
     assert board.links == []
     assert board.find("b").parent is None
+
+
+def test_cli_forces_utf8_when_inherited_output_encoding_cannot_print_move_arrow(
+    served_board: pathlib.Path,
+) -> None:
+    assert_cli(served_board, "--create", "alpha", "Alpha", "--state", "ready_for_work")
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "cp1252"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "localswim.board_state",
+            str(served_board),
+            "--move",
+            "alpha",
+            "in_progress",
+        ],
+        cwd=pathlib.Path(__file__).resolve().parents[1],
+        capture_output=True,
+        env=environment,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8")
+    assert "ready_for_work → in_progress" in result.stdout.decode("utf-8")
+    assert result.stderr == b""
 
 
 def test_offline_mutation_has_no_direct_write(tmp_path: pathlib.Path) -> None:

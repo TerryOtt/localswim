@@ -68,6 +68,8 @@ serves a local swimlane board from one JSON snapshot.
   ignores remove formatter conflicts or known low-value policy checks; do not weaken
   checks to make a change pass.
 - Preserve UTF-8, LF endings, and the repository's US English/house vocabulary.
+- Preserve the CLI's explicit UTF-8 stdout/stderr boundary. Its Unicode status output
+  must not depend on a Windows console or redirection target inheriting UTF-8.
 - Maintain the existing JSON boundary behavior: duplicate keys, invalid types, bad
   references, illegal transitions, and malformed input should fail with useful,
   field-specific messages. Preserve unknown-field rejection where a structure defines
