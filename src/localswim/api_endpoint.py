@@ -1123,19 +1123,14 @@ PAGE = """<!doctype html>
      Needs Terry. **The CTAs went white in #0054 and the metadata did not**, so the
      bar currently has two tiers on purpose rather than by omission. */
   #bar #live, #bar #alerts-wrap, #bar .meta { color: var(--bardim); }
-  /* **15px, up from the bar's inherited 12px.** Terry, 2026-08-19: "Bump up font size
-     of FGA title next to breathing dot. Keep same whitespace between it and CTA's."
-     Card #0058.
-
-     **15px is a size he has already approved for a heading in this UI**, rather than a
-     fresh guess: the lane titles are 15px, and he got there by asking for +50%, looking
-     at 18px and pulling back with "that may have overshot for my yes."
-
-     **The whitespace he asked to keep is 36px** -- `#bar`'s flex `gap: 14px` plus
-     `#counts`'s `margin-left: 22px`. **Both are absolute, so a larger title cannot move
-     them**, and both were measured before and after rather than reasoned about. */
-  #title { font-weight: 700; letter-spacing: -.01em; color: var(--barink);
-           font-size: 15px; }
+  /* The product wordmark and board name share the approved 15px title typography but
+     have different emphasis. `Localswim` uses the logo's light blue instead of white,
+     so the static mark and word read as one product identity. The board name retains
+     bright white because it is the changing context inside that product. */
+  #wordmark, #title { font-weight: 700; letter-spacing: -.01em; font-size: 15px;
+                      white-space: nowrap; }
+  #wordmark { color: #85B8FF; }
+  #title { color: var(--barink); margin-left: 22px; }
   /* **ONLY CALLS TO ACTION LIVE HERE.** Terry: "No other stats up there, just
      calls to action." Open counts and in-progress counts were noise -- the lane
      headers already carry them, and a number that never asks for anything trains
@@ -1227,18 +1222,15 @@ PAGE = """<!doctype html>
      having looked at all three: *"I like your second stab better. Keeping the brand
      static looks good."*
 
-     **26px against a 40px bar** answers the rest of that sentence -- *"making it use
-     more of the title bar and locking it more closely to the text FGA"*. The wrapper
-     is what locks it: `#brandtitle` gives the pair their own 6px gap, so the mark reads
-     as part of the name while `#bar`'s own 14px gap still separates that group from
-     everything else. **The 36px between the title and the CTAs is therefore untouched**,
-     which card #0058 pinned deliberately. */
-  /* **THE SAME 36px THAT SEPARATES THE TITLE FROM THE CTAs.** Terry, 2026-08-19:
-     *"should be same gap as between text and CTA."* `#bar`'s flex `gap: 14px` plus this
-     22px is 36px, which is exactly `#counts`'s own 14 + 22. **So the bar now has one
-     group-separation distance rather than two similar ones**, and the mark reads as
-     belonging to the name rather than to the heartbeat. Both numbers are absolute, so
-     a larger title cannot move either -- the property card #0058 relied on. */
+     **The mark is locked to the product name, not the board name.** Putting a board's
+     title directly beside the logo made the board look like the product. The wrapper
+     now contains the mark plus the literal `Localswim` wordmark; the board title is a
+     separate bright-white sibling.
+
+     **Both sides of the product lockup use the same 36px separation.** `#bar` supplies
+     14px between children. The lockup's 22px left margin makes 36px from the breathing
+     dot to the logo, and the board title's 22px left margin makes the same 36px from
+     the wordmark to the board name. */
   #brandtitle { display: flex; align-items: center; gap: 10px; margin-left: 22px; }
   #brand { width: 28px; height: 22px; flex: 0 0 auto;
            background-image: url("%BRANDURI%");
@@ -1702,7 +1694,8 @@ PAGE = """<!doctype html>
 <body>
   <div id="bar">
     <span id="dot"></span>
-    <span id="brandtitle"><span id="brand"></span><span id="title">%TITLE%</span></span>
+    <span id="brandtitle"><span id="brand"></span><span id="wordmark">Localswim</span></span>
+    <span id="title">%TITLE%</span>
     <span id="counts"></span>
     <span class="grow"></span>
     <input id="find" type="search" autocomplete="off" spellcheck="false"
@@ -2719,6 +2712,26 @@ function laneEl(lane) {
   return el;
 }
 
+// **One shared card horizon when the completed-lane control takes a row.** The
+// `Unhide old` control exists only while old cards are available, so permanently
+// reserving its height would waste space on every other board. Measuring the rendered
+// list edges avoids copying a font-dependent pixel height and also absorbs a wrapped
+// lane title. Clearing the previous padding first makes resize realignment idempotent.
+function alignCardStarts() {
+  const board = document.getElementById('board');
+  const lists = Array.from(board.querySelectorAll('.cards'));
+  for (const list of lists) list.style.paddingTop = '';
+  if (!lists.length || !board.querySelector('.unhide')) return;
+
+  const target = Math.max(...lists.map(list => list.getBoundingClientRect().top));
+  for (const list of lists) {
+    const gap = Math.max(0, target - list.getBoundingClientRect().top);
+    if (gap) list.style.paddingTop = gap + 'px';
+  }
+}
+
+window.addEventListener('resize', alignCardStarts);
+
 // **FLIP: First, Last, Invert, Play.** Terry wanted to watch Claude's moves happen
 // rather than see a card teleport: "a motion animation would be fun af for me to
 // watch in realtime."
@@ -2780,11 +2793,11 @@ function playFlip(before) {
 // 400ms while a count sits at one is the boy-who-cried-wolf failure this project
 // keeps guarding against, and it would be worse than silence.
 let lastCta = null;
-const BASE_TITLE = document.title;
+let boardTitle = document.title;
 
 function announce(c) {
   const asking = (c.needs_terry_action || 0) + (c.blocked || 0);
-  document.title = asking > 0 ? '(' + asking + ') ' + BASE_TITLE : BASE_TITLE;
+  document.title = asking > 0 ? '(' + asking + ') ' + boardTitle : boardTitle;
 
   if (lastCta !== null && asking > lastCta && alertsOn()) {
     const n = new Notification('FGA board needs you', {
@@ -2926,6 +2939,13 @@ function applyFilter() {
 }
 
 function paint() {
+  // The project name is board data, not page-build data. Update both title surfaces on
+  // every changed-board paint so `--set-project` reaches an already-open tab without a
+  // reload. An error payload has no project and must not erase the last known name.
+  if (typeof data.project === 'string' && data.project) {
+    boardTitle = data.project;
+    document.getElementById('title').textContent = boardTitle;
+  }
   // **"Comment as Terry" was in the MARKUP until card #0072**, and dropping the name
   // rather than configuring it would have lost something real: the button says who the
   // comment gets attributed to, which is the one thing a shared board must not leave to
@@ -2937,6 +2957,7 @@ function paint() {
   const before = measureCards();
   board.replaceChildren();
   for (const lane of data.lanes) board.appendChild(laneEl(lane));
+  alignCardStarts();
   playFlip(before);
   // **REAPPLIED AFTER EVERY REPAINT, and forgetting this is the obvious bug.** `paint()`
   // rebuilds every card, so a filtered board would silently un-filter itself the next

@@ -126,6 +126,14 @@ def test_page_contains_guarded_auto_reload_and_state_restore(api: RunningApi) ->
     assert "AUTO-RELOAD FAILED" in page
     assert "const API_PREFIX = '/api/v001';" in page
     assert "display: flex; gap: 8px; align-items: flex-start; line-height: 1.15;" in page
+    assert "function alignCardStarts()" in page
+    assert "alignCardStarts();\n  playFlip(before);" in page
+    assert '<span id="wordmark">Localswim</span>' in page
+    assert '<span id="title">API</span>' in page
+    assert "#wordmark { color: #85B8FF; }" in page
+    assert "#title { color: var(--barink); margin-left: 22px; }" in page
+    assert "boardTitle = data.project;" in page
+    assert "document.getElementById('title').textContent = boardTitle;" in page
     assert "/v1/" not in page
     assert response.headers["Cache-Control"] == "no-store, max-age=0"
 
