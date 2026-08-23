@@ -1279,10 +1279,13 @@ PAGE = """<!doctype html>
   /* **+25% on the lane titles, 12px to 15px.** Terry asked for +50% first, looked
      at 18px and pulled it back: "that may have overshot for my yes." The count sits
      in a circle sized in `em` of this same rule, so the two track each other and a
-     third adjustment needs one number changed rather than two. */
+     third adjustment needs one number changed rather than two.
+
+     The title, count, and `+` share a top edge. Centering them against the title block
+     made both controls sit lower only when a lane name wrapped onto a second line. */
   .lane h2 { margin: 0; padding: 9px 12px 3px; font-size: 15px; font-weight: 700;
              text-transform: uppercase; letter-spacing: .02em;
-             display: flex; gap: 8px; align-items: center; line-height: 1.15; }
+             display: flex; gap: 8px; align-items: flex-start; line-height: 1.15; }
   /* **Card #0066: the count and the `+` grew into the space under them.** Terry:
      "Increase size of swimlane badge for ticket count and + button... Have a whole
      blank row to grow into below where they are."
