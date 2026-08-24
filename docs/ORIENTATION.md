@@ -281,6 +281,15 @@ plus compact focused items. A result carries its parent and child count rather t
 expanding a potentially large child subtree; `--show` owns full child expansion.
 Detail and comments still require `--include-prose`.
 
+`--search QUERY` locates existing cards without a board dump. It performs
+case-insensitive substring matching over stable IDs and subjects plus exact matching
+for numeric or `#NNNN` ticket references. It searches every lane by default;
+`--lanes` supplies an optional embedded-policy-validated filter. Results use the same
+priority-then-ticket total order and compact focused-item shape as `--next`.
+`--include-prose` explicitly expands both the matching surface and returned fields to
+details and comment text. Search refuses audit drift and changes no persisted or REST
+schema.
+
 `--activity-since` and `--activity-between` merge creation, movement, assignment,
 priority, and comment audit records into an inclusive chronological report. Their RFC
 3339 bounds must carry an explicit UTC offset. The report intentionally omits card

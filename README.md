@@ -113,6 +113,20 @@ priority. Each result includes focused identity and status, its parent, child co
 and directional relationships. Use `--show` when the full child list is useful. Detail
 and comments remain absent unless `--include-prose` is supplied explicitly.
 
+Find an existing card by concept without exporting the whole board:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json --search "upload ambiguity"
+uv run --frozen localswim-cli boards/my-project.json --search 137 --lanes ready_for_work needs_terry_action --json
+uv run --frozen localswim-cli boards/my-project.json --search "private detail phrase" --include-prose
+~~~
+
+Search is case-insensitive. Stable IDs and subjects use substring matching; a numeric
+or `#NNNN` query matches that exact ticket number. All lanes are searched unless
+`--lanes` filters them. Default matching and output exclude details and comments;
+`--include-prose` explicitly adds both to the search surface and the results. Matches
+use the same embedded-policy priority then monotonic-ticket ordering as `--next`.
+
 Time-bounded activity reports combine card creation, movement, assignment, priority,
 and comment events into one chronological stream:
 

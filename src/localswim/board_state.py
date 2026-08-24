@@ -3401,6 +3401,11 @@ def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
         help="show one card by stable ID or ticket number, including relationships",
     )
     parser.add_argument(
+        "--search",
+        metavar="QUERY",
+        help="find cards by ID, ticket, or subject; --include-prose searches prose too",
+    )
+    parser.add_argument(
         "--next",
         type=_positive_count,
         metavar="N",
@@ -3410,7 +3415,7 @@ def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
         "--lanes",
         nargs="+",
         metavar="LANE",
-        help="lane IDs included in a --next query",
+        help="lane IDs included in a --next or --search query",
     )
     parser.add_argument(
         "--include-prose",
@@ -3444,6 +3449,7 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
                 args.detail,
                 args.detail_file,
                 args.show,
+                args.search is not None,
                 args.next,
                 args.lanes,
                 args.include_prose,
@@ -3455,14 +3461,18 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
 
 def _validate_inspection_arguments(args: argparse.Namespace) -> None:
     """Keep focused inspection read-only and require an explicit content request."""
-    if args.show and (args.next is not None or args.lanes):
+    if args.show and (args.next is not None or args.search is not None or args.lanes):
+        if args.search is not None:
+            raise BoardError("--show and --search cannot be combined")
         raise BoardError("--show and --next cannot be combined")
-    if args.next is None and args.lanes:
-        raise BoardError("--lanes requires --next")
+    if args.next is not None and args.search is not None:
+        raise BoardError("--next and --search cannot be combined")
+    if args.next is None and args.search is None and args.lanes:
+        raise BoardError("--lanes requires --next or --search")
     if args.next is not None and not args.lanes:
         raise BoardError("--next requires --lanes")
-    if args.include_prose and not (args.show or args.next is not None):
-        raise BoardError("--include-prose requires --show or --next")
+    if args.include_prose and not (args.show or args.next is not None or args.search is not None):
+        raise BoardError("--include-prose requires --show, --next, or --search")
 
     shared_conflict = (
         args.shutdown
@@ -3488,6 +3498,10 @@ def _validate_inspection_arguments(args: argparse.Namespace) -> None:
         raise BoardError("--show cannot be combined with writes, migrations, activity, or --verify")
     if args.next is not None and shared_conflict:
         raise BoardError("--next cannot be combined with writes, migrations, activity, or --verify")
+    if args.search is not None and shared_conflict:
+        raise BoardError(
+            "--search cannot be combined with writes, migrations, activity, or --verify"
+        )
 
 
 def _run_offline_operation(args: argparse.Namespace) -> str | None:
@@ -3515,6 +3529,7 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         or args.activity_since
         or args.activity_between
         or args.show
+        or args.search is not None
         or args.next
         or args.lanes
         or args.include_prose
@@ -3555,6 +3570,7 @@ def _run_shutdown_operation(args: argparse.Namespace) -> str | None:
                 args.activity_since,
                 args.activity_between,
                 args.show,
+                args.search is not None,
                 args.next,
                 args.lanes,
                 args.include_prose,
@@ -3603,6 +3619,15 @@ def _handle_inspection_report(
             _report_item(
                 board,
                 str(args.show),
+                as_json=bool(args.json),
+                include_prose=bool(args.include_prose),
+            )
+            return True
+        if args.search is not None:
+            _report_search_items(
+                board,
+                str(args.search),
+                cast("list[str] | None", args.lanes),
                 as_json=bool(args.json),
                 include_prose=bool(args.include_prose),
             )
@@ -3975,6 +4000,66 @@ def inspect_next_items(
     return tuple(inspect_item(board, item.id, include_prose=include_prose) for item in items)
 
 
+def _item_matches_search(
+    item: Item,
+    needle: str,
+    ticket_query: int | None,
+    *,
+    include_prose: bool,
+) -> bool:
+    """Match only visible fields unless the caller explicitly opts into prose."""
+    if ticket_query is not None:
+        return item.ticket == ticket_query
+    if needle in item.id.casefold() or needle in item.subject.casefold():
+        return True
+    if not include_prose:
+        return False
+    if needle in item.detail.casefold():
+        return True
+    return any(needle in comment.text.casefold() for comment in item.comments)
+
+
+def inspect_search_items(
+    board: Board,
+    query: str,
+    lanes: tuple[str, ...] | None = None,
+    *,
+    include_prose: bool = False,
+) -> tuple[ItemInspection, ...]:
+    """Find cards by concept without requiring a broad board export."""
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise BoardError("--search requires non-whitespace text")
+
+    selected_lanes = lanes or tuple(board.policy.states)
+    unknown = tuple(lane for lane in selected_lanes if lane not in board.policy.states)
+    if unknown:
+        raise BoardError(
+            "--lanes contains unknown lane(s): "
+            f"{', '.join(unknown)}; want one or more of {', '.join(board.policy.states)}"
+        )
+
+    needle = normalized_query.casefold()
+    ticket_text = needle.removeprefix("#")
+    ticket_query = int(ticket_text) if ticket_text.isdecimal() else None
+    selected = frozenset(selected_lanes)
+    items = sorted(
+        (
+            item
+            for item in board.items
+            if item.state in selected
+            and _item_matches_search(
+                item,
+                needle,
+                ticket_query,
+                include_prose=include_prose,
+            )
+        ),
+        key=lambda item: item_order_key(item, board.policy),
+    )
+    return tuple(inspect_item(board, item.id, include_prose=include_prose) for item in items)
+
+
 def _detail_text(args: argparse.Namespace) -> str:
     """A new card's description, from `--detail` or from `--detail-file`.
 
@@ -4249,6 +4334,55 @@ def _report_next_items(
     print(
         f"Next {len(inspections)} card(s) from {', '.join(selected_lanes)} "
         "(policy priority, then ticket):"
+    )
+    for inspection in inspections:
+        print()
+        _print_item_inspection(
+            inspection,
+            include_prose=include_prose,
+            expand_children=False,
+        )
+
+
+def _report_search_items(
+    board: Board,
+    query: str,
+    lanes: list[str] | None,
+    *,
+    as_json: bool,
+    include_prose: bool,
+) -> None:
+    """Print deterministic focused matches without exporting the whole board."""
+    drift = board.verify()
+    if drift:
+        raise BoardError(f"ticket search refused {len(drift)} audit-trail problem(s): {drift[0]}")
+    selected_lanes = tuple(dict.fromkeys(lanes or board.policy.states))
+    inspections = inspect_search_items(
+        board,
+        query,
+        selected_lanes,
+        include_prose=include_prose,
+    )
+    fields: list[JsonValue] = ["id", "ticket", "subject"]
+    if include_prose:
+        fields.extend(("detail", "comments"))
+    if as_json:
+        payload: JsonObject = {
+            "query": query,
+            "lanes": list(selected_lanes),
+            "searchedFields": fields,
+            "order": ["policyPriority", "ticket"],
+            "items": [cast("JsonValue", _next_item_json(inspection)) for inspection in inspections],
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    if not inspections:
+        print(f"  No cards matched {query!r} in {', '.join(selected_lanes)}")
+        return
+
+    print(
+        f"Search matched {len(inspections)} card(s) for {query!r} in "
+        f"{', '.join(selected_lanes)} (policy priority, then ticket):"
     )
     for inspection in inspections:
         print()

@@ -491,6 +491,114 @@ def test_next_rejects_invalid_or_conflicting_arguments(
     assert "Traceback" not in result.stderr
 
 
+def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    result = run_cli(
+        path,
+        "--search",
+        "SUBJECT",
+        "--lanes",
+        "ready_for_work",
+        "backlog",
+        "--json",
+    )
+    ticket_result = run_cli(path, "--search", "#0002", "--json")
+    id_result = run_cli(path, "--search", "LOCK", "--json")
+
+    assert result.returncode == 0, result.stderr
+    report = cast("dict[str, Any]", json.loads(result.stdout))
+    assert report["query"] == "SUBJECT"
+    assert report["lanes"] == ["ready_for_work", "backlog"]
+    assert report["searchedFields"] == ["id", "ticket", "subject"]
+    assert report["order"] == ["policyPriority", "ticket"]
+    items = cast("list[dict[str, Any]]", report["items"])
+    assert [item["id"] for item in items] == ["focus", "blocker", "parent", "child"]
+    assert all("detail" not in item for item in items)
+    assert all("comments" not in item for item in items)
+
+    assert ticket_result.returncode == 0, ticket_result.stderr
+    ticket_report = cast("dict[str, Any]", json.loads(ticket_result.stdout))
+    ticket_items = cast("list[dict[str, Any]]", ticket_report["items"])
+    assert [item["id"] for item in ticket_items] == ["focus"]
+
+    assert id_result.returncode == 0, id_result.stderr
+    id_report = cast("dict[str, Any]", json.loads(id_result.stdout))
+    id_items = cast("list[dict[str, Any]]", id_report["items"])
+    assert [item["id"] for item in id_items] == ["blocker"]
+
+
+def test_search_prose_is_unsearchable_and_unreported_until_explicitly_requested(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    safe = run_cli(path, "--search", "private focused")
+    with_prose = run_cli(path, "--search", "PRIVATE FOCUSED", "--include-prose", "--json")
+
+    assert safe.returncode == 0, safe.stderr
+    assert "No cards matched" in safe.stdout
+    assert "#0002 focus" not in safe.stdout
+    assert with_prose.returncode == 0, with_prose.stderr
+    report = cast("dict[str, Any]", json.loads(with_prose.stdout))
+    assert report["searchedFields"] == ["id", "ticket", "subject", "detail", "comments"]
+    items = cast("list[dict[str, Any]]", report["items"])
+    assert [item["id"] for item in items] == ["focus"]
+    assert items[0]["detail"] == "Private focused detail"
+    comments = cast("list[dict[str, Any]]", items[0]["comments"])
+    assert comments[0]["text"] == "Private focused comment"
+
+
+def test_search_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+    board = board_state.load(path)
+    board.find("focus").state = "completed"
+    board_state.save(board, path)
+
+    result = run_cli(path, "--search", "focus")
+
+    assert result.returncode != 0
+    assert "ticket search refused 1 audit-trail problem" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (("--search", " "), "--search requires non-whitespace text"),
+        (
+            ("--search", "focus", "--lanes", "not_a_lane"),
+            "--lanes contains unknown lane(s): not_a_lane",
+        ),
+        (("--show", "focus", "--search", "focus"), "--show and --search cannot be combined"),
+        (
+            ("--next", "2", "--lanes", "backlog", "--search", "focus"),
+            "--next and --search cannot be combined",
+        ),
+        (("--search", "focus", "--verify"), "--search cannot be combined"),
+        (("--search", "focus", "--comment", "focus", "no"), "--search cannot be combined"),
+    ],
+)
+def test_search_rejects_invalid_or_conflicting_arguments(
+    tmp_path: pathlib.Path,
+    arguments: tuple[str, ...],
+    message: str,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    result = run_cli(path, *arguments)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_activity_between_is_inclusive_chronological_and_sanitized(
     tmp_path: pathlib.Path,
 ) -> None:
