@@ -1313,13 +1313,18 @@ def lane_owner_label(
 
 
 def now() -> str:
-    """An ISO 8601 stamp in this machine's local zone, offset included.
+    """A microsecond ISO 8601 stamp in this machine's local zone, offset included.
 
     **Local rather than UTC, and the offset is what makes that safe.** Terry reads
     these; a UTC stamp would make him do arithmetic to answer *"did I sign that off
     before dinner"*. The offset keeps it unambiguous for anything that parses it.
+
+    **Microseconds keep consecutive monitor windows disjoint. Card #0010.** Truncating
+    an event and a later filesystem observation to the same second forced the next
+    inclusive activity query to repeat the earlier event. Existing whole-second stamps
+    remain valid ISO 8601 and continue to parse; only new audit evidence gains precision.
     """
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 #: Safe fallback for an absent or unreadable event timestamp. Aware rather than naive,
@@ -4266,9 +4271,8 @@ def activity_events(
     """Return sanitized events in one inclusive window, oldest first.
 
     History, comments, and relationship history are separate persisted arrays, so events
-    sharing a one-second timestamp have no recoverable cross-array causal order. Ticket,
-    source sequence, and kind provide a deterministic tie-break without pretending
-    otherwise.
+    sharing a timestamp have no recoverable cross-array causal order. Ticket, source
+    sequence, and kind provide a deterministic tie-break without pretending otherwise.
     """
     events: list[ActivityEvent] = []
     for item in board.items:

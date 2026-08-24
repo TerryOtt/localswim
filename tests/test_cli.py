@@ -701,6 +701,37 @@ def test_activity_relationship_human_output_names_opposite_endpoint(
     assert "Private subject" not in result.stdout
 
 
+def test_activity_microsecond_bounds_exclude_an_event_before_the_cursor(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    board = board_state.Board(
+        project="Activity precision",
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
+    )
+    board.create("alpha", "Private subject", "ready_for_work", "bot")
+    alpha = board.find("alpha")
+    alpha.history[-1].at = "2026-08-24T12:00:00.100000-04:00"
+    board.comment("alpha", "private board words", "bot")
+    alpha.comments[-1].at = "2026-08-24T12:00:00.300000-04:00"
+    board_state.save(board, path)
+
+    result = run_cli(
+        path,
+        "--activity-between",
+        "2026-08-24T12:00:00.200000-04:00",
+        "2026-08-24T12:00:00.400000-04:00",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "commented by bot" in result.stdout
+    assert "created by bot" not in result.stdout
+    assert "private board words" not in result.stdout
+
+
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [

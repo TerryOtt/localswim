@@ -308,6 +308,12 @@ without turning routine coordination into a prose export. Cross-array events rec
 at the same instant have a deterministic tie-break order, because the snapshot cannot
 recover their original causal order.
 
+New audit timestamps retain six fractional digits. That precision lets an external
+filesystem monitor use its exact preceding-signature observation as the next inclusive
+lower bound without repeating an earlier event that happened before the observation.
+Whole-second timestamps from older builds remain valid RFC 3339 input and persisted
+history; no synthetic migration changes their evidence.
+
 ## Board-data placement
 
 A board contains identities, prose, comments, and audit history. Inside this public

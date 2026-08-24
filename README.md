@@ -143,6 +143,10 @@ opposite ticket number and stable ID. Comment events expose only their character
 Events recorded in different history arrays at the same instant have deterministic
 output order, not a recoverable causal order.
 
+New audit events retain microsecond precision so a filesystem monitor can supply
+consecutive, non-overlapping activity windows without repeating a boundary event.
+Existing whole-second event timestamps remain valid and require no migration.
+
 CLI mutations use the running REST service so browser and CLI writes share validation,
 locking and revision checks:
 

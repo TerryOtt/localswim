@@ -1,8 +1,17 @@
 """Board behavior at the domain-model boundary."""
 
+import re
+
 import pytest
 
 from localswim import board_state
+
+
+def test_now_persists_microsecond_precision_with_local_offset() -> None:
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}[+-]\d{2}:\d{2}",
+        board_state.now(),
+    )
 
 
 def test_create_assigns_ticket_history_and_owner(board: board_state.Board) -> None:

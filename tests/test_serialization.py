@@ -196,6 +196,7 @@ def test_check_edges_reports_no_inconsistent_permissions() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
+        "2026-08-19T10:27:01.123456-04:00",
         "2026-08-19T10:27:01-04:00",
         "2026-08-18 12:40 ET",
         "2026-08-18T16:02:45",
