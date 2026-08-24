@@ -253,6 +253,12 @@ change is debounced, preflighted in a child Python process and applied by gracef
 re-executing the server. An invalid change leaves the healthy process running and
 reports the preflight error.
 
+A service started from a dirty checkout retains that truthful Build ID while work
+remains. Once the checkout becomes clean, status polling checks at most once every two
+seconds and adopts the clean commit only after two Git reads agree and both loaded
+Python source digests still match disk. Changed source continues through the guarded
+re-exec path; the metadata refresh never hides or overrides real code drift.
+
 Open tabs detect the new build and reload once. Comment drafts, active editors, a
 partially written card, search text and view state survive in per-tab session storage.
 

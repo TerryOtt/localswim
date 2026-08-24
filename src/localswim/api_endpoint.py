@@ -147,10 +147,9 @@ def build_id() -> str:
     return ident
 
 
-# **Read ONCE, at import, and that is the point rather than an optimization.** This value
-# must describe the code the running process actually loaded. Recomputing it per request
-# would report whatever the checkout says NOW, so a `git pull` under a running server would
-# make a genuinely stale process claim to be current -- the exact lie being detected.
+# **Read at import so it describes the code this process loaded.** A later status poll may
+# replace only a dirty identity with a clean commit after the loaded source digests still
+# match disk and two Git reads agree. It must never adopt changed source without re-exec.
 BUILD = build_id()
 
 # ---------------------------------------------------------------------------
@@ -205,6 +204,43 @@ def _code_stamp() -> tuple[tuple[float, str], ...]:
 
 
 _BOOT_CODE = _code_stamp()
+
+BUILD_REFRESH_INTERVAL_S = 2.0
+_build_refresh_lock = threading.Lock()
+_next_build_refresh_at = 0.0
+
+
+def refresh_build_id_if_clean() -> str:
+    """Replace a stale dirty identity only when loaded code matches a clean checkout.
+
+    Status is polled several times per second, so Git checks are throttled while active
+    development keeps the checkout dirty. A clean candidate is read twice around the
+    source digest comparison. This does not make Git and the filesystem transactional,
+    but it closes ordinary commit races and never blesses source bytes this process did
+    not load.
+    """
+    global BUILD, _next_build_refresh_at  # noqa: PLW0603 -- process build metadata
+
+    if not BUILD.endswith("-dirty"):
+        return BUILD
+    checked_at = time.monotonic()
+    with _build_refresh_lock:
+        if not BUILD.endswith("-dirty") or checked_at < _next_build_refresh_at:
+            return BUILD
+        _next_build_refresh_at = checked_at + BUILD_REFRESH_INTERVAL_S
+        candidate = build_id()
+        if candidate == "unknown" or candidate.endswith("-dirty"):
+            return BUILD
+        boot_digests = tuple(digest for _mtime, digest in _BOOT_CODE)
+        current_digests = tuple(digest for _mtime, digest in _code_stamp())
+        if not all(current_digests) or current_digests != boot_digests:
+            return BUILD
+        if build_id() != candidate:
+            return BUILD
+        BUILD = candidate
+        print(f"  Build ID refreshed after clean commit: {BUILD}", flush=True)
+        return BUILD
+
 
 # **Per-file state, so the answer is REMEMBERED rather than recomputed.** The mtime
 # says when to look; these say what was found. Without them a changed file would be
@@ -3787,11 +3823,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 print(f"  {reloaded}", flush=True)
 
             code_stale = code_is_stale()
+            current_build = BUILD if code_stale else refresh_build_id_if_clean()
             restarting, restart_problem = (
                 request_code_restart(self.server) if code_stale else (False, None)
             )
             code_meta = {
-                "build": BUILD,
+                "build": current_build,
                 "codeStale": code_stale,
                 "restarting": restarting,
                 **({"restartProblem": restart_problem} if restart_problem else {}),

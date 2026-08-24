@@ -314,7 +314,12 @@ Important UI mechanics:
 
 The build ID is the short Git commit. A dirty checkout appends a fingerprint of the two
 loaded Python sources and `-dirty`; consequently, uncommitted source edits produce
-distinct builds instead of sharing one generic dirty ID.
+distinct builds instead of sharing one generic dirty ID. If that checkout later becomes
+clean without changing the loaded source bytes, status polling replaces the stale dirty
+identity with the clean commit after two matching Git reads and a fresh source-digest
+comparison. The Git probe is throttled to one attempt every two seconds while work
+remains dirty. A source mismatch never takes this metadata-only path: the existing
+preflight and graceful re-exec boundary owns it.
 
 ## Optional Git publishing
 

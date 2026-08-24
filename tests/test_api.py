@@ -167,6 +167,103 @@ def test_dirty_build_id_includes_source_fingerprint(
     assert len(ident.removeprefix("deadbee-").removesuffix("-dirty")) == 8
 
 
+def test_dirty_build_refreshes_after_clean_commit_when_loaded_sources_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = iter(("cafebabe", "cafebabe"))
+    calls = 0
+
+    def next_build() -> str:
+        nonlocal calls
+        calls += 1
+        return next(candidates)
+
+    monkeypatch.setattr(api_endpoint, "BUILD", "deadbee-12345678-dirty")
+    monkeypatch.setattr(api_endpoint, "_next_build_refresh_at", 0.0)
+    monkeypatch.setattr(api_endpoint.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(api_endpoint, "build_id", next_build)
+    monkeypatch.setattr(api_endpoint, "_BOOT_CODE", ((1.0, "alpha"), (1.0, "beta")))
+    monkeypatch.setattr(api_endpoint, "_code_stamp", lambda: ((2.0, "alpha"), (2.0, "beta")))
+
+    refreshed = api_endpoint.refresh_build_id_if_clean()
+
+    assert refreshed == "cafebabe"
+    assert api_endpoint.BUILD == "cafebabe"
+    assert calls == 2
+
+
+def test_dirty_build_refresh_refuses_source_bytes_the_process_did_not_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_endpoint, "BUILD", "deadbee-12345678-dirty")
+    monkeypatch.setattr(api_endpoint, "_next_build_refresh_at", 0.0)
+    monkeypatch.setattr(api_endpoint.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(api_endpoint, "build_id", lambda: "cafebabe")
+    monkeypatch.setattr(api_endpoint, "_BOOT_CODE", ((1.0, "alpha"), (1.0, "beta")))
+    monkeypatch.setattr(
+        api_endpoint,
+        "_code_stamp",
+        lambda: ((2.0, "alpha-changed"), (2.0, "beta")),
+    )
+
+    refreshed = api_endpoint.refresh_build_id_if_clean()
+
+    assert refreshed == "deadbee-12345678-dirty"
+
+
+def test_dirty_build_refresh_refuses_disagreeing_git_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = iter(("cafebabe", "facefeed"))
+    monkeypatch.setattr(api_endpoint, "BUILD", "deadbee-12345678-dirty")
+    monkeypatch.setattr(api_endpoint, "_next_build_refresh_at", 0.0)
+    monkeypatch.setattr(api_endpoint.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(api_endpoint, "build_id", lambda: next(candidates))
+    monkeypatch.setattr(api_endpoint, "_BOOT_CODE", ((1.0, "alpha"), (1.0, "beta")))
+    monkeypatch.setattr(api_endpoint, "_code_stamp", lambda: ((2.0, "alpha"), (2.0, "beta")))
+
+    refreshed = api_endpoint.refresh_build_id_if_clean()
+
+    assert refreshed == "deadbee-12345678-dirty"
+
+
+def test_dirty_build_refresh_throttles_git_checks_while_checkout_stays_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    times = iter((10.0, 11.0))
+
+    def still_dirty() -> str:
+        nonlocal calls
+        calls += 1
+        return "deadbee-12345678-dirty"
+
+    monkeypatch.setattr(api_endpoint, "BUILD", "deadbee-12345678-dirty")
+    monkeypatch.setattr(api_endpoint, "_next_build_refresh_at", 0.0)
+    monkeypatch.setattr(api_endpoint.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(api_endpoint, "build_id", still_dirty)
+
+    first = api_endpoint.refresh_build_id_if_clean()
+    second = api_endpoint.refresh_build_id_if_clean()
+
+    assert first == "deadbee-12345678-dirty"
+    assert second == "deadbee-12345678-dirty"
+    assert calls == 1
+
+
+def test_status_uses_refreshed_clean_build_id(
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_endpoint, "code_is_stale", lambda: False)
+    monkeypatch.setattr(api_endpoint, "refresh_build_id_if_clean", lambda: "cafebabe")
+
+    code, health = request_json(api.base + API + "/status")
+
+    assert code == 200
+    assert health["build"] == "cafebabe"
+
+
 def test_valid_source_change_schedules_graceful_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
