@@ -39,6 +39,46 @@ def test_save_load_round_trip(tmp_path: pathlib.Path) -> None:
     assert board_state.load(path).to_json() == original.to_json()
 
 
+def test_relationship_history_round_trips_after_link_is_removed(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    board = saved_board(path)
+    board.create("beta", "Beta", "backlog", "bot")
+    board.link("alpha", "blocked_by", "beta", "bot")
+    board.relationship_history[-1].at = "2026-08-24T10:00:00Z"
+    board.unlink("alpha", "blocked_by", "beta", "bot")
+    board.relationship_history[-1].at = "2026-08-24T10:01:00Z"
+    board_state.save(board, path)
+
+    loaded = board_state.load(path)
+
+    assert loaded.links == []
+    assert [change.action for change in loaded.relationship_history] == ["linked", "unlinked"]
+    assert loaded.to_json() == board.to_json()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("action", "changed", "unknown relationship action"),
+        ("kind", "near", "unknown relationship kind"),
+        ("to", "missing", "unknown card"),
+    ],
+)
+def test_invalid_relationship_history_is_refused(
+    tmp_path: pathlib.Path, field: str, value: str, message: str
+) -> None:
+    path = tmp_path / "board.json"
+    board = saved_board(path)
+    board.create("beta", "Beta", "backlog", "bot")
+    board.link("alpha", "blocks", "beta", "bot")
+    raw = editable_json(board)
+    raw["relationshipHistory"][0][field] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(board_state.BoardError, match=message):
+        board_state.load(path)
+
+
 def test_invalid_board_json_reports_parser_location(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     path.write_text('{\n  "schema": 4,\n  "items": nope\n}\n', encoding="utf-8")

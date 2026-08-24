@@ -310,6 +310,62 @@ class Link:
         return cls(frm=frm, kind=kind, to=to)
 
 
+@dataclass
+class RelationshipChange:
+    """One append-only relationship mutation for activity attribution.
+
+    `Link` remains the current canonical state. This separate record keeps the direction
+    the caller used, because `#5 blocked_by #28` is the useful activity description even
+    though the stored link is normalized to `28 blocks 5`.
+
+    Boards written before this record existed have no synthetic relationship history.
+    Inventing timestamps or actors from current links would turn an audit report into a
+    guess. The optional top-level array starts recording at the first new mutation.
+    """
+
+    at: str
+    by: str
+    action: str
+    frm: str
+    kind: str
+    to: str
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "at": self.at,
+            "by": self.by,
+            "action": self.action,
+            "from": self.frm,
+            "kind": self.kind,
+            "to": self.to,
+        }
+
+    @classmethod
+    def from_json(cls, raw: JsonValue, where: str) -> Self:
+        if not isinstance(raw, dict):
+            raise BoardError(
+                f"{where}: a relationship-history entry is {type(raw).__name__}, want object"
+            )
+        values = {key: raw.get(key) for key in ("at", "by", "action", "from", "kind", "to")}
+        for key, value in values.items():
+            if not isinstance(value, str) or not value:
+                raise BoardError(f"{where}: relationship-history entry has no {key}")
+        action = str(values["action"])
+        kind = str(values["kind"])
+        if action not in {"linked", "unlinked"}:
+            raise BoardError(f"{where}: unknown relationship action {action!r}")
+        if kind not in LINK_INVERSE:
+            raise BoardError(f"{where}: unknown relationship kind {kind!r}")
+        return cls(
+            at=str(values["at"]),
+            by=str(values["by"]),
+            action=action,
+            frm=str(values["from"]),
+            kind=kind,
+            to=str(values["to"]),
+        )
+
+
 # **THREE STATES MEAN "NOT MOVING", AND TERRY DREW THE LINES HIMSELF.** They get
 # confused constantly, and the whole value of the board is that a stalled card says WHO
 # is holding it.
@@ -1511,6 +1567,9 @@ class ActivityEvent:
     priority_from: str | None = None
     priority_to: str | None = None
     comment_chars: int | None = None
+    relationship_kind: str | None = None
+    other_ticket: int | None = None
+    other_id: str | None = None
     sequence: int = 0
 
     def to_json(self) -> JsonObject:
@@ -1536,6 +1595,12 @@ class ActivityEvent:
             out["priorityTo"] = self.priority_to
         if self.comment_chars is not None:
             out["commentChars"] = self.comment_chars
+        if self.relationship_kind is not None:
+            out["relationshipKind"] = self.relationship_kind
+        if self.other_ticket is not None:
+            out["otherTicket"] = self.other_ticket
+        if self.other_id is not None:
+            out["otherId"] = self.other_id
         return out
 
     def describe(self) -> str:
@@ -1548,6 +1613,13 @@ class ActivityEvent:
             return f"{base}  {self.owner_from} -> {self.owner_to}"
         if self.kind == "prioritized":
             return f"{base}  {self.priority_from} -> {self.priority_to}"
+        if (
+            self.kind in {"linked", "unlinked"}
+            and self.relationship_kind is not None
+            and self.other_ticket is not None
+            and self.other_id is not None
+        ):
+            return f"{base}  {self.relationship_kind} #{self.other_ticket:04d} {self.other_id}"
         return f"{base}  {self.comment_chars} character(s)"
 
 
@@ -1793,6 +1865,25 @@ def _links_from_json(raw: JsonValue, known: set[str], where: str) -> list[Link]:
     return links
 
 
+def _relationship_history_from_json(
+    raw: JsonValue, known: set[str], where: str
+) -> list[RelationshipChange]:
+    """Validate relationship audit records without reconstructing missing history."""
+    if not isinstance(raw, list):
+        raise BoardError(f"{where}: 'relationshipHistory' is not a list")
+    changes: list[RelationshipChange] = []
+    for index, change_raw in enumerate(raw):
+        spot = f"{where}: relationshipHistory[{index}]"
+        change = RelationshipChange.from_json(change_raw, spot)
+        for end in (change.frm, change.to):
+            if end not in known:
+                raise BoardError(f"{spot} names unknown card {end!r}")
+        if change.frm == change.to:
+            raise BoardError(f"{spot} joins {change.frm!r} to itself")
+        changes.append(change)
+    return changes
+
+
 def _check_parents(board: Board, known: set[str], where: str) -> None:
     """Refuse a parent that does not exist or that closes a loop. Card #0028.
 
@@ -1845,6 +1936,12 @@ class Board:
     # here rather than a copy on each card. Card #0028.
     links: list[Link] = field(default_factory=list[Link])
 
+    # **Relationship state cannot answer when or who. Card #0008.** This append-only
+    # log begins when a board first receives a relationship mutation from a build that
+    # supports it. Existing links remain truthful current state without fabricated
+    # audit metadata.
+    relationship_history: list[RelationshipChange] = field(default_factory=list[RelationshipChange])
+
     # **THE CAST LIVES WITH THE DATA, NOT WITH THE CODE. Card #0083.**
     #
     # Card #0072 put users in `rules.json`, which sits next to `board_state.py` inside the
@@ -1891,6 +1988,10 @@ class Board:
         # card #0028 simply has no `links` key, and reads back as a board with no links.
         if self.links:
             out["links"] = [cast("JsonValue", link.to_json()) for link in self.links]
+        if self.relationship_history:
+            out["relationshipHistory"] = [
+                cast("JsonValue", change.to_json()) for change in self.relationship_history
+            ]
         return out
 
     @classmethod
@@ -1974,6 +2075,9 @@ class Board:
             revision=revision,
             next_ticket=next_ticket,
             links=_links_from_json(raw.get("links", []), seen, where),
+            relationship_history=_relationship_history_from_json(
+                raw.get("relationshipHistory", []), seen, where
+            ),
             users=users,
             browser_user=browser_user,
             cli_user=cli_user,
@@ -2066,7 +2170,11 @@ class Board:
         migrated from the markdown log carry none, and inventing a trail for them would
         have been fabricating evidence.
         """
-        problems: list[str] = []
+        problems: list[str] = [
+            f"relationshipHistory[{index}] names unknown actor {change.by!r}"
+            for index, change in enumerate(self.relationship_history)
+            if change.by not in {user.id for user in self.users}
+        ]
         for item in self.items:
             if not item.history:
                 continue
@@ -2305,6 +2413,16 @@ class Board:
         if self.find_link(frm.id, stored, to.id) is not None:
             return f"{a.label} already {kind} {b.label}"
         self.links.append(Link(frm=frm.id, kind=stored, to=to.id))
+        self.relationship_history.append(
+            RelationshipChange(
+                at=now(),
+                by=by,
+                action="linked",
+                frm=a.id,
+                kind=kind,
+                to=b.id,
+            )
+        )
         return f"{a.label} {kind} {b.label} (by {by})"
 
     def find_link(self, frm: str, kind: str, to: str) -> Link | None:
@@ -2332,6 +2450,16 @@ class Board:
         if found is None:
             return f"{a.label} is not {kind} {b.label}"
         self.links.remove(found)
+        self.relationship_history.append(
+            RelationshipChange(
+                at=now(),
+                by=by,
+                action="unlinked",
+                frm=a.id,
+                kind=kind,
+                to=b.id,
+            )
+        )
         return f"{a.label} no longer {kind} {b.label} (by {by})"
 
     def links_for(self, item_id: str) -> list[tuple[str, str]]:
@@ -2491,8 +2619,9 @@ class Board:
         if not text.strip():
             raise BoardError("a comment needs text")
         item = self.find(item_id)
-        item.comments.append(Comment(at=now(), by=by, text=text.strip()))
-        made, missing = self._links_from_text(item, text, by)
+        at = now()
+        item.comments.append(Comment(at=at, by=by, text=text.strip()))
+        made, missing = self._links_from_text(item, text, by, at)
         note = ""
         if made:
             note += f"; references {', '.join(made)}"
@@ -2507,7 +2636,9 @@ class Board:
     # ordinary prose -- "28 tests", "step 12" -- from silently wiring cards together.
     TICKET_MENTION = re.compile(r"#(\d{1,6})\b")
 
-    def _links_from_text(self, item: Item, text: str, by: Actor) -> tuple[list[str], list[str]]:
+    def _links_from_text(
+        self, item: Item, text: str, by: Actor, at: str
+    ) -> tuple[list[str], list[str]]:
         """Add a `references` link for each `#nnnn` a comment names. Card #0028.
 
         **Terry's example, verbatim:** *"If I tag ticket 9876 in a comment with 'See
@@ -2559,6 +2690,16 @@ class Board:
             if self.find_link(item.id, "references", other.id) is not None:
                 continue
             self.links.append(Link(frm=item.id, kind="references", to=other.id))
+            self.relationship_history.append(
+                RelationshipChange(
+                    at=at,
+                    by=by,
+                    action="linked",
+                    frm=item.id,
+                    kind="references",
+                    to=other.id,
+                )
+            )
             made.append(other.label)
         return made, missing
 
@@ -4124,9 +4265,10 @@ def activity_events(
 ) -> list[ActivityEvent]:
     """Return sanitized events in one inclusive window, oldest first.
 
-    History and comments are separate persisted arrays, so events sharing a one-second
-    timestamp have no recoverable cross-array causal order. Ticket, source sequence,
-    and kind provide a deterministic tie-break without pretending otherwise.
+    History, comments, and relationship history are separate persisted arrays, so events
+    sharing a one-second timestamp have no recoverable cross-array causal order. Ticket,
+    source sequence, and kind provide a deterministic tie-break without pretending
+    otherwise.
     """
     events: list[ActivityEvent] = []
     for item in board.items:
@@ -4188,6 +4330,26 @@ def activity_events(
                     sequence=len(item.history) + index,
                 )
             )
+    for index, change in enumerate(board.relationship_history):
+        instant = _event_instant(change.at, f"relationshipHistory[{index}]")
+        if instant < start or (end is not None and instant > end):
+            continue
+        item = board.find(change.frm)
+        other = board.find(change.to)
+        events.append(
+            ActivityEvent(
+                ticket=item.ticket,
+                item_id=item.id,
+                kind=change.action,
+                at=change.at,
+                instant=instant,
+                by=change.by,
+                relationship_kind=change.kind,
+                other_ticket=other.ticket,
+                other_id=other.id,
+                sequence=len(item.history) + len(item.comments) + index,
+            )
+        )
     return sorted(
         events, key=lambda event: (event.instant, event.ticket, event.sequence, event.kind)
     )

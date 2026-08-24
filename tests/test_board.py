@@ -116,10 +116,21 @@ def test_human_comment_creates_reference_but_bot_comment_does_not(board: board_s
     board.comment("alpha", "See #0002", "terry")
     assert board.links_for("alpha") == [("references", "beta")]
     assert board.links_for("beta") == [("referenced_by", "alpha")]
+    assert board.relationship_history == [
+        board_state.RelationshipChange(
+            at=board.find("alpha").comments[-1].at,
+            by="terry",
+            action="linked",
+            frm="alpha",
+            kind="references",
+            to="beta",
+        )
+    ]
 
     board.links.clear()
     board.comment("alpha", "Explaining #0002", "bot")
     assert board.links == []
+    assert len(board.relationship_history) == 1
 
 
 def test_link_is_stored_once_and_inverse_is_derived(board: board_state.Board) -> None:
@@ -130,6 +141,25 @@ def test_link_is_stored_once_and_inverse_is_derived(board: board_state.Board) ->
     assert len(board.links) == 1
     assert board.links_for("alpha") == [("blocks", "beta")]
     assert board.links_for("beta") == [("blocked_by", "alpha")]
+    assert board.relationship_history[-1] == board_state.RelationshipChange(
+        at=board.relationship_history[-1].at,
+        by="bot",
+        action="linked",
+        frm="beta",
+        kind="blocked_by",
+        to="alpha",
+    )
+
+    board.unlink("beta", "blocked_by", "alpha", "bot")
+    assert board.links == []
+    assert board.relationship_history[-1] == board_state.RelationshipChange(
+        at=board.relationship_history[-1].at,
+        by="bot",
+        action="unlinked",
+        frm="beta",
+        kind="blocked_by",
+        to="alpha",
+    )
 
 
 def test_parent_cycle_is_refused_and_rolled_back(board: board_state.Board) -> None:

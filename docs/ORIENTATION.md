@@ -81,7 +81,7 @@ The board owns all deployment-specific state and resolved behavior:
 - users, labels, human/bot classes, and UI colors;
 - `browserUser`, `cliUser`, and `defaultOwner`;
 - monotonic `revision` and `nextTicket` values;
-- cards, links, comments, and history.
+- cards, links, comments, item history, and relationship history;
 - lane order, stable IDs, mutable labels, and lane creation rights;
 - priority order, IDs, labels, and default;
 - directed transition edges grouped under actor IDs.
@@ -126,8 +126,9 @@ monotonically allocated ticket number. Ticket order is creation order, so parsin
 timestamps would add another failure mode without changing the result. The browser and
 focused CLI triage queries share this exact comparator.
 
-History and comments are separate. History is machine-written and append-only;
-comments are human/bot prose. There are three history event shapes:
+Item history, relationship history, and comments are separate. Both histories are
+machine-written and append-only; comments are human/bot prose. Item history has three
+event shapes:
 
 | Kind | Discriminant | Meaning |
 |---|---|---|
@@ -140,11 +141,17 @@ compares the result to stored state. It also validates owner and priority target
 their history entries. It detects direct state edits but cannot prove that a hand-edited
 history entry naming an actor on a legal edge was really made by that actor.
 
-Title, description, project, parent, and relationship edits do not receive their own
-board-history entries. The existing design expects Git history to carry those earlier
-values when the board lives in a Git repository. Automatic Git publishing is off by
-default, so that expectation is only true when the operator has deliberately arranged
-versioned board storage.
+Link and unlink actions append a board-level `relationshipHistory` entry containing the
+timestamp, actor, caller-facing relationship direction, and both stable card IDs. It is
+separate from current canonical `links` state so a removed link remains attributable.
+The field is optional under schema 4: older boards begin recording with their first new
+relationship mutation, and no timestamp or actor is fabricated for an existing link.
+
+Title, description, project, and parent edits do not receive their own board-history
+entries. The existing design expects Git history to carry those earlier values when the
+board lives in a Git repository. Automatic Git publishing is off by default, so that
+expectation is only true when the operator has deliberately arranged versioned board
+storage.
 
 ## Relationships and hierarchy
 
@@ -163,7 +170,9 @@ General links are stored once in canonical direction and their inverse is derive
 This representation makes a half-written relationship impossible. Human comments
 automatically add `references` links for `#1234` mentions; bot comments intentionally
 do not, because bots commonly mention ticket numbers while explaining rather than
-linking. Explicit CLI/API links remain available to either authenticated actor.
+linking. An automatic reference uses the comment timestamp and human actor in
+relationship history. Explicit CLI/API links remain available to either authenticated
+actor.
 
 ## Lane policy and the non-table rule
 
@@ -291,12 +300,13 @@ details and comment text. Search refuses audit drift and changes no persisted or
 schema.
 
 `--activity-since` and `--activity-between` merge creation, movement, assignment,
-priority, and comment audit records into an inclusive chronological report. Their RFC
-3339 bounds must carry an explicit UTC offset. The report intentionally omits card
-subjects, details, and comment text; JSON output is therefore composable without
-turning routine coordination into a prose export. Cross-array events recorded at the
-same instant have a deterministic tie-break order, because the snapshot cannot recover
-their original causal order.
+priority, comment, link, and unlink audit records into an inclusive chronological
+report. Their RFC 3339 bounds must carry an explicit UTC offset. Relationship events
+name the caller-facing kind and opposite ticket endpoint. The report intentionally
+omits card subjects, details, and comment text; JSON output is therefore composable
+without turning routine coordination into a prose export. Cross-array events recorded
+at the same instant have a deterministic tie-break order, because the snapshot cannot
+recover their original causal order.
 
 ## Board-data placement
 

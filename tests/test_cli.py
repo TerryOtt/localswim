@@ -244,6 +244,10 @@ def activity_board(path: pathlib.Path) -> None:
     alpha.comments[-1].at = "2026-08-23T10:04:00Z"
     board.create("beta", "Later private subject", "backlog", "bot")
     board.find("beta").history[-1].at = "2026-08-23T10:06:00Z"
+    board.link("alpha", "blocked_by", "beta", "bot")
+    board.relationship_history[-1].at = "2026-08-23T10:07:00Z"
+    board.unlink("alpha", "blocked_by", "beta", "bot")
+    board.relationship_history[-1].at = "2026-08-23T10:08:00Z"
     board_state.save(board, path)
 
 
@@ -644,6 +648,8 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
         "prioritized",
         "commented",
         "created",
+        "linked",
+        "unlinked",
     ]
     comment = next(event for event in events if event["kind"] == "commented")
     assert comment["commentChars"] == 19
@@ -651,6 +657,47 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
     assert "instant" not in comment
     assert "sequence" not in comment
     assert "private board words" not in result.stdout
+    assert "Private subject" not in result.stdout
+    relationship_events = [event for event in events if event["kind"] in {"linked", "unlinked"}]
+    assert relationship_events == [
+        {
+            "ticket": 1,
+            "id": "alpha",
+            "kind": "linked",
+            "at": "2026-08-23T10:07:00Z",
+            "by": "bot",
+            "relationshipKind": "blocked_by",
+            "otherTicket": 2,
+            "otherId": "beta",
+        },
+        {
+            "ticket": 1,
+            "id": "alpha",
+            "kind": "unlinked",
+            "at": "2026-08-23T10:08:00Z",
+            "by": "bot",
+            "relationshipKind": "blocked_by",
+            "otherTicket": 2,
+            "otherId": "beta",
+        },
+    ]
+
+
+def test_activity_relationship_human_output_names_opposite_endpoint(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+
+    result = run_cli(path, "--activity-since", "2026-08-23T10:07:00Z")
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "2026-08-23T10:07:00Z  #0001 alpha  linked by bot  blocked_by #0002 beta" in result.stdout
+    )
+    assert (
+        "2026-08-23T10:08:00Z  #0001 alpha  unlinked by bot  blocked_by #0002 beta" in result.stdout
+    )
     assert "Private subject" not in result.stdout
 
 
