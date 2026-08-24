@@ -247,6 +247,136 @@ def activity_board(path: pathlib.Path) -> None:
     board_state.save(board, path)
 
 
+def inspection_board(path: pathlib.Path) -> None:
+    """Write one card with every focused-inspection relationship shape."""
+    board = board_state.Board(
+        project="Inspection",
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
+    )
+    board.create("parent", "Parent subject", "backlog", "bot")
+    board.create(
+        "focus",
+        "Focused subject",
+        "ready_for_work",
+        "bot",
+        priority="P1",
+        detail="Private focused detail",
+    )
+    board.create("child", "Child subject", "backlog", "bot")
+    board.create("blocker", "Blocker subject", "ready_for_work", "bot", priority="P2")
+    board.set_parent("focus", "parent", "bot")
+    board.set_parent("child", "focus", "bot")
+    board.link("focus", "blocked_by", "blocker", "bot")
+    board.comment("focus", "Private focused comment", "terry")
+    board_state.save(board, path)
+
+
+def test_show_json_resolves_ticket_and_relationships_without_prose(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    result = run_cli(path, "--show", "#0002", "--json")
+
+    assert result.returncode == 0, result.stderr
+    report = cast("dict[str, Any]", json.loads(result.stdout))
+    assert report["id"] == "focus"
+    assert report["ticket"] == 2
+    assert report["subject"] == "Focused subject"
+    assert report["state"] == "ready_for_work"
+    assert report["priority"] == "P1"
+    assert report["owner"] == "bot"
+    assert report["commentCount"] == 1
+    assert cast("dict[str, Any]", report["parent"])["id"] == "parent"
+    assert [child["id"] for child in cast("list[dict[str, Any]]", report["children"])] == ["child"]
+    relationships = cast("list[dict[str, Any]]", report["relationships"])
+    assert relationships == [
+        {
+            "kind": "blocked_by",
+            "item": {
+                "id": "blocker",
+                "ticket": 4,
+                "subject": "Blocker subject",
+                "state": "ready_for_work",
+                "priority": "P2",
+                "owner": "bot",
+            },
+        }
+    ]
+    assert "detail" not in report
+    assert "comments" not in report
+    assert "Private focused detail" not in result.stdout
+    assert "Private focused comment" not in result.stdout
+
+
+def test_show_human_output_is_safe_until_prose_is_explicitly_requested(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    safe = run_cli(path, "--show", "2")
+    with_prose = run_cli(path, "--show", "focus", "--include-prose")
+    with_prose_json = run_cli(path, "--show", "focus", "--include-prose", "--json")
+
+    assert safe.returncode == 0, safe.stderr
+    assert "#0002 focus" in safe.stdout
+    assert "blocked_by: #0004 blocker" in safe.stdout
+    assert "comments: 1" in safe.stdout
+    assert "Private focused detail" not in safe.stdout
+    assert "Private focused comment" not in safe.stdout
+    assert with_prose.returncode == 0, with_prose.stderr
+    assert "Private focused detail" in with_prose.stdout
+    assert "Private focused comment" in with_prose.stdout
+    assert with_prose_json.returncode == 0, with_prose_json.stderr
+    prose_report = cast("dict[str, Any]", json.loads(with_prose_json.stdout))
+    assert prose_report["detail"] == "Private focused detail"
+    comments = cast("list[dict[str, Any]]", prose_report["comments"])
+    assert comments[0]["text"] == "Private focused comment"
+
+
+def test_show_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+    board = board_state.load(path)
+    board.find("focus").state = "completed"
+    board_state.save(board, path)
+
+    result = run_cli(path, "--show", "focus")
+
+    assert result.returncode != 0
+    assert "focused inspection refused 1 audit-trail problem" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (("--include-prose",), "requires --show"),
+        (("--show", "focus", "--verify"), "cannot be combined"),
+        (("--show", "focus", "--comment", "focus", "no"), "cannot be combined"),
+        (("--show", "999"), "no card with ticket #0999"),
+    ],
+)
+def test_show_rejects_invalid_or_conflicting_arguments(
+    tmp_path: pathlib.Path,
+    arguments: tuple[str, ...],
+    message: str,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    result = run_cli(path, *arguments)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_activity_between_is_inclusive_chronological_and_sanitized(
     tmp_path: pathlib.Path,
 ) -> None:

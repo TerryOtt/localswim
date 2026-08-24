@@ -85,6 +85,20 @@ uv run --frozen localswim-cli boards/my-project.json --verify
 uv run --frozen localswim-cli boards/my-project.json --json
 ~~~
 
+Inspect one card by stable ID or ticket number without dumping the board:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json --show 137
+uv run --frozen localswim-cli boards/my-project.json --show '#0137' --json
+uv run --frozen localswim-cli boards/my-project.json --show upload-retry --include-prose
+~~~
+
+The focused report includes state, priority, owner, comment count, parent, children,
+and directional relationships with each related card's current status. Its default
+human and JSON forms omit detail and comment text. `--include-prose` is the explicit
+opt-in for that selected card's description and comments; bounded activity remains the
+audit-history interface.
+
 Time-bounded activity reports combine card creation, movement, assignment, priority,
 and comment events into one chronological stream:
 

@@ -3500,6 +3500,20 @@ def _add_activity_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
+    """Keep focused reads together and make detail/comment exposure explicit."""
+    parser.add_argument(
+        "--show",
+        metavar="REF",
+        help="show one card by stable ID or ticket number, including relationships",
+    )
+    parser.add_argument(
+        "--include-prose",
+        action="store_true",
+        help="include detail and comment text in --show output",
+    )
+
+
 def _activity_requested(args: argparse.Namespace) -> bool:
     """Whether this invocation selects either activity report."""
     return bool(args.activity_since or args.activity_between)
@@ -3524,10 +3538,41 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
                 args.owner,
                 args.detail,
                 args.detail_file,
+                args.show,
+                args.include_prose,
             )
         )
     ):
         raise BoardError("activity queries cannot be combined with writes, migrations, or --verify")
+
+
+def _validate_inspection_arguments(args: argparse.Namespace) -> None:
+    """Keep focused inspection read-only and require an explicit content request."""
+    if args.include_prose and not args.show:
+        raise BoardError("--include-prose requires --show")
+    if not args.show:
+        return
+    if (
+        args.shutdown
+        or args.verify
+        or _activity_requested(args)
+        or any(getattr(args, name) for name in MUTATIONS)
+        or any(
+            (
+                args.init,
+                args.embed_policy,
+                args.migrate_lane,
+                args.rename_lane_label,
+                args.migrate_lane_id,
+                args.state,
+                args.priority,
+                args.owner,
+                args.detail,
+                args.detail_file,
+            )
+        )
+    ):
+        raise BoardError("--show cannot be combined with writes, migrations, activity, or --verify")
 
 
 def _run_offline_operation(args: argparse.Namespace) -> str | None:
@@ -3554,6 +3599,8 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         or args.detail_file
         or args.activity_since
         or args.activity_between
+        or args.show
+        or args.include_prose
     )
     if conflict:
         raise BoardError("offline board setup and migration flags cannot be combined")
@@ -3590,6 +3637,8 @@ def _run_shutdown_operation(args: argparse.Namespace) -> str | None:
                 args.detail_file,
                 args.activity_since,
                 args.activity_between,
+                args.show,
+                args.include_prose,
             )
         )
     )
@@ -3624,6 +3673,26 @@ def _handle_remote_mutation(args: argparse.Namespace, parser: argparse.ArgumentP
     return True
 
 
+def _handle_inspection_report(
+    board: Board,
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> bool:
+    """Run one focused inspection report when requested."""
+    if not args.show:
+        return False
+    try:
+        _report_item(
+            board,
+            str(args.show),
+            as_json=bool(args.json),
+            include_prose=bool(args.include_prose),
+        )
+    except BoardError as exc:
+        parser.error(str(exc))
+    return True
+
+
 def _configure_cli_streams() -> None:
     """Make every CLI result representable regardless of the inherited locale.
 
@@ -3655,6 +3724,7 @@ def main() -> None:
         help="replay every history and refuse a state it disagrees with",
     )
     _add_activity_arguments(ap)
+    _add_inspection_arguments(ap)
     _add_offline_arguments(ap)
     ap.add_argument("--move", nargs=2, metavar=("ID", "STATE"), help="move one card")
     ap.add_argument(
@@ -3753,6 +3823,7 @@ def main() -> None:
 
     try:
         _validate_activity_arguments(args)
+        _validate_inspection_arguments(args)
         offline_result = _run_offline_operation(args)
     except BoardError as exc:
         ap.error(str(exc))
@@ -3767,6 +3838,8 @@ def main() -> None:
         return
 
     board = load(args.board)
+    if _handle_inspection_report(board, args, ap):
+        return
     if _activity_requested(args):
         try:
             bounds = _activity_bounds(args)
@@ -3801,6 +3874,130 @@ MUTATIONS = (
     "set_parent",
     "clear_parent",
 )
+
+
+@dataclass(frozen=True)
+class ItemSummary:
+    """The default coordination fields needed to identify one related card."""
+
+    item_id: str
+    ticket: int
+    subject: str
+    state: str
+    priority: str
+    owner: str
+
+    @classmethod
+    def from_item(cls, item: Item) -> Self:
+        """Build one summary from a validated board item."""
+        return cls(
+            item_id=item.id,
+            ticket=item.ticket,
+            subject=item.subject,
+            state=item.state,
+            priority=item.priority,
+            owner=item.owner,
+        )
+
+    @property
+    def label(self) -> str:
+        """Return the human ticket label without requiring the source item."""
+        return f"#{self.ticket:04d}"
+
+    def to_json(self) -> JsonObject:
+        """Return the focused CLI JSON shape for one card reference."""
+        return {
+            "id": self.item_id,
+            "ticket": self.ticket,
+            "subject": self.subject,
+            "state": self.state,
+            "priority": self.priority,
+            "owner": self.owner,
+        }
+
+    def describe(self) -> str:
+        """Return one compact relationship endpoint for human output."""
+        return (
+            f"{self.label} {self.item_id} [{self.state}, {self.priority}, owner {self.owner}] "
+            f"{self.subject}"
+        )
+
+
+@dataclass(frozen=True)
+class ItemRelationship:
+    """One directional relationship as the inspected card sees it."""
+
+    kind: str
+    item: ItemSummary
+
+    def to_json(self) -> JsonObject:
+        """Return a relationship and its resolved opposite endpoint."""
+        return {"kind": self.kind, "item": cast("JsonValue", self.item.to_json())}
+
+
+@dataclass(frozen=True)
+class ItemInspection:
+    """One focused report with detail and comments omitted unless requested."""
+
+    item: ItemSummary
+    comment_count: int
+    parent: ItemSummary | None
+    children: tuple[ItemSummary, ...]
+    relationships: tuple[ItemRelationship, ...]
+    detail: str | None = None
+    comments: tuple[Comment, ...] | None = None
+
+    def to_json(self) -> JsonObject:
+        """Return a composable focused report without implicit prose exposure."""
+        out = self.item.to_json()
+        out["commentCount"] = self.comment_count
+        out["parent"] = (
+            cast("JsonValue", self.parent.to_json()) if self.parent is not None else None
+        )
+        out["children"] = [cast("JsonValue", child.to_json()) for child in self.children]
+        out["relationships"] = [
+            cast("JsonValue", relationship.to_json()) for relationship in self.relationships
+        ]
+        if self.detail is not None:
+            out["detail"] = self.detail
+        if self.comments is not None:
+            out["comments"] = [cast("JsonValue", comment.to_json()) for comment in self.comments]
+        return out
+
+
+def inspect_item(board: Board, ref: str, *, include_prose: bool = False) -> ItemInspection:
+    """Resolve one card plus its parent, children, and directional relationships."""
+    item = board.find(ref)
+    parent = ItemSummary.from_item(board.find(item.parent)) if item.parent else None
+    children = tuple(
+        ItemSummary.from_item(child)
+        for child in sorted(
+            (candidate for candidate in board.items if candidate.parent == item.id),
+            key=lambda candidate: (candidate.ticket, candidate.id),
+        )
+    )
+    relationships = tuple(
+        sorted(
+            (
+                ItemRelationship(kind, ItemSummary.from_item(board.find(other_id)))
+                for kind, other_id in board.links_for(item.id)
+            ),
+            key=lambda relationship: (
+                relationship.kind,
+                relationship.item.ticket,
+                relationship.item.item_id,
+            ),
+        )
+    )
+    return ItemInspection(
+        item=ItemSummary.from_item(item),
+        comment_count=len(item.comments),
+        parent=parent,
+        children=children,
+        relationships=relationships,
+        detail=item.detail if include_prose else None,
+        comments=tuple(item.comments) if include_prose else None,
+    )
 
 
 def _detail_text(args: argparse.Namespace) -> str:
@@ -3957,6 +4154,74 @@ def _report_activity(
         return
     for event in events:
         print(f"  {event.describe()}")
+
+
+def _print_report_section(label: str, lines: tuple[str, ...]) -> None:
+    """Print one indented report section with an explicit empty value."""
+    print(f"  {label}:")
+    if not lines:
+        print("    none")
+        return
+    for line in lines:
+        print(f"    {line}")
+
+
+def _comment_report_lines(comments: tuple[Comment, ...]) -> tuple[str, ...]:
+    """Render explicit comment prose with its author and timestamp."""
+    lines: list[str] = []
+    for comment in comments:
+        lines.append(f"{comment.at}  {comment.by}")
+        lines.extend(f"  {line}" for line in comment.text.splitlines())
+    return tuple(lines)
+
+
+def _report_item(
+    board: Board,
+    ref: str,
+    *,
+    as_json: bool,
+    include_prose: bool,
+) -> None:
+    """Print one focused card report with optional private prose."""
+    drift = board.verify()
+    if drift:
+        raise BoardError(
+            f"focused inspection refused {len(drift)} audit-trail problem(s): {drift[0]}"
+        )
+    inspection = inspect_item(board, ref, include_prose=include_prose)
+    if as_json:
+        print(json.dumps(inspection.to_json(), indent=2, ensure_ascii=False))
+        return
+
+    item = inspection.item
+    print(f"{item.label} {item.item_id}")
+    print(f"  subject: {item.subject}")
+    print(f"  state: {item.state}")
+    print(f"  priority: {item.priority}")
+    print(f"  owner: {item.owner}")
+    print(f"  comments: {inspection.comment_count}")
+    parent = inspection.parent.describe() if inspection.parent is not None else "none"
+    print(f"  parent: {parent}")
+
+    _print_report_section(
+        "children",
+        tuple(child.describe() for child in inspection.children),
+    )
+    _print_report_section(
+        "relationships",
+        tuple(
+            f"{relationship.kind}: {relationship.item.describe()}"
+            for relationship in inspection.relationships
+        ),
+    )
+
+    if not include_prose:
+        return
+    _print_report_section(
+        "detail",
+        tuple(inspection.detail.splitlines()) if inspection.detail else (),
+    )
+    _print_report_section("comment text", _comment_report_lines(inspection.comments or ()))
 
 
 def _report(board: Board, args: argparse.Namespace) -> None:

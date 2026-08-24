@@ -262,6 +262,14 @@ correctness boundary, not presentation polish: Windows may otherwise inherit CP1
 commit a service mutation, and then raise while printing the Unicode move arrow,
 turning a successful write into an apparent command failure.
 
+`--show REF` uses the domain model's stable ID-or-ticket lookup and returns one focused
+card report. It resolves the parent, children, and every relationship in the direction
+the selected card sees it, including the opposite endpoint's current state, priority,
+and owner. Both human and JSON defaults expose the subject and comment count but omit
+detail and comment text. `--include-prose` opts into that private content for the one
+selected card. The report is read-only, works without a running service, and changes no
+persisted or REST schema.
+
 `--activity-since` and `--activity-between` merge creation, movement, assignment,
 priority, and comment audit records into an inclusive chronological report. Their RFC
 3339 bounds must carry an explicit UTC offset. The report intentionally omits card
