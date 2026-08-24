@@ -214,6 +214,14 @@ pushed to its configured remote in the same agent turn. Never leave a local-only
 localswim commit when that remote exists. If a push fails, report the failure
 immediately and do not describe the change as fully handed off.
 
+Terry's standing order, issued 2026-08-24, is that the FGA and localswim inception
+board services **MUST NOT** retain a Build ID ending in `-dirty` after the source
+checkout can safely be clean. Preserve a truthful suffix while tracked or untracked
+work remains; never suppress or spoof it. Once authorized work is verified, committed,
+and pushed, promptly use the supported hot-re-exec or graceful lifecycle boundary to
+refresh any service that captured the earlier dirty identity, then confirm both status
+endpoints report clean Build IDs and healthy autopush.
+
 The active server-side rule must match `.github/rulesets/main.json`, and
 `.github/workflows/contribution-policy.yml` supplies its required branch-name check.
 The repository merge settings must match `.github/repository-settings.json`: only
