@@ -209,6 +209,11 @@ reproducible. That authorization includes building and reinstalling local wheels
 does not authorize publishing packages to a registry, creating GitHub releases, or
 including unrelated user changes.
 
+Terry's standing order, issued 2026-08-24, is that every localswim commit **MUST** be
+pushed to its configured remote in the same agent turn. Never leave a local-only
+localswim commit when that remote exists. If a push fails, report the failure
+immediately and do not describe the change as fully handed off.
+
 The active server-side rule must match `.github/rulesets/main.json`, and
 `.github/workflows/contribution-policy.yml` supplies its required branch-name check.
 The repository merge settings must match `.github/repository-settings.json`: only
