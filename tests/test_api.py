@@ -38,6 +38,7 @@ def api(tmp_path: pathlib.Path) -> Iterator[RunningApi]:
     board_state.save(board, path)
     api_endpoint.BOARD_PATH = path
     api_endpoint.STORE = api_endpoint.BoardStore(path)
+    api_endpoint._shutdown_requested.clear()
     server = api_endpoint.http.server.ThreadingHTTPServer(
         (api_endpoint.HOST, 0), api_endpoint.Handler
     )
@@ -46,9 +47,11 @@ def api(tmp_path: pathlib.Path) -> Iterator[RunningApi]:
     try:
         yield RunningApi(f"http://127.0.0.1:{server.server_address[1]}", path)
     finally:
-        server.shutdown()
+        if thread.is_alive():
+            server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        api_endpoint._shutdown_requested.clear()
         api_endpoint.STORE = None
 
 
@@ -309,6 +312,65 @@ def test_missing_credential_returns_401(api: RunningApi) -> None:
     )
     assert code == 401
     assert "credential" in response["error"]
+
+
+def test_shutdown_requires_cli_credential(api: RunningApi) -> None:
+    code, response = request_json(api.base + API + "/shutdown", body={})
+
+    assert code == 401
+    assert "credential" in response["error"]
+    assert not api_endpoint._shutdown_requested.is_set()
+
+
+def test_authenticated_shutdown_flushes_and_stops(
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def successful_flush(_path: pathlib.Path) -> tuple[bool, str]:
+        return True, "no board change to commit"
+
+    monkeypatch.setattr(
+        api_endpoint,
+        "flush_autopush_for_shutdown",
+        successful_flush,
+    )
+
+    code, response = request_json(
+        api.base + API + "/shutdown",
+        token=api_endpoint.CLI_TOKEN,
+        body={},
+    )
+
+    assert code == 200
+    assert response == {
+        "result": "board service shutdown scheduled",
+        "push": "no board change to commit",
+    }
+    assert api_endpoint._shutdown_requested.is_set()
+
+
+def test_failed_shutdown_flush_leaves_service_running(
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_flush(_path: pathlib.Path) -> tuple[bool, str]:
+        return False, "push failed"
+
+    monkeypatch.setattr(
+        api_endpoint,
+        "flush_autopush_for_shutdown",
+        failed_flush,
+    )
+
+    code, response = request_json(
+        api.base + API + "/shutdown",
+        token=api_endpoint.CLI_TOKEN,
+        body={},
+    )
+
+    assert code == 503
+    assert response == {"error": "final autopush failed: push failed"}
+    assert not api_endpoint._shutdown_requested.is_set()
 
 
 def test_missing_revision_returns_428(api: RunningApi) -> None:

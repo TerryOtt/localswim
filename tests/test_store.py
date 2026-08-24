@@ -220,6 +220,27 @@ def test_autopush_is_disabled_unless_explicitly_enabled(
     assert "--autopush" in str(api_endpoint.push_status()["detail"])
 
 
+def test_shutdown_flush_pushes_final_snapshot(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = tmp_path / "board.json"
+    calls: list[pathlib.Path] = []
+
+    def successful_push(path: pathlib.Path) -> tuple[bool, str]:
+        calls.append(path)
+        return True, "committed and pushed"
+
+    monkeypatch.setattr(api_endpoint, "_autopush_enabled", True)
+    monkeypatch.setattr(api_endpoint, "push_board", successful_push)
+
+    result = api_endpoint.flush_autopush_for_shutdown(board)
+
+    assert result == (True, "committed and pushed")
+    assert calls == [board]
+    assert api_endpoint.push_status()["state"] == "ok"
+
+
 def test_enabled_autopush_starts_one_daemon_for_the_board(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -28,19 +28,29 @@ def served_board(tmp_path: pathlib.Path) -> Iterator[pathlib.Path]:
     board_state.save(board, path)
     api_endpoint.BOARD_PATH = path
     api_endpoint.STORE = api_endpoint.BoardStore(path)
+    api_endpoint._shutdown_requested.clear()  # noqa: SLF001 -- lifecycle fixture reset
     server = api_endpoint.http.server.ThreadingHTTPServer(
         (api_endpoint.HOST, 0), api_endpoint.Handler
     )
     api_endpoint.publish_service(path, server.server_address[1])
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+
+    def serve() -> None:
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
+            api_endpoint.remove_service(path)
+
+    thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
         yield path
     finally:
-        server.shutdown()
-        server.server_close()
+        if thread.is_alive():
+            server.shutdown()
         thread.join(timeout=2)
         api_endpoint.remove_service(path)
+        api_endpoint._shutdown_requested.clear()  # noqa: SLF001 -- lifecycle fixture reset
         api_endpoint.STORE = None
 
 
@@ -187,6 +197,14 @@ def test_offline_mutation_has_no_direct_write(tmp_path: pathlib.Path) -> None:
     assert "Traceback" not in result.stderr
     assert saved.revision == 0
     assert saved.items == []
+
+
+def test_shutdown_command_stops_live_service(served_board: pathlib.Path) -> None:
+    result = run_cli(served_board, "--shutdown")
+
+    assert result.returncode == 0, result.stderr
+    assert "shutdown scheduled" in result.stdout
+    assert not board_state.service_descriptor_path(served_board).exists()
 
 
 def test_read_only_report_works_offline(tmp_path: pathlib.Path) -> None:

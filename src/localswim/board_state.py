@@ -3310,21 +3310,27 @@ def _service_descriptor(path: pathlib.Path) -> JsonObject:
 
 
 def _service_json(
-    url: str, token: str, *, body: dict[str, object] | None = None, revision: int | None = None
+    url: str,
+    token: str,
+    *,
+    body: dict[str, object] | None = None,
+    revision: int | None = None,
+    timeout: float = 5,
 ) -> JsonObject:
     """Make one authenticated service request and turn refusals into BoardError."""
     headers = {"Authorization": f"Bearer {token}"}
     data: bytes | None = None
     if body is not None:
         headers["Content-Type"] = "application/json"
-        headers["If-Match"] = f'"revision-{revision}"'
+        if revision is not None:
+            headers["If-Match"] = f'"revision-{revision}"'
         data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310 -- URL comes from validated loopback data
         url, data=data, headers=headers, method="POST" if body is not None else "GET"
     )
     try:
         with urllib.request.urlopen(  # noqa: S310 -- only the loopback descriptor is accepted
-            request, timeout=5
+            request, timeout=timeout
         ) as response:
             raw = cast("JsonValue", json.loads(response.read()))
     except urllib.error.HTTPError as exc:
@@ -3339,6 +3345,30 @@ def _service_json(
     if not isinstance(raw, dict):
         raise BoardError("board service returned a non-object response")
     return raw
+
+
+def shutdown_service(path: pathlib.Path) -> str:
+    """Ask one live board service to flush autopush and stop, then await cleanup."""
+    service_path = service_descriptor_path(path)
+    if not service_path.exists():
+        return "board service is already stopped"
+    descriptor = _service_descriptor(path)
+    base = f"http://{descriptor['host']}:{descriptor['port']}"
+    response = _service_json(
+        base + API_PREFIX + "/shutdown",
+        str(descriptor["token"]),
+        body={},
+        timeout=130,
+    )
+    result = response.get("result")
+    if not isinstance(result, str):
+        raise BoardError("board service returned no shutdown result")
+    deadline = time.monotonic() + 10
+    while service_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if service_path.exists():
+        raise BoardError("board service accepted shutdown but did not stop cleanly")
+    return result
 
 
 def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:  # noqa: PLR0912
@@ -3513,6 +3543,7 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         return None
     conflict = (
         sum(bool(operation) for operation in operations) != 1
+        or args.shutdown
         or args.json
         or args.verify
         or any(getattr(args, name) for name in MUTATIONS)
@@ -3537,6 +3568,62 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
     return migrate_lane_id(args.board, *args.migrate_lane_id)
 
 
+def _run_shutdown_operation(args: argparse.Namespace) -> str | None:
+    """Validate and execute the mutually exclusive live-service shutdown operation."""
+    if not args.shutdown:
+        return None
+    conflict = (
+        args.json
+        or args.verify
+        or any(getattr(args, name) for name in MUTATIONS)
+        or any(
+            (
+                args.init,
+                args.embed_policy,
+                args.migrate_lane,
+                args.rename_lane_label,
+                args.migrate_lane_id,
+                args.state,
+                args.priority,
+                args.owner,
+                args.detail,
+                args.detail_file,
+                args.activity_since,
+                args.activity_between,
+            )
+        )
+    )
+    if conflict:
+        raise BoardError("--shutdown cannot be combined with another operation")
+    return shutdown_service(args.board.resolve())
+
+
+def _handle_shutdown_operation(args: argparse.Namespace) -> bool:
+    """Run and report shutdown when requested, returning whether CLI work is complete."""
+    try:
+        result = _run_shutdown_operation(args)
+    except BoardError as exc:
+        raise SystemExit(f"  ERROR: {exc}") from None
+    if result is None:
+        return False
+    print(f"  {result}")
+    return True
+
+
+def _handle_remote_mutation(args: argparse.Namespace, parser: argparse.ArgumentParser) -> bool:
+    """Validate, execute, and report one live-service mutation when requested."""
+    if args.create and not args.state:
+        parser.error("--create needs --state")
+    if not any(getattr(args, name) for name in MUTATIONS):
+        return False
+    try:
+        result = _remote_apply(args.board.resolve(), args)
+    except BoardError as exc:
+        raise SystemExit(f"  ERROR: {exc}") from None
+    print(f"  {result}")
+    return True
+
+
 def _configure_cli_streams() -> None:
     """Make every CLI result representable regardless of the inherited locale.
 
@@ -3556,6 +3643,11 @@ def main() -> None:
     _configure_cli_streams()
     ap = argparse.ArgumentParser(description="Inspect or update a localswim board.")
     ap.add_argument("board", type=pathlib.Path, help="path to the board JSON")
+    ap.add_argument(
+        "--shutdown",
+        action="store_true",
+        help="flush autopush and stop the live board service",
+    )
     ap.add_argument("--json", action="store_true", help="dump the parsed board")
     ap.add_argument(
         "--verify",
@@ -3668,15 +3760,10 @@ def main() -> None:
         print(f"  {offline_result}")
         return
 
-    if args.create and not args.state:
-        ap.error("--create needs --state")
+    if _handle_shutdown_operation(args):
+        return
 
-    if any(getattr(args, name) for name in MUTATIONS):
-        try:
-            result = _remote_apply(args.board.resolve(), args)
-        except BoardError as exc:
-            raise SystemExit(f"  ERROR: {exc}") from None
-        print(f"  {result}")
+    if _handle_remote_mutation(args, ap):
         return
 
     board = load(args.board)

@@ -347,6 +347,27 @@ class BoardHttpServer(http.server.ThreadingHTTPServer):
     block_on_close = True
 
 
+_shutdown_requested = threading.Event()
+_command_gate = threading.Lock()
+
+
+def request_service_shutdown(server: socketserver.BaseServer) -> tuple[bool, str]:
+    """Quiesce mutations, flush autopush, and schedule one clean server shutdown."""
+    with _command_gate:
+        if _shutdown_requested.is_set():
+            return True, "shutdown is already in progress"
+        ok, detail = flush_autopush_for_shutdown(BOARD_PATH)
+        if not ok:
+            return False, detail
+        _shutdown_requested.set()
+        threading.Thread(
+            target=server.shutdown,
+            name="service-shutdown",
+            daemon=True,
+        ).start()
+        return True, detail
+
+
 def _reexec_if_requested() -> None:
     """Replace this process after its listening socket and request threads close."""
     if not _restart_requested.is_set():
@@ -389,7 +410,9 @@ _PUSH_TIMEOUT_S = 120
 # the toolchain banner: loudness tracks what Terry can act on. `off` is a legitimate
 # configuration, `pending` is normal, `ok` is the resting state.
 _push_lock = threading.Lock()
+_push_operation_lock = threading.Lock()
 _push_state: dict[str, object] = {"state": "off", "at": 0.0, "detail": "not started"}
+_autopush_enabled = False
 
 
 def _set_push(state: str, detail: str) -> None:
@@ -404,6 +427,22 @@ def push_status() -> dict[str, object]:
     """A snapshot of the autopush verdict. Copied under the lock, never handed out live."""
     with _push_lock:
         return dict(_push_state)
+
+
+def _push_once(board_path: pathlib.Path) -> tuple[bool, str]:
+    """Serialize one commit-and-push attempt and publish its result."""
+    with _push_operation_lock:
+        ok, detail = push_board(board_path)
+        _set_push("ok" if ok else "failed", detail)
+        return ok, detail
+
+
+def flush_autopush_for_shutdown(board_path: pathlib.Path) -> tuple[bool, str]:
+    """Push the final quiescent board snapshot before an intentional shutdown."""
+    if not _autopush_enabled:
+        return True, "autopush is disabled"
+    _set_push("pending", "performing final shutdown push")
+    return _push_once(board_path)
 
 
 def _git(args: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess[str]:
@@ -519,8 +558,7 @@ def _push_loop(board_path: pathlib.Path) -> None:
         if dirty_at is None or time.time() - dirty_at < _PUSH_QUIET_S:
             continue
         dirty_at = None
-        ok, detail = push_board(board_path)
-        _set_push("ok" if ok else "failed", detail)
+        ok, detail = _push_once(board_path)
         if not ok:
             print(f"  AUTOPUSH FAILED: {detail}", flush=True)
 
@@ -531,6 +569,8 @@ def start_autopush(
     enabled: bool,
 ) -> threading.Thread | None:
     """Start the optional publisher, or publish an explicit disabled status."""
+    global _autopush_enabled  # noqa: PLW0603 -- one service owns one autopush mode
+    _autopush_enabled = enabled
     if not enabled:
         _set_push("off", "disabled; start the server with --autopush to enable")
         print("  autopush  : OFF -- enable with --autopush", flush=True)
@@ -3846,6 +3886,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: PLR0911 -- BaseHTTPRequestHandler contract
         """Execute one authenticated, revision-checked domain command."""
         route = self.path.partition("?")[0]
+        if route == API_PREFIX + "/shutdown":
+            if self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
+                self._json({"error": "missing or invalid service credential"}, 401)
+                return
+            ok, detail = request_service_shutdown(self.server)
+            if not ok:
+                self._json({"error": f"final autopush failed: {detail}"}, 503)
+                return
+            self._json({"result": "board service shutdown scheduled", "push": detail})
+            return
         parts = [urllib.parse.unquote(part) for part in route.strip("/").split("/")]
         command_parts = parts[len(API_PARTS) :] if parts[: len(API_PARTS)] == API_PARTS else []
         is_create = command_parts == ["cards"]
@@ -3868,25 +3918,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"error": "bad request body"}, 400)
             return
 
-        store = STORE
-        if store is None:
-            self._json({"error": "board store is not initialized"}, 409)
-            return
+        with _command_gate:
+            if _shutdown_requested.is_set():
+                self._json({"error": "board service shutdown is in progress"}, 503)
+                return
+            store = STORE
+            if store is None:
+                self._json({"error": "board store is not initialized"}, 409)
+                return
 
-        def mutate(board: board_state.Board) -> str:
-            return _apply_http_command(board, command_parts, body, actor, store.policy)
+            def mutate(board: board_state.Board) -> str:
+                return _apply_http_command(board, command_parts, body, actor, store.policy)
 
-        try:
-            result, revision = store.execute(expected, mutate)
-        except KeyError as exc:
-            self._json({"error": f"missing field {exc}"}, 400)
-            return
-        except RevisionConflict as exc:
-            self._json({"error": str(exc)}, 412)
-            return
-        except (board_state.BoardError, OSError, json.JSONDecodeError) as exc:
-            self._json({"error": str(exc)}, 409)
-            return
+            try:
+                result, revision = store.execute(expected, mutate)
+            except KeyError as exc:
+                self._json({"error": f"missing field {exc}"}, 400)
+                return
+            except RevisionConflict as exc:
+                self._json({"error": str(exc)}, 412)
+                return
+            except (board_state.BoardError, OSError, json.JSONDecodeError) as exc:
+                self._json({"error": str(exc)}, 409)
+                return
 
         print(f"  {result}", flush=True)
         self._json({"result": result, "revision": revision})
@@ -3924,6 +3978,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main() -> None:
     global BOARD_PATH, STORE  # noqa: PLW0603 -- one process serves one board
     args = parse_args()
+    _shutdown_requested.clear()
     BOARD_PATH = args.board.resolve()
 
     if problem := source_checkout_board_problem(BOARD_PATH):
@@ -3981,8 +4036,8 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
-        remove_service(BOARD_PATH)
         server.server_close()
+        remove_service(BOARD_PATH)
     _reexec_if_requested()
 
 

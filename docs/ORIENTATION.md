@@ -321,6 +321,11 @@ establish that a configured remote is private. A failed push keeps the successfu
 commit so a later push can carry it; the UI reports the failure. The ignored `boards/`
 directory in this public source checkout is therefore for local data, not for autopush.
 
+`localswim-cli <board> --shutdown` is the graceful service boundary. The authenticated
+request serializes behind active mutations, performs a final autopush immediately, and
+shuts down only after that push succeeds. The service removes its rendezvous descriptor
+after request threads close; the CLI waits for that removal before reporting success.
+
 ## Tests and development gate
 
 The suite spans these boundaries:

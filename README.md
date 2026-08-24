@@ -198,6 +198,18 @@ adopted on the first pass; unrelated tracked or untracked files remain untouched
 server refuses ignored boards, non-repositories and repositories without a remote; it
 cannot prove that a configured remote is private.
 
+Stop a live service through its authenticated CLI rendezvous rather than terminating
+its process:
+
+~~~console
+localswim-cli path/to/board.json --shutdown
+~~~
+
+The command stops accepting mutations, performs one final commit-and-push when
+`--autopush` is enabled, and waits for the service descriptor to be removed. A failed
+final push refuses shutdown so the live service and its diagnostic state remain
+available.
+
 ## REST API
 
 The browser and CLI use these loopback routes:
@@ -208,6 +220,7 @@ GET  /api/v001/board
 POST /api/v001/cards
 POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent}
 POST /api/v001/board/project
+POST /api/v001/shutdown
 ~~~
 
 Only the `/api/v001` routes are API endpoints. For seamless upgrades of already-open
@@ -216,7 +229,8 @@ tabs, `/v1/status` and `/mtime` issue no-cache redirects to
 
 Mutations require the per-process bearer credential and an
 If-Match: "revision-N" header. Credentials are published in a user-local temporary
-service descriptor; they are not stored in the board.
+service descriptor; they are not stored in the board. The shutdown route accepts only
+the CLI credential and does not change the board revision.
 
 ## Live code updates
 
