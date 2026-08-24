@@ -143,7 +143,7 @@ def test_parent_cycle_is_refused_and_rolled_back(board: board_state.Board) -> No
     assert board.find("beta").parent == "alpha"
 
 
-def test_lanes_sort_by_priority_then_creation_then_ticket(board: board_state.Board) -> None:
+def test_lanes_sort_by_priority_then_monotonic_ticket(board: board_state.Board) -> None:
     newer = board_state.Item(
         "newer",
         "Newer",
@@ -151,7 +151,7 @@ def test_lanes_sort_by_priority_then_creation_then_ticket(board: board_state.Boa
         ticket=2,
         priority="P2",
         owner="bot",
-        history=[board_state.Change("2026-01-02T00:00:00+00:00", "backlog", "bot")],
+        history=[board_state.Change("2026-01-01T00:00:00+00:00", "backlog", "bot")],
     )
     older = board_state.Item(
         "older",
@@ -160,7 +160,7 @@ def test_lanes_sort_by_priority_then_creation_then_ticket(board: board_state.Boa
         ticket=1,
         priority="P2",
         owner="bot",
-        history=[board_state.Change("2026-01-01T00:00:00+00:00", "backlog", "bot")],
+        history=[board_state.Change("2026-01-02T00:00:00+00:00", "backlog", "bot")],
     )
     urgent = board_state.Item(
         "urgent",

@@ -377,6 +377,120 @@ def test_show_rejects_invalid_or_conflicting_arguments(
     assert "Traceback" not in result.stderr
 
 
+def test_next_json_uses_shared_total_order_and_returns_focused_details(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    result = run_cli(
+        path,
+        "--next",
+        "3",
+        "--lanes",
+        "ready_for_work",
+        "backlog",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = cast("dict[str, Any]", json.loads(result.stdout))
+    assert report["lanes"] == ["ready_for_work", "backlog"]
+    assert report["limit"] == 3
+    assert report["order"] == [
+        "policyPriority",
+        "ticket",
+    ]
+    items = cast("list[dict[str, Any]]", report["items"])
+    assert [item["id"] for item in items] == ["focus", "blocker", "parent"]
+    assert items[0]["commentCount"] == 1
+    assert items[0]["childCount"] == 1
+    assert "children" not in items[0]
+    assert cast("list[dict[str, Any]]", items[0]["relationships"])[0]["kind"] == "blocked_by"
+    assert "detail" not in items[0]
+    assert "comments" not in items[0]
+    assert "Private focused detail" not in result.stdout
+    assert "Private focused comment" not in result.stdout
+
+
+def test_next_human_output_exposes_prose_only_when_requested(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    safe = run_cli(path, "--next", "1", "--lanes", "backlog", "ready_for_work")
+    with_prose = run_cli(
+        path,
+        "--next",
+        "1",
+        "--lanes",
+        "backlog",
+        "ready_for_work",
+        "--include-prose",
+    )
+
+    assert safe.returncode == 0, safe.stderr
+    assert "policy priority, then ticket" in safe.stdout
+    assert "#0002 focus" in safe.stdout
+    assert "children: 1" in safe.stdout
+    assert "blocked_by: #0004 blocker" in safe.stdout
+    assert "Private focused detail" not in safe.stdout
+    assert "Private focused comment" not in safe.stdout
+    assert with_prose.returncode == 0, with_prose.stderr
+    assert "Private focused detail" in with_prose.stdout
+    assert "Private focused comment" in with_prose.stdout
+
+
+def test_next_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+    board = board_state.load(path)
+    board.find("focus").state = "completed"
+    board_state.save(board, path)
+
+    result = run_cli(path, "--next", "2", "--lanes", "ready_for_work")
+
+    assert result.returncode != 0
+    assert "prioritized inspection refused 1 audit-trail problem" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (("--next", "0", "--lanes", "backlog"), "must be a positive integer"),
+        (("--next", "2"), "--next requires --lanes"),
+        (("--lanes", "backlog"), "--lanes requires --next"),
+        (
+            ("--next", "2", "--lanes", "not_a_lane"),
+            "--lanes contains unknown lane(s): not_a_lane",
+        ),
+        (
+            ("--show", "focus", "--next", "2", "--lanes", "backlog"),
+            "--show and --next cannot be combined",
+        ),
+        (
+            ("--next", "2", "--lanes", "backlog", "--verify"),
+            "--next cannot be combined",
+        ),
+    ],
+)
+def test_next_rejects_invalid_or_conflicting_arguments(
+    tmp_path: pathlib.Path,
+    arguments: tuple[str, ...],
+    message: str,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+
+    result = run_cli(path, *arguments)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_activity_between_is_inclusive_chronological_and_sanitized(
     tmp_path: pathlib.Path,
 ) -> None:

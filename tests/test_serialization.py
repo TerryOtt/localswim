@@ -153,5 +153,18 @@ def test_check_edges_reports_no_inconsistent_permissions() -> None:
     assert board_state.check_edges() == []
 
 
-def test_sort_self_check_is_clean() -> None:
-    assert board_state.self_test_sort() == []
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2026-08-19T10:27:01-04:00",
+        "2026-08-18 12:40 ET",
+        "2026-08-18T16:02:45",
+        "2026-08-18",
+    ],
+)
+def test_parse_stamp_accepts_every_persisted_shape(raw: str) -> None:
+    assert board_state.parse_stamp(raw) > board_state.parse_stamp(None)
+
+
+def test_parse_stamp_falls_back_for_absent_or_unreadable_values() -> None:
+    assert board_state.parse_stamp(None) == board_state.parse_stamp("utter nonsense")

@@ -121,8 +121,10 @@ Every card has two permanent handles:
   or archived numbers must never be reused.
 
 `nextTicket` is stored rather than derived and must remain above every existing ticket.
-Lane display order is total: policy priority, creation time from history, then ticket.
-Cards without a creation event sort as the oldest because they predate that mechanism.
+Card order is total and intentionally simple: embedded-policy priority first, then
+monotonically allocated ticket number. Ticket order is creation order, so parsing audit
+timestamps would add another failure mode without changing the result. The browser and
+focused CLI triage queries share this exact comparator.
 
 History and comments are separate. History is machine-written and append-only;
 comments are human/bot prose. There are three history event shapes:
@@ -269,6 +271,15 @@ and owner. Both human and JSON defaults expose the subject and comment count but
 detail and comment text. `--include-prose` opts into that private content for the one
 selected card. The report is read-only, works without a running service, and changes no
 persisted or REST schema.
+
+`--next N --lanes LANE [LANE ...]` applies those same focused-report boundaries to a
+bounded cross-lane triage query. It validates every lane against the embedded policy,
+refuses audit drift, and orders all candidates with the same comparator as the browser:
+embedded-policy priority, then monotonically allocated ticket number. Input lane order
+is only a filter. JSON names that ordering explicitly and returns selection metadata
+plus compact focused items. A result carries its parent and child count rather than
+expanding a potentially large child subtree; `--show` owns full child expansion.
+Detail and comments still require `--include-prose`.
 
 `--activity-since` and `--activity-between` merge creation, movement, assignment,
 priority, and comment audit records into an inclusive chronological report. Their RFC

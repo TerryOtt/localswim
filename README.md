@@ -99,6 +99,20 @@ human and JSON forms omit detail and comment text. `--include-prose` is the expl
 opt-in for that selected card's description and comments; bounded activity remains the
 audit-history interface.
 
+Inspect the next cards across any set of lane IDs without exporting the whole board:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json --next 5 --lanes needs_terry_action ready_for_review
+uv run --frozen localswim-cli boards/my-project.json --next 10 --lanes ready_for_work needs_terry_action --json
+~~~
+
+The ordering contract is deliberately front and center: **embedded-policy priority
+first, then monotonically allocated ticket number**. Ticket number is creation order
+and the unique tie-breaker. Lane order only filters candidates; it never outranks card
+priority. Each result includes focused identity and status, its parent, child count,
+and directional relationships. Use `--show` when the full child list is useful. Detail
+and comments remain absent unless `--include-prose` is supplied explicitly.
+
 Time-bounded activity reports combine card creation, movement, assignment, priority,
 and comment events into one chronological stream:
 

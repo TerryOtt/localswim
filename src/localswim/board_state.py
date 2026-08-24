@@ -1266,72 +1266,32 @@ def now() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-#: What an undated card sorts as. **The oldest moment a comparison can produce**, so
-#: cards that predate the creation-entry mechanism sort to the top of their priority.
-#: Aware rather than naive, because a naive value cannot be compared with an aware one
-#: and every real stamp here carries an offset.
+#: Safe fallback for an absent or unreadable event timestamp. Aware rather than naive,
+#: because a naive value cannot be compared with real stamps carrying an offset.
 _BEGINNING_OF_TIME = datetime.datetime.min.replace(tzinfo=datetime.UTC)
 
 
-def created_key(item: Item) -> datetime.datetime:
-    """A total, comparable creation time for one card. **Card #0047.**
+def item_order_key(
+    item: Item,
+    policy: TransitionPolicy,
+) -> tuple[int, int]:
+    """Return the one deterministic card order used by lanes and focused queries.
 
-    **Terry asked to sort by creation date, and the field is not the clean key it looks
-    like.** Four problems were measured on the live board on 2026-08-19, and this
-    function is the answer to all four rather than a parse.
-
-    ## 1. SEVEN CARDS HAVE NO CREATION ENTRY, and they sort OLDEST
-
-    #0001, #0003, #0006, #0007, #0008, #0011 and #0012 predate the mechanism. Their
-    histories open on a MOVE.
-
-    **Undated means oldest here because it is TRUE, not because the bottom was
-    inconvenient** -- a card with no creation entry is one written before creation
-    entries existed, so it really is older than everything that has one. Every ticket
-    number in that list is low, which is the corroboration.
-
-    ## 2. THE HUMAN FORMAT IS REAL AND CURRENTLY UNREACHABLE
-
-    #0012 carries `2026-08-18 12:40 ET` against ISO 8601 everywhere else. **It sits on a
-    MOVE entry, not a creation entry**, so this function never actually parses it today.
-    The handling stays because the string is in the data and `fromisoformat` refuses it;
-    the trailing zone word is dropped and the remainder read as local time.
-
-    **The DATA is left alone.** Repairing the stamp would rewrite a history entry, and
-    this file's own rule is that history is *"appended, never edited, never removed."*
-
-    ## 3. TIMESTAMPS TIE
-
-    #0039 and #0040 both read `2026-08-19T10:27:01-04:00`, because one command created
-    them. **This function does not break the tie** -- `lanes()` does, with `ticket` as
-    the final term. Stated here so nobody adds a sub-second fudge to this key.
-
-    ## 4. A CORRECTION, kept because the reasoning error is the valuable part
-
-    **Card #0047 claimed FOUR undated cards, a human-format CREATION stamp on #0012, and
-    that #0003 was created 1 h 43 min before #0001.** All three came from reading each
-    card's FIRST HISTORY ENTRY as its creation.
-
-    **It is not.** #0003's opening entry is Terry moving it out of `backlog`; #0001's is
-    Terry completing it. Those are move times, and comparing them says nothing about
-    creation order. **A creation entry is the one with `frm is None`**, which is what
-    `Item.created_at` asks for -- and by that test neither card has one.
-
-    **So the headline evidence that ticket numbers contradict creation order does not
-    exist.** Measured 2026-08-19 against the live board.
-
-    **Naive stamps are read as this machine's local zone**, matching `stamp()`, which
-    writes local time with an offset.
+    The order is policy priority, then ticket number. Tickets are allocated
+    monotonically, so their numeric order is creation order without parsing mutable or
+    legacy audit timestamps. Keeping this comparator shared prevents a CLI triage query
+    from disagreeing with the same cards on the board.
     """
-    return parse_stamp(item.created_at)
+    rank = (
+        policy.priorities.index(item.priority)
+        if item.priority in policy.priorities
+        else len(policy.priorities)
+    )
+    return (rank, item.ticket)
 
 
 def parse_stamp(raw: str | None) -> datetime.datetime:
     """One history `at` string as an aware datetime, or `_BEGINNING_OF_TIME`.
-
-    **Split out of `created_key` for card #0063**, which needs the same parsing for a
-    different question -- *when did this card enter its lane* rather than *when was it
-    created*. Two copies would have drifted the moment one of them learned a format.
 
     **It NEVER raises.** A malformed stamp returns the fallback, because the board is
     rendered every 400 ms and one bad string MUST NOT take a lane off the screen.
@@ -1362,63 +1322,14 @@ def parse_stamp(raw: str | None) -> datetime.datetime:
     return parsed
 
 
-def self_test_sort() -> list[str]:
-    """Exercise `created_key` on every shape the board has produced. **Card #0047.**
-
-    **Both polarities, because a parser validated in one direction is half-validated.**
-    Four inputs MUST produce a real moment and two MUST fall back to the beginning of
-    time, and a function that returned the fallback for everything would pass a
-    one-directional test while destroying the sort.
-
-    Returns a list of failures, empty when it all holds.
-    """
-    problems: list[str] = []
-
-    def key_of(raw: str | None) -> datetime.datetime:
-        item = Item(id="self-test", ticket=0, subject="self-test", state=STATES[0])
-        if raw is not None:
-            item.history.append(Change(at=raw, to=STATES[0], by=CLI_USER))
-        return created_key(item)
-
-    # MUST parse to a real moment.
-    must_parse = (
-        "2026-08-19T10:27:01-04:00",  # the ordinary case
-        "2026-08-18 12:40 ET",  # #0012's human format
-        "2026-08-18T16:02:45",  # naive, no offset
-        "2026-08-18",
-    )  # a bare date
-    problems.extend(
-        f"created_key failed to parse {raw!r}"
-        for raw in must_parse
-        if key_of(raw) == _BEGINNING_OF_TIME
-    )
-
-    # MUST fall back, and MUST NOT raise.
-    must_fall_back: tuple[str | None, ...] = (None, "utter nonsense")
-    problems.extend(
-        f"created_key should have fallen back on {raw!r}"
-        for raw in must_fall_back
-        if key_of(raw) != _BEGINNING_OF_TIME
-    )
-
-    # **Ordering, not just parsing.** A key that parses everything and compares
-    # backwards would pass every check above.
-    if key_of("2026-08-18T09:00:00-04:00") >= key_of("2026-08-19T09:00:00-04:00"):
-        problems.append("created_key does not order two ordinary stamps")
-    if key_of("2026-08-18T09:00:00-04:00") <= _BEGINNING_OF_TIME:
-        problems.append("an undated card does not sort oldest")
-
-    return problems
-
-
 def report_sort_health(board: Board) -> list[str]:
-    """Run both sort checks, print the outcome, and hand back the failures.
+    """Check the shared total order, print the outcome, and return failures.
 
     **Extracted from `main()` rather than inlined**, because inlining it pushed that
     function to 14 branches and `ruff` refused at 12. The limit is doing its job here:
     `main()` is a dispatcher, and a block that prints a report is a different concern.
     """
-    problems = self_test_sort() + total_order_problems(board)
+    problems = total_order_problems(board)
     if problems:
         print(f"  SORT IS BROKEN, {len(problems)} problem(s):")
         for problem in problems:
@@ -1441,13 +1352,10 @@ def total_order_problems(board: Board) -> list[str]:
     """
     problems: list[str] = []
 
-    def rank(item: Item) -> int:
-        return PRIORITIES.index(item.priority) if item.priority in PRIORITIES else len(PRIORITIES)
-
     for lane in board.lanes():
-        keys = [(rank(i), created_key(i), i.ticket) for i in lane.items]
+        keys = [item_order_key(item, board.policy) for item in lane.items]
         problems.extend(
-            f"{lane.label}: #{before[2]:04d} and #{after[2]:04d} do not order"
+            f"{lane.label}: #{before[1]:04d} and #{after[1]:04d} do not order"
             for before, after in itertools.pairwise(keys)
             if before >= after
         )
@@ -2103,41 +2011,12 @@ class Board:
         raise BoardError(f"no item with id {ref!r}")
 
     def lanes(self) -> list[Lane]:
-        """One `Lane` per column, sorted by priority, then oldest first, then ticket.
+        """Return lanes whose cards use the shared priority-then-ticket order.
 
-        **Card #0047, and the spec is Terry's own words**: *"primary sort order priority
-        (P1-P5), secondary sort order: ticket creation date oldest to newest. If tickets
-        have same priority, ticket that's older wins priority."*
-
-        **`P0` is included even though the spec says `P1-P5`.** Terry, the same day:
-        *"I try to not think about P0 because it means shit be on fire."* The rank comes
-        from `PRIORITIES`, which `rules.json` supplies, so a range typed in prose can
-        never disagree with the list that is actually enforced.
-
-        **This replaced "priority then FILE ORDER", which was insertion order in the
-        JSON.** It tracked creation most of the time and nothing guaranteed it, so two
-        cards could swap places for a reason no reader could see.
-
-        ## THE COMPARATOR IS TOTAL, AND THAT IS A REQUIREMENT RATHER THAN TIDINESS
-
-        **The page repaints every 400 ms.** Two cards that compare equal under an
-        incomplete key can swap position between frames -- a card moving under Terry's
-        cursor as he reaches for it. **So the key ends in `ticket`, which is unique per
-        card**, and the order cannot depend on `sorted` being stable.
-
-        `created_key` handles the four measured data problems; its own docstring carries
-        them.
+        Policy priority is primary. The monotonically allocated ticket number is both
+        creation order and the unique tie-breaker. This total comparator keeps cards
+        stable across the browser's frequent repaints and is shared with CLI triage.
         """
-
-        def rank(item: Item) -> int:
-            return (
-                self.policy.priorities.index(item.priority)
-                if item.priority in self.policy.priorities
-                else len(self.policy.priorities)
-            )
-
-        def order(item: Item) -> tuple[int, datetime.datetime, int]:
-            return (rank(item), created_key(item), item.ticket)
 
         buckets: dict[str, list[Item]] = {state: [] for state in self.policy.states}
         for item in self.items:
@@ -2148,7 +2027,10 @@ class Board:
                 label,
                 lane_class(state, self.policy, self.browser_user),
                 lane_owner_label(state, self.policy),
-                sorted(buckets.get(state, []), key=order),
+                sorted(
+                    buckets.get(state, []),
+                    key=lambda item: item_order_key(item, self.policy),
+                ),
             )
             for state, label in self.policy.lanes
         ]
@@ -3500,6 +3382,17 @@ def _add_activity_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _positive_count(raw: str) -> int:
+    """Parse a positive CLI result limit."""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
 def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
     """Keep focused reads together and make detail/comment exposure explicit."""
     parser.add_argument(
@@ -3508,9 +3401,21 @@ def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
         help="show one card by stable ID or ticket number, including relationships",
     )
     parser.add_argument(
+        "--next",
+        type=_positive_count,
+        metavar="N",
+        help="show N cards from --lanes in policy-priority then ticket order",
+    )
+    parser.add_argument(
+        "--lanes",
+        nargs="+",
+        metavar="LANE",
+        help="lane IDs included in a --next query",
+    )
+    parser.add_argument(
         "--include-prose",
         action="store_true",
-        help="include detail and comment text in --show output",
+        help="include detail and comment text in focused inspection output",
     )
 
 
@@ -3539,6 +3444,8 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
                 args.detail,
                 args.detail_file,
                 args.show,
+                args.next,
+                args.lanes,
                 args.include_prose,
             )
         )
@@ -3548,11 +3455,16 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
 
 def _validate_inspection_arguments(args: argparse.Namespace) -> None:
     """Keep focused inspection read-only and require an explicit content request."""
-    if args.include_prose and not args.show:
-        raise BoardError("--include-prose requires --show")
-    if not args.show:
-        return
-    if (
+    if args.show and (args.next is not None or args.lanes):
+        raise BoardError("--show and --next cannot be combined")
+    if args.next is None and args.lanes:
+        raise BoardError("--lanes requires --next")
+    if args.next is not None and not args.lanes:
+        raise BoardError("--next requires --lanes")
+    if args.include_prose and not (args.show or args.next is not None):
+        raise BoardError("--include-prose requires --show or --next")
+
+    shared_conflict = (
         args.shutdown
         or args.verify
         or _activity_requested(args)
@@ -3571,8 +3483,11 @@ def _validate_inspection_arguments(args: argparse.Namespace) -> None:
                 args.detail_file,
             )
         )
-    ):
+    )
+    if args.show and shared_conflict:
         raise BoardError("--show cannot be combined with writes, migrations, activity, or --verify")
+    if args.next is not None and shared_conflict:
+        raise BoardError("--next cannot be combined with writes, migrations, activity, or --verify")
 
 
 def _run_offline_operation(args: argparse.Namespace) -> str | None:
@@ -3600,6 +3515,8 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         or args.activity_since
         or args.activity_between
         or args.show
+        or args.next
+        or args.lanes
         or args.include_prose
     )
     if conflict:
@@ -3638,6 +3555,8 @@ def _run_shutdown_operation(args: argparse.Namespace) -> str | None:
                 args.activity_since,
                 args.activity_between,
                 args.show,
+                args.next,
+                args.lanes,
                 args.include_prose,
             )
         )
@@ -3679,18 +3598,27 @@ def _handle_inspection_report(
     parser: argparse.ArgumentParser,
 ) -> bool:
     """Run one focused inspection report when requested."""
-    if not args.show:
-        return False
     try:
-        _report_item(
-            board,
-            str(args.show),
-            as_json=bool(args.json),
-            include_prose=bool(args.include_prose),
-        )
+        if args.show:
+            _report_item(
+                board,
+                str(args.show),
+                as_json=bool(args.json),
+                include_prose=bool(args.include_prose),
+            )
+            return True
+        if args.next is not None:
+            _report_next_items(
+                board,
+                cast("list[str]", args.lanes),
+                int(args.next),
+                as_json=bool(args.json),
+                include_prose=bool(args.include_prose),
+            )
+            return True
     except BoardError as exc:
         parser.error(str(exc))
-    return True
+    return False
 
 
 def _configure_cli_streams() -> None:
@@ -3717,7 +3645,11 @@ def main() -> None:
         action="store_true",
         help="flush autopush and stop the live board service",
     )
-    ap.add_argument("--json", action="store_true", help="dump the parsed board")
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="emit JSON for the selected report, or dump the parsed board",
+    )
     ap.add_argument(
         "--verify",
         action="store_true",
@@ -3965,6 +3897,24 @@ class ItemInspection:
         return out
 
 
+def _next_item_json(inspection: ItemInspection) -> JsonObject:
+    """Return compact triage JSON without expanding a large child subtree."""
+    out = inspection.item.to_json()
+    out["commentCount"] = inspection.comment_count
+    out["parent"] = (
+        cast("JsonValue", inspection.parent.to_json()) if inspection.parent is not None else None
+    )
+    out["childCount"] = len(inspection.children)
+    out["relationships"] = [
+        cast("JsonValue", relationship.to_json()) for relationship in inspection.relationships
+    ]
+    if inspection.detail is not None:
+        out["detail"] = inspection.detail
+    if inspection.comments is not None:
+        out["comments"] = [cast("JsonValue", comment.to_json()) for comment in inspection.comments]
+    return out
+
+
 def inspect_item(board: Board, ref: str, *, include_prose: bool = False) -> ItemInspection:
     """Resolve one card plus its parent, children, and directional relationships."""
     item = board.find(ref)
@@ -3998,6 +3948,31 @@ def inspect_item(board: Board, ref: str, *, include_prose: bool = False) -> Item
         detail=item.detail if include_prose else None,
         comments=tuple(item.comments) if include_prose else None,
     )
+
+
+def inspect_next_items(
+    board: Board,
+    lanes: tuple[str, ...],
+    limit: int,
+    *,
+    include_prose: bool = False,
+) -> tuple[ItemInspection, ...]:
+    """Return the next cards across selected lanes using the board's total order."""
+    if limit < 1:
+        raise BoardError("--next must be a positive integer")
+    unknown = tuple(lane for lane in lanes if lane not in board.policy.states)
+    if unknown:
+        raise BoardError(
+            "--lanes contains unknown lane(s): "
+            f"{', '.join(unknown)}; want one or more of {', '.join(board.policy.states)}"
+        )
+
+    selected = frozenset(lanes)
+    items = sorted(
+        (item for item in board.items if item.state in selected),
+        key=lambda item: item_order_key(item, board.policy),
+    )[:limit]
+    return tuple(inspect_item(board, item.id, include_prose=include_prose) for item in items)
 
 
 def _detail_text(args: argparse.Namespace) -> str:
@@ -4193,6 +4168,16 @@ def _report_item(
         print(json.dumps(inspection.to_json(), indent=2, ensure_ascii=False))
         return
 
+    _print_item_inspection(inspection, include_prose=include_prose)
+
+
+def _print_item_inspection(
+    inspection: ItemInspection,
+    *,
+    include_prose: bool,
+    expand_children: bool = True,
+) -> None:
+    """Print one already-validated card inspection in the human format."""
     item = inspection.item
     print(f"{item.label} {item.item_id}")
     print(f"  subject: {item.subject}")
@@ -4203,10 +4188,13 @@ def _report_item(
     parent = inspection.parent.describe() if inspection.parent is not None else "none"
     print(f"  parent: {parent}")
 
-    _print_report_section(
-        "children",
-        tuple(child.describe() for child in inspection.children),
-    )
+    if expand_children:
+        _print_report_section(
+            "children",
+            tuple(child.describe() for child in inspection.children),
+        )
+    else:
+        print(f"  children: {len(inspection.children)}")
     _print_report_section(
         "relationships",
         tuple(
@@ -4222,6 +4210,53 @@ def _report_item(
         tuple(inspection.detail.splitlines()) if inspection.detail else (),
     )
     _print_report_section("comment text", _comment_report_lines(inspection.comments or ()))
+
+
+def _report_next_items(
+    board: Board,
+    lanes: list[str],
+    limit: int,
+    *,
+    as_json: bool,
+    include_prose: bool,
+) -> None:
+    """Print prioritized cards from selected lanes without exporting the whole board."""
+    drift = board.verify()
+    if drift:
+        raise BoardError(
+            f"prioritized inspection refused {len(drift)} audit-trail problem(s): {drift[0]}"
+        )
+    selected_lanes = tuple(dict.fromkeys(lanes))
+    inspections = inspect_next_items(
+        board,
+        selected_lanes,
+        limit,
+        include_prose=include_prose,
+    )
+    if as_json:
+        payload: JsonObject = {
+            "lanes": list(selected_lanes),
+            "limit": limit,
+            "order": ["policyPriority", "ticket"],
+            "items": [cast("JsonValue", _next_item_json(inspection)) for inspection in inspections],
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    if not inspections:
+        print(f"  No cards in selected lanes: {', '.join(selected_lanes)}")
+        return
+
+    print(
+        f"Next {len(inspections)} card(s) from {', '.join(selected_lanes)} "
+        "(policy priority, then ticket):"
+    )
+    for inspection in inspections:
+        print()
+        _print_item_inspection(
+            inspection,
+            include_prose=include_prose,
+            expand_children=False,
+        )
 
 
 def _report(board: Board, args: argparse.Namespace) -> None:
