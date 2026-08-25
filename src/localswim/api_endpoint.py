@@ -1673,7 +1673,14 @@ PAGE = """<!doctype html>
             background: none; border: 0; padding: 0; cursor: pointer;
             color: var(--link, #0B5CD5); }
   .rel-go:hover { text-decoration: underline; }
-  #p-rel-h { display: flex; align-items: baseline; justify-content: space-between; }
+  /* **Card #0019. The plus belongs to the heading it acts on.** The old uppercase
+     `ADD` sat at the far edge of the drawer, where it read like an unrelated action.
+     A compact labeled button keeps the common add affordance beside Relationships. */
+  #p-rel-h { display: flex; align-items: center; gap: 5px; }
+  .rel-add { width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px;
+             background: transparent; color: var(--accent); font: inherit;
+             font-size: 17px; font-weight: 700; line-height: 16px; cursor: pointer; }
+  .rel-add:hover { background: #F4F5F7; }
   .rel-edit { display: grid; grid-template-columns: 125px minmax(0, 1fr) auto auto;
               gap: 6px; align-items: center; padding: 3px 0; }
   .rel-edit select { min-width: 0; font: inherit; font-size: 12px; border: 1px solid var(--line);
@@ -1869,7 +1876,8 @@ move any card whoever owns it. Click to hand it over."></button>
         </div>
       </div>
       <h3 id="p-rel-h">Relationships
-        <button class="linky" id="p-rel-add" type="button">add</button>
+        <button class="rel-add" id="p-rel-add" type="button"
+                aria-label="Add relationship" title="Add relationship">+</button>
       </h3>
       <div id="p-rel"></div>
       <h3>Comments</h3>

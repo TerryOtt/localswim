@@ -562,6 +562,8 @@ def test_card_drawer_exposes_relationship_add_change_and_remove_controls(
         page = response.read().decode("utf-8")
 
     assert 'id="p-rel-add"' in page
+    assert 'aria-label="Add relationship" title="Add relationship">+</button>' in page
+    assert "#p-rel-h { display: flex; align-items: center; gap: 5px; }" in page
     assert "replaces: ref.kind" in page
     assert "remove: true" in page
 
