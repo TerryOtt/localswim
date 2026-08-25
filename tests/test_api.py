@@ -470,6 +470,102 @@ def test_new_card_dialog_exposes_repeatable_relationship_controls(api: RunningAp
     assert "links: relationshipSpecs(document.getElementById('mk-relations'))" in page
 
 
+def test_existing_relationship_can_be_added_retyped_and_removed(api: RunningApi) -> None:
+    request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=0,
+        body={"subject": "Alpha", "state": "backlog"},
+    )
+    request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=1,
+        body={"subject": "Beta", "state": "backlog"},
+    )
+    add_code, add_response = request_json(
+        api.base + API + "/cards/alpha/link",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=2,
+        body={"kind": "blocks", "other": "beta"},
+    )
+    replace_code, replace_response = request_json(
+        api.base + API + "/cards/alpha/link",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=3,
+        body={"kind": "relates_to", "other": "beta", "replaces": "blocks"},
+    )
+    replaced = board_state.load(api.path)
+    payload_code, payload = request_json(api.base + API + "/board")
+    remove_code, remove_response = request_json(
+        api.base + API + "/cards/alpha/link",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=4,
+        body={"kind": "relates_to", "other": "beta", "remove": True},
+    )
+
+    assert (add_code, add_response["revision"]) == (200, 3)
+    assert (replace_code, replace_response["revision"]) == (200, 4)
+    assert replaced.links_for("alpha") == [("relates_to", "beta")]
+    assert replaced.links_for("beta") == [("relates_to", "alpha")]
+    alpha_payload = next(
+        item for lane in payload["lanes"] for item in lane["items"] if item["id"] == "alpha"
+    )
+    assert payload_code == 200
+    assert alpha_payload["links"][0]["id"] == "beta"
+    assert [change.action for change in replaced.relationship_history[-2:]] == [
+        "unlinked",
+        "linked",
+    ]
+    assert (remove_code, remove_response["revision"]) == (200, 5)
+    assert board_state.load(api.path).links == []
+
+
+def test_failed_http_link_replacement_keeps_original_type(api: RunningApi) -> None:
+    request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=0,
+        body={"subject": "Alpha", "state": "backlog"},
+    )
+    request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=1,
+        body={"subject": "Beta", "state": "backlog"},
+    )
+    request_json(
+        api.base + API + "/cards/alpha/link",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=2,
+        body={"kind": "blocks", "other": "beta"},
+    )
+
+    code, _response = request_json(
+        api.base + API + "/cards/alpha/link",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=3,
+        body={"kind": "not_a_kind", "other": "beta", "replaces": "blocks"},
+    )
+
+    saved = board_state.load(api.path)
+    assert code == 409
+    assert saved.revision == 3
+    assert saved.links_for("alpha") == [("blocks", "beta")]
+    assert [change.action for change in saved.relationship_history] == ["linked"]
+
+
+def test_card_drawer_exposes_relationship_add_change_and_remove_controls(
+    api: RunningApi,
+) -> None:
+    with urllib.request.urlopen(api.base + "/", timeout=5) as response:
+        page = response.read().decode("utf-8")
+
+    assert 'id="p-rel-add"' in page
+    assert "replaces: ref.kind" in page
+    assert "remove: true" in page
+
+
 def test_missing_credential_returns_401(api: RunningApi) -> None:
     code, response = request_json(
         api.base + API + "/cards", revision=0, body={"subject": "Alpha", "state": "backlog"}

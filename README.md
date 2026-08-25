@@ -85,6 +85,12 @@ uv run --frozen localswim-cli boards/my-project.json board verify
 uv run --frozen localswim-cli boards/my-project.json board show --json
 ~~~
 
+The new-card dialog can attach any number of typed relationships to existing cards.
+The card drawer can add and remove relationships or change an existing relationship's
+type. Card creation plus its relationships is one revision, and a type change replaces
+the old and new directions in one transaction; any refusal leaves the prior board
+unchanged.
+
 Inspect one card by stable ID or ticket number without dumping the board:
 
 ~~~console

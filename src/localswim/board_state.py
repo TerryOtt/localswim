@@ -2417,6 +2417,25 @@ class Board:
             raise BoardError(f"that would make a parent cycle: {' -> '.join(cycle)}")
         return f"{child.label} parent: {was_parent or 'none'} -> {parent.id} (by {by})"
 
+    def _link_parts(
+        self,
+        a_ref: str,
+        kind: str,
+        b_ref: str,
+    ) -> tuple[Item, Item, Item, Item, str]:
+        """Resolve caller-facing endpoints and their canonical stored direction."""
+        if kind not in LINK_INVERSE:
+            raise BoardError(
+                f"unknown relationship {kind!r}; want one of {', '.join(sorted(LINK_INVERSE))}"
+            )
+        a, b = self.find(a_ref), self.find(b_ref)
+        if a.id == b.id:
+            raise BoardError(f"{a.label} cannot be related to itself")
+        frm, to, stored = a, b, kind
+        if kind not in LINK_CANONICAL:
+            frm, to, stored = b, a, LINK_INVERSE[kind]
+        return a, b, frm, to, stored
+
     def link(self, a_ref: str, kind: str, b_ref: str, by: Actor) -> str:
         """Relate two cards. **There is no way to write one half.** Card #0028.
 
@@ -2428,16 +2447,7 @@ class Board:
         **An inverse spelling is normalized to the stored one.** `--link 5 blocked_by 28`
         becomes `28 blocks 5`, so the file holds exactly one spelling of each fact.
         """
-        if kind not in LINK_INVERSE:
-            raise BoardError(
-                f"unknown relationship {kind!r}; want one of {', '.join(sorted(LINK_INVERSE))}"
-            )
-        a, b = self.find(a_ref), self.find(b_ref)
-        if a.id == b.id:
-            raise BoardError(f"{a.label} cannot be related to itself")
-        frm, to, stored = a, b, kind
-        if kind not in LINK_CANONICAL:
-            frm, to, stored = b, a, LINK_INVERSE[kind]
+        a, b, frm, to, stored = self._link_parts(a_ref, kind, b_ref)
         if self.find_link(frm.id, stored, to.id) is not None:
             return f"{a.label} already {kind} {b.label}"
         self.links.append(Link(frm=frm.id, kind=stored, to=to.id))
@@ -2452,6 +2462,50 @@ class Board:
             )
         )
         return f"{a.label} {kind} {b.label} (by {by})"
+
+    def replace_link(
+        self,
+        a_ref: str,
+        old_kind: str,
+        new_kind: str,
+        b_ref: str,
+        by: Actor,
+    ) -> str:
+        """Replace one relationship type without exposing a half-applied state."""
+        a, b, old_frm, old_to, old_stored = self._link_parts(a_ref, old_kind, b_ref)
+        _a, _b, new_frm, new_to, new_stored = self._link_parts(a_ref, new_kind, b_ref)
+        old_link = self.find_link(old_frm.id, old_stored, old_to.id)
+        if old_link is None:
+            raise BoardError(f"{a.label} is not {old_kind} {b.label}")
+        if old_kind == new_kind:
+            return f"{a.label} already {new_kind} {b.label}"
+        if self.find_link(new_frm.id, new_stored, new_to.id) is not None:
+            raise BoardError(f"{a.label} already {new_kind} {b.label}")
+
+        changed_at = now()
+        self.links.remove(old_link)
+        self.links.append(Link(frm=new_frm.id, kind=new_stored, to=new_to.id))
+        self.relationship_history.extend(
+            (
+                RelationshipChange(
+                    at=changed_at,
+                    by=by,
+                    action="unlinked",
+                    frm=a.id,
+                    kind=old_kind,
+                    to=b.id,
+                ),
+                RelationshipChange(
+                    at=changed_at,
+                    by=by,
+                    action="linked",
+                    frm=a.id,
+                    kind=new_kind,
+                    to=b.id,
+                ),
+            )
+        )
+        return f"{a.label} relationship to {b.label}: {old_kind} -> {new_kind} (by {by})"
 
     def find_link(self, frm: str, kind: str, to: str) -> Link | None:
         """The stored row for this relationship, in either spelling, or None."""
@@ -2468,12 +2522,7 @@ class Board:
     def unlink(self, a_ref: str, kind: str, b_ref: str, by: Actor) -> str:
         """Remove a relationship. Removing one half removes the whole thing, because
         there is only one row. Card #0028."""
-        if kind not in LINK_INVERSE:
-            raise BoardError(f"unknown relationship {kind!r}")
-        a, b = self.find(a_ref), self.find(b_ref)
-        frm, to, stored = a, b, kind
-        if kind not in LINK_CANONICAL:
-            frm, to, stored = b, a, LINK_INVERSE[kind]
+        a, b, frm, to, stored = self._link_parts(a_ref, kind, b_ref)
         found = self.find_link(frm.id, stored, to.id)
         if found is None:
             return f"{a.label} is not {kind} {b.label}"

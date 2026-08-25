@@ -171,6 +171,39 @@ def test_link_is_stored_once_and_inverse_is_derived(board: board_state.Board) ->
     )
 
 
+def test_replace_link_changes_both_derived_directions_together(board: board_state.Board) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("beta", "Beta", "backlog", "bot")
+    board.link("beta", "blocked_by", "alpha", "bot")
+
+    result = board.replace_link("beta", "blocked_by", "relates_to", "alpha", "bot")
+
+    assert "blocked_by -> relates_to" in result
+    assert board.links_for("alpha") == [("relates_to", "beta")]
+    assert board.links_for("beta") == [("relates_to", "alpha")]
+    assert [change.action for change in board.relationship_history[-2:]] == [
+        "unlinked",
+        "linked",
+    ]
+    assert board.relationship_history[-2].at == board.relationship_history[-1].at
+
+
+def test_failed_link_replacement_preserves_original_relationship(
+    board: board_state.Board,
+) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("beta", "Beta", "backlog", "bot")
+    board.link("alpha", "blocks", "beta", "bot")
+    original_history = list(board.relationship_history)
+
+    with pytest.raises(board_state.BoardError, match="unknown relationship"):
+        board.replace_link("alpha", "blocks", "not_a_kind", "beta", "bot")
+
+    assert board.links_for("alpha") == [("blocks", "beta")]
+    assert board.links_for("beta") == [("blocked_by", "alpha")]
+    assert board.relationship_history == original_history
+
+
 def test_parent_cycle_is_refused_and_rolled_back(board: board_state.Board) -> None:
     board.create("alpha", "Alpha", "backlog", "bot")
     board.create("beta", "Beta", "backlog", "bot")

@@ -1673,6 +1673,18 @@ PAGE = """<!doctype html>
             background: none; border: 0; padding: 0; cursor: pointer;
             color: var(--link, #0B5CD5); }
   .rel-go:hover { text-decoration: underline; }
+  #p-rel-h { display: flex; align-items: baseline; justify-content: space-between; }
+  .rel-edit { display: grid; grid-template-columns: 125px minmax(0, 1fr) auto auto;
+              gap: 6px; align-items: center; padding: 3px 0; }
+  .rel-edit select { min-width: 0; font: inherit; font-size: 12px; border: 1px solid var(--line);
+                     border-radius: 4px; padding: 5px 6px; background: #FFFFFF;
+                     color: var(--ink); }
+  .rel-edit button { font: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
+                     border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px;
+                     background: #FFFFFF; color: var(--ink); }
+  .rel-edit .rel-go { min-width: 0; overflow: hidden; border: 0; padding-left: 0;
+                      text-overflow: ellipsis; white-space: nowrap; }
+  .rel-edit button:disabled { opacity: .5; cursor: wait; }
 
   /* The audit trail and the comments are visually DIFFERENT on purpose. One is what
      the machine recorded and nobody typed; the other is what a person chose to say.
@@ -1856,10 +1868,9 @@ move any card whoever owns it. Click to hand it over."></button>
           <button class="linky" id="p-detail-cancel" type="button">Cancel</button>
         </div>
       </div>
-      <!-- **Card #0071. Hidden entirely when a card has no relationships**, which is
-           most of them. A heading with nothing under it is noise on 70 cards to serve
-           the few that have links. -->
-      <h3 id="p-rel-h">Related</h3>
+      <h3 id="p-rel-h">Relationships
+        <button class="linky" id="p-rel-add" type="button">add</button>
+      </h3>
       <div id="p-rel"></div>
       <h3>Comments</h3>
       <div id="p-comments"></div>
@@ -2156,8 +2167,8 @@ function itemById(id) {
 // **Card #0071. The model landed on #0028 and nothing drew it**, so the relationships
 // existed and Terry could not see one.
 //
-// **The wire already carries labels, not slugs** -- `{kind, ticket, subject}` -- because
-// he says "#0028" out loud. Nothing here needs a lookup table.
+// The wire carries the stable id for mutation plus the ticket and subject needed to
+// render a useful target without another lookup.
 const REL_WORD = {
   blocks: 'Blocks',
   blocked_by: 'Blocked by',
@@ -2178,12 +2189,7 @@ function allItems(excludeId) {
   return items;
 }
 
-function addRelationshipRow(container, initial, excludeId) {
-  const targets = allItems(excludeId);
-  if (!targets.length) return false;
-
-  const row = document.createElement('div');
-  row.className = 'mk-rel';
+function relationshipKindSelect(selected) {
   const kind = document.createElement('select');
   kind.className = 'rel-kind';
   kind.setAttribute('aria-label', 'Relationship type');
@@ -2191,10 +2197,15 @@ function addRelationshipRow(container, initial, excludeId) {
     const option = document.createElement('option');
     option.value = value;
     option.textContent = label;
-    if (initial && initial.kind === value) option.selected = true;
+    if (selected === value) option.selected = true;
     kind.appendChild(option);
   }
+  return kind;
+}
 
+function relationshipTargetSelect(excludeId, selected) {
+  const targets = allItems(excludeId);
+  if (!targets.length) return null;
   const target = document.createElement('select');
   target.className = 'rel-target';
   target.setAttribute('aria-label', 'Related card');
@@ -2202,9 +2213,19 @@ function addRelationshipRow(container, initial, excludeId) {
     const option = document.createElement('option');
     option.value = it.id;
     option.textContent = it.ticket + '  ' + it.subject;
-    if (initial && initial.other === it.id) option.selected = true;
+    if (selected === it.id) option.selected = true;
     target.appendChild(option);
   }
+  return target;
+}
+
+function addRelationshipRow(container, initial, excludeId) {
+  const target = relationshipTargetSelect(excludeId, initial && initial.other);
+  if (!target) return false;
+
+  const row = document.createElement('div');
+  row.className = 'mk-rel';
+  const kind = relationshipKindSelect(initial && initial.kind);
 
   const remove = document.createElement('button');
   remove.type = 'button';
@@ -2223,6 +2244,17 @@ function relationshipSpecs(container) {
   }));
 }
 
+function openRelatedCard(ref) {
+  const related = ref.id ? itemById(ref.id) : null;
+  if (related) { openCard(related.id); return; }
+  for (const lane of data.lanes) {
+    for (const it of lane.items) {
+      if (it.ticket === ref.ticket) { openCard(it.id); return; }
+    }
+  }
+  toast(ref.ticket + ' is not on the board', true);
+}
+
 function relRow(word, ref) {
   const row = document.createElement('div');
   row.className = 'rel';
@@ -2237,38 +2269,133 @@ function relRow(word, ref) {
   a.className = 'rel-go';
   a.textContent = ref.ticket + '  ' + ref.subject;
   a.title = 'Open ' + ref.ticket;
-  a.addEventListener('click', () => {
-    // **Ticket, not slug.** `find()` on the server takes either, and `itemById` here
-    // wants the slug -- so the lookup goes through the lanes by ticket label, which is
-    // the only identifier the wire carries for the OTHER card.
-    for (const lane of data.lanes) {
-      for (const it of lane.items) {
-        if (it.ticket === ref.ticket) { openCard(it.id); return; }
-      }
-    }
-    toast(ref.ticket + ' is not on the board', true);
-  });
+  a.addEventListener('click', () => openRelatedCard(ref));
   row.append(k, a);
+  return row;
+}
+
+async function mutateRelationship(source, body, controls) {
+  for (const control of controls) control.disabled = true;
+  try {
+    const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/link';
+    const res = await apiPost(path, body);
+    const out = await res.json();
+    acceptRevision(out);
+    if (!res.ok) { toast(out.error || 'Relationship change refused', true); return false; }
+    toast(out.result);
+    seen = null;
+    return true;
+  } catch (err) {
+    toast('Could not reach the board: ' + err, true);
+    return false;
+  } finally {
+    for (const control of controls) control.disabled = false;
+  }
+}
+
+function editableRelationshipRow(it, ref) {
+  const row = document.createElement('div');
+  row.className = 'rel-edit';
+  const kind = relationshipKindSelect(ref.kind);
+  const target = document.createElement('button');
+  target.type = 'button';
+  target.className = 'rel-go';
+  target.textContent = ref.ticket + '  ' + ref.subject;
+  target.title = 'Open ' + ref.ticket;
+  target.addEventListener('click', () => openRelatedCard(ref));
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.textContent = 'Remove';
+  remove.addEventListener('click', async () => {
+    await mutateRelationship(
+      it.id,
+      {kind: ref.kind, other: ref.id, remove: true},
+      [kind, target, remove],
+    );
+  });
+  kind.addEventListener('change', async () => {
+    const wanted = kind.value;
+    if (wanted === ref.kind) return;
+    const changed = await mutateRelationship(
+      it.id,
+      {kind: wanted, other: ref.id, replaces: ref.kind},
+      [kind, target, remove],
+    );
+    if (!changed) kind.value = ref.kind;
+    kind.blur();
+  });
+  row.append(kind, target, remove);
+  return row;
+}
+
+let relationshipDraft = null;
+
+function newRelationshipRow(it) {
+  const target = relationshipTargetSelect(it.id, relationshipDraft.other);
+  if (!target) return null;
+  const row = document.createElement('div');
+  row.className = 'rel-edit rel-new';
+  const kind = relationshipKindSelect(relationshipDraft.kind);
+  relationshipDraft.kind = kind.value;
+  relationshipDraft.other = target.value;
+  kind.addEventListener('change', () => { relationshipDraft.kind = kind.value; });
+  target.addEventListener('change', () => { relationshipDraft.other = target.value; });
+
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.textContent = 'Add';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => {
+    relationshipDraft = null;
+    paintRelations(it);
+  });
+  add.addEventListener('click', async () => {
+    const added = await mutateRelationship(
+      it.id,
+      {kind: kind.value, other: target.value},
+      [kind, target, add, cancel],
+    );
+    if (added) relationshipDraft = null;
+  });
+  row.append(kind, target, add, cancel);
   return row;
 }
 
 function paintRelations(it) {
   const box = document.getElementById('p-rel');
-  const head = document.getElementById('p-rel-h');
+  if (document.activeElement instanceof HTMLSelectElement
+      && box.contains(document.activeElement)) return;
   box.replaceChildren();
   const rows = [];
   // **Hierarchy first, then relations.** Parent and children say where a card SITS;
   // the rest say what it touches, and the first question is usually the first one.
   if (it.parent) rows.push(relRow('Parent', it.parent));
   for (const kid of it.children || []) rows.push(relRow('Child', kid));
-  for (const l of it.links || []) rows.push(relRow(REL_WORD[l.kind] || l.kind, l));
-  // **Hidden entirely rather than showing "none".** Most cards have no relationships,
-  // and an empty section on every one of them is noise paid for by the few that do.
-  const any = rows.length > 0;
-  head.style.display = any ? '' : 'none';
-  box.style.display = any ? '' : 'none';
+  for (const l of it.links || []) rows.push(editableRelationshipRow(it, l));
   for (const r of rows) box.appendChild(r);
+  if (relationshipDraft && relationshipDraft.source === it.id) {
+    const draftRow = newRelationshipRow(it);
+    if (draftRow) box.appendChild(draftRow);
+  }
+  if (!box.children.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No relationships.';
+    box.appendChild(empty);
+  }
 }
+
+document.getElementById('p-rel-add').addEventListener('click', () => {
+  const it = itemById(openId);
+  if (!it) return;
+  if (!allItems(it.id).length) { toast('There is no other card to relate', true); return; }
+  relationshipDraft = {source: it.id, kind: 'blocks', other: null};
+  paintRelations(it);
+  const kind = document.querySelector('#p-rel .rel-new .rel-kind');
+  if (kind) kind.focus();
+});
 
 // ---- the detail panel ----------------------------------------------------
 
@@ -2289,6 +2416,7 @@ function openCard(id) {
     // A's title in an input attached to card B, and saving it would rename the wrong
     // one. Cards #0081 and #0082.
     closeEditors();
+    relationshipDraft = null;
   }
   openId = id;
   // **The priority control, card #0062.** Options come from `data.priorities`, which
@@ -2416,6 +2544,7 @@ function closeCard() {
   // **Escape is one keypress away at all times.** Dropping the draft on close is the
   // same defect as dropping it on repaint, just slower to notice.
   if (openId) drafts[openId] = document.getElementById('say').value;
+  relationshipDraft = null;
   openId = null;
   document.getElementById('scrim').classList.remove('show');
   document.getElementById('panel').classList.remove('show');
@@ -3596,7 +3725,12 @@ def payload() -> bytes:
     def related(item_id: str) -> list[dict[str, str]]:
         """Every relationship this card has, including the derived direction."""
         return [
-            {"kind": kind, "ticket": by_id[other].label, "subject": by_id[other].subject}
+            {
+                "id": by_id[other].id,
+                "kind": kind,
+                "ticket": by_id[other].label,
+                "subject": by_id[other].subject,
+            }
             for kind, other in board.links_for(item_id)
             if other in by_id
         ]
@@ -3789,6 +3923,24 @@ def create_relationship_specs(
     return tuple(specs)
 
 
+def apply_link_command(
+    board: board_state.Board,
+    ref: str,
+    body: board_state.JsonObject,
+    actor: board_state.Actor,
+) -> str:
+    """Apply one add, remove, or atomic type replacement for a card relationship."""
+    kind, other = str(body["kind"]).lower(), str(body["other"])
+    replaces = body.get("replaces")
+    if replaces is not None:
+        if not isinstance(replaces, str) or not replaces:
+            raise board_state.BoardError("replaces must be a non-empty relationship kind")
+        return board.replace_link(ref, replaces.lower(), kind, other, actor)
+    if body.get("remove"):
+        return board.unlink(ref, kind, other, actor)
+    return board.link(ref, kind, other, actor)
+
+
 def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per REST action
     board: board_state.Board,
     command_parts: list[str],
@@ -3842,10 +3994,7 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
         parent = body.get("parent")
         return board.set_parent(ref, str(parent) if parent else None, actor)
     if action == "link":
-        kind, other = str(body["kind"]).lower(), str(body["other"])
-        if body.get("remove"):
-            return board.unlink(ref, kind, other, actor)
-        return board.link(ref, kind, other, actor)
+        return apply_link_command(board, ref, body, actor)
     raise board_state.BoardError(f"unknown card command {action!r}")
 
 

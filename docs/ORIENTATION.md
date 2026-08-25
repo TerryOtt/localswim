@@ -176,6 +176,13 @@ linking. An automatic reference uses the comment timestamp and human actor in
 relationship history. Explicit CLI/API links remain available to either authenticated
 actor.
 
+The browser offers the same model in both creation and editing. A new card and all
+relationships selected in its dialog execute on one isolated `BoardStore` candidate.
+The drawer adds and removes one canonical link per request; changing a type uses
+`Board.replace_link()` to validate the old and new directions before replacing the
+stored row and appending its unlink/link audit pair. A refusal discards the candidate,
+so no client has to coordinate two half-mutations.
+
 ## Lane policy and the non-table rule
 
 Each board's embedded policy is its executable allow-list. The small generic example
