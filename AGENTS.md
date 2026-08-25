@@ -2,11 +2,12 @@
 
 ## Purpose and layout
 
-localswim is a dependency-free Python 3.14 application, built and run with uv, that
-serves a local swimlane board from one JSON snapshot.
+localswim is a Python 3.14 application, built and run with uv, that serves a local
+swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 
 - `src/localswim/board_state.py` owns the board model, validation, serialization,
-  policy checks, storage helpers, and command-line client.
+  policy checks, storage helpers, and reporting primitives.
+- `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
   browser UI. It is the sole writer while a board is live.
 - `src/localswim/rules.json` is the checked legacy/default policy used for controlled
@@ -56,8 +57,9 @@ serves a local swimlane board from one JSON snapshot.
 - Target exactly the Python version in `.python-version` for development and CI
   (currently the latest 3.14 patch, 3.14.7). Keep the package contract at
   `>=3.14,<3.15`; update the pin when a later 3.14 patch is GA, and move the range to
-  3.15 only after 3.15 is GA and verified. A new runtime dependency requires clear
-  justification and an explicit decision.
+  3.15 only after 3.15 is GA and verified. Click 8.4.2 was explicitly accepted for
+  nested command scopes and contextual help; any additional runtime dependency still
+  requires clear justification and an explicit decision.
 - Use uv for Python installation, locking, synchronization, execution, and builds.
   Do not introduce pip/venv/requirements-file instructions. Change dependencies in
   `pyproject.toml`, refresh `uv.lock`, and commit both.

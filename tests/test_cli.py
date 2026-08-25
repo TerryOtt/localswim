@@ -57,7 +57,7 @@ def served_board(tmp_path: pathlib.Path) -> Iterator[pathlib.Path]:
 def run_cli(path: pathlib.Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     """Invoke the real command-line entry point."""
     return subprocess.run(
-        [sys.executable, "-m", "localswim.board_state", str(path), *arguments],
+        [sys.executable, "-m", "localswim.cli", str(path), *arguments],
         cwd=pathlib.Path(__file__).resolve().parents[1],
         capture_output=True,
         text=True,
@@ -70,6 +70,56 @@ def assert_cli(path: pathlib.Path, *arguments: str) -> None:
     """Require one CLI command to succeed."""
     result = run_cli(path, *arguments)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        (),
+        ("activity",),
+        ("activity", "between"),
+        ("activity", "since"),
+        ("board",),
+        ("board", "embed-policy"),
+        ("board", "init"),
+        ("board", "set-project"),
+        ("board", "show"),
+        ("board", "shutdown"),
+        ("board", "verify"),
+        ("card",),
+        ("card", "assign"),
+        ("card", "clear-parent"),
+        ("card", "comment"),
+        ("card", "create"),
+        ("card", "link"),
+        ("card", "move"),
+        ("card", "next"),
+        ("card", "search"),
+        ("card", "set-detail"),
+        ("card", "set-parent"),
+        ("card", "set-priority"),
+        ("card", "set-subject"),
+        ("card", "show"),
+        ("card", "unlink"),
+        ("comments",),
+        ("comments", "newest"),
+        ("lane",),
+        ("lane", "migrate"),
+        ("lane", "migrate-id"),
+        ("lane", "rename-label"),
+    ],
+)
+def test_every_command_level_has_help(
+    tmp_path: pathlib.Path,
+    command: tuple[str, ...],
+) -> None:
+    """Keep root, group, and leaf help available without loading the board."""
+    result = run_cli(tmp_path / "absent-board.json", *command, "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert "Usage:" in result.stdout
+    assert "--help" in result.stdout
+    assert result.stderr == ""
 
 
 def write_schema_two_lane_board(path: pathlib.Path, port: int) -> str:
@@ -123,18 +173,18 @@ def initialization_inputs(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib
 
 
 def test_every_cli_mutation_uses_service(served_board: pathlib.Path) -> None:
-    assert_cli(served_board, "--create", "a", "Alpha", "--state", "backlog")
-    assert_cli(served_board, "--create", "b", "Beta", "--state", "backlog")
-    assert_cli(served_board, "--comment", "a", "hello")
-    assert_cli(served_board, "--assign", "a", "terry")
-    assert_cli(served_board, "--set-priority", "a", "P1")
-    assert_cli(served_board, "--set-detail", "a", "--detail", "description")
-    assert_cli(served_board, "--set-subject", "a", "Renamed")
-    assert_cli(served_board, "--link", "a", "relates_to", "b")
-    assert_cli(served_board, "--set-parent", "b", "a")
-    assert_cli(served_board, "--set-project", "Updated")
-    assert_cli(served_board, "--unlink", "a", "relates_to", "b")
-    assert_cli(served_board, "--clear-parent", "b")
+    assert_cli(served_board, "card", "create", "a", "Alpha", "--state", "backlog")
+    assert_cli(served_board, "card", "create", "b", "Beta", "--state", "backlog")
+    assert_cli(served_board, "card", "comment", "a", "hello")
+    assert_cli(served_board, "card", "assign", "a", "terry")
+    assert_cli(served_board, "card", "set-priority", "a", "P1")
+    assert_cli(served_board, "card", "set-detail", "a", "--detail", "description")
+    assert_cli(served_board, "card", "set-subject", "a", "Renamed")
+    assert_cli(served_board, "card", "link", "a", "relates_to", "b")
+    assert_cli(served_board, "card", "set-parent", "b", "a")
+    assert_cli(served_board, "board", "set-project", "Updated")
+    assert_cli(served_board, "card", "unlink", "a", "relates_to", "b")
+    assert_cli(served_board, "card", "clear-parent", "b")
 
     board = board_state.load(served_board)
     item = board.find("a")
@@ -152,7 +202,7 @@ def test_every_cli_mutation_uses_service(served_board: pathlib.Path) -> None:
 def test_cli_forces_utf8_when_inherited_output_encoding_cannot_print_move_arrow(
     served_board: pathlib.Path,
 ) -> None:
-    assert_cli(served_board, "--create", "alpha", "Alpha", "--state", "ready_for_work")
+    assert_cli(served_board, "card", "create", "alpha", "Alpha", "--state", "ready_for_work")
     environment = dict(os.environ)
     environment["PYTHONIOENCODING"] = "cp1252"
 
@@ -160,9 +210,10 @@ def test_cli_forces_utf8_when_inherited_output_encoding_cannot_print_move_arrow(
         [
             sys.executable,
             "-m",
-            "localswim.board_state",
+            "localswim.cli",
             str(served_board),
-            "--move",
+            "card",
+            "move",
             "alpha",
             "in_progress",
         ],
@@ -190,7 +241,7 @@ def test_offline_mutation_has_no_direct_write(tmp_path: pathlib.Path) -> None:
     board_state.save(board, path)
     board_state.service_descriptor_path(path).unlink(missing_ok=True)
 
-    result = run_cli(path, "--create", "alpha", "Alpha", "--state", "backlog")
+    result = run_cli(path, "card", "create", "alpha", "Alpha", "--state", "backlog")
     saved = board_state.load(path)
     assert result.returncode != 0
     assert "service is not running" in result.stderr
@@ -200,7 +251,7 @@ def test_offline_mutation_has_no_direct_write(tmp_path: pathlib.Path) -> None:
 
 
 def test_shutdown_command_stops_live_service(served_board: pathlib.Path) -> None:
-    result = run_cli(served_board, "--shutdown")
+    result = run_cli(served_board, "board", "shutdown")
 
     assert result.returncode == 0, result.stderr
     assert "shutdown scheduled" in result.stdout
@@ -217,7 +268,7 @@ def test_read_only_report_works_offline(tmp_path: pathlib.Path) -> None:
         default_owner="bot",
     )
     board_state.save(board, path)
-    result = run_cli(path)
+    result = run_cli(path, "board", "show")
     assert result.returncode == 0
     assert "Offline report" in result.stdout
 
@@ -304,7 +355,7 @@ def test_show_json_resolves_ticket_and_relationships_without_private_text(
     path = tmp_path / "board.json"
     inspection_board(path)
 
-    result = run_cli(path, "--show", "#0002", "--json")
+    result = run_cli(path, "card", "show", "#0002", "--json")
 
     assert result.returncode == 0, result.stderr
     report = cast("dict[str, Any]", json.loads(result.stdout))
@@ -343,9 +394,9 @@ def test_show_human_output_is_safe_until_private_text_is_explicitly_requested(
     path = tmp_path / "board.json"
     inspection_board(path)
 
-    safe = run_cli(path, "--show", "2")
-    with_comments = run_cli(path, "--show", "focus", "--include-comments")
-    with_comments_json = run_cli(path, "--show", "focus", "--include-comments", "--json")
+    safe = run_cli(path, "card", "show", "2")
+    with_comments = run_cli(path, "card", "show", "focus", "--include-comments")
+    with_comments_json = run_cli(path, "card", "show", "focus", "--include-comments", "--json")
 
     assert safe.returncode == 0, safe.stderr
     assert "#0002 focus" in safe.stdout
@@ -370,7 +421,7 @@ def test_show_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
     board.find("focus").state = "completed"
     board_state.save(board, path)
 
-    result = run_cli(path, "--show", "focus")
+    result = run_cli(path, "card", "show", "focus")
 
     assert result.returncode != 0
     assert "focused inspection refused 1 audit-trail problem" in result.stderr
@@ -380,14 +431,12 @@ def test_show_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (("--include-comments",), "requires --show"),
-        (("--include-prose",), "unrecognized arguments: --include-prose"),
-        (("--show", "focus", "--verify"), "cannot be combined"),
-        (("--show", "focus", "--comment", "focus", "no"), "cannot be combined"),
-        (("--show", "999"), "no card with ticket #0999"),
+        (("card", "show"), "Missing argument 'REFERENCE'"),
+        (("card", "show", "focus", "--include-prose"), "No such option"),
+        (("card", "show", "999"), "no card with ticket #0999"),
     ],
 )
-def test_show_rejects_invalid_or_conflicting_arguments(
+def test_show_rejects_invalid_arguments(
     tmp_path: pathlib.Path,
     arguments: tuple[str, ...],
     message: str,
@@ -410,10 +459,12 @@ def test_next_json_uses_shared_total_order_and_returns_focused_details(
 
     result = run_cli(
         path,
-        "--next",
+        "card",
+        "next",
         "3",
-        "--lanes",
+        "--lane",
         "ready_for_work",
+        "--lane",
         "backlog",
         "--json",
     )
@@ -444,13 +495,24 @@ def test_next_human_output_exposes_details_and_comments_when_requested(
     path = tmp_path / "board.json"
     inspection_board(path)
 
-    safe = run_cli(path, "--next", "1", "--lanes", "backlog", "ready_for_work")
+    safe = run_cli(
+        path,
+        "card",
+        "next",
+        "1",
+        "--lane",
+        "backlog",
+        "--lane",
+        "ready_for_work",
+    )
     with_comments = run_cli(
         path,
-        "--next",
+        "card",
+        "next",
         "1",
-        "--lanes",
+        "--lane",
         "backlog",
+        "--lane",
         "ready_for_work",
         "--include-comments",
     )
@@ -474,7 +536,7 @@ def test_next_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
     board.find("focus").state = "completed"
     board_state.save(board, path)
 
-    result = run_cli(path, "--next", "2", "--lanes", "ready_for_work")
+    result = run_cli(path, "card", "next", "2", "--lane", "ready_for_work")
 
     assert result.returncode != 0
     assert "prioritized inspection refused 1 audit-trail problem" in result.stderr
@@ -484,24 +546,15 @@ def test_next_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (("--next", "0", "--lanes", "backlog"), "must be a positive integer"),
-        (("--next", "2"), "--next requires --lanes"),
-        (("--lanes", "backlog"), "--lanes requires --next"),
+        (("card", "next", "0", "--lane", "backlog"), "must be a positive integer"),
+        (("card", "next", "2"), "Missing option '--lane'"),
         (
-            ("--next", "2", "--lanes", "not_a_lane"),
-            "--lanes contains unknown lane(s): not_a_lane",
-        ),
-        (
-            ("--show", "focus", "--next", "2", "--lanes", "backlog"),
-            "--show and --next cannot be combined",
-        ),
-        (
-            ("--next", "2", "--lanes", "backlog", "--verify"),
-            "--next cannot be combined",
+            ("card", "next", "2", "--lane", "not_a_lane"),
+            "contains unknown lane(s): not_a_lane",
         ),
     ],
 )
-def test_next_rejects_invalid_or_conflicting_arguments(
+def test_next_rejects_invalid_arguments(
     tmp_path: pathlib.Path,
     arguments: tuple[str, ...],
     message: str,
@@ -524,15 +577,17 @@ def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
 
     result = run_cli(
         path,
-        "--search",
+        "card",
+        "search",
         "SUBJECT",
-        "--lanes",
+        "--lane",
         "ready_for_work",
+        "--lane",
         "backlog",
         "--json",
     )
-    ticket_result = run_cli(path, "--search", "#0002", "--json")
-    id_result = run_cli(path, "--search", "LOCK", "--json")
+    ticket_result = run_cli(path, "card", "search", "#0002", "--json")
+    id_result = run_cli(path, "card", "search", "LOCK", "--json")
 
     assert result.returncode == 0, result.stderr
     report = cast("dict[str, Any]", json.loads(result.stdout))
@@ -562,10 +617,11 @@ def test_search_details_and_comments_require_explicit_request(
     path = tmp_path / "board.json"
     inspection_board(path)
 
-    safe = run_cli(path, "--search", "private focused")
+    safe = run_cli(path, "card", "search", "private focused")
     with_comments = run_cli(
         path,
-        "--search",
+        "card",
+        "search",
         "PRIVATE FOCUSED",
         "--include-comments",
         "--json",
@@ -591,7 +647,7 @@ def test_search_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
     board.find("focus").state = "completed"
     board_state.save(board, path)
 
-    result = run_cli(path, "--search", "focus")
+    result = run_cli(path, "card", "search", "focus")
 
     assert result.returncode != 0
     assert "ticket search refused 1 audit-trail problem" in result.stderr
@@ -601,21 +657,14 @@ def test_search_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (("--search", " "), "--search requires non-whitespace text"),
+        (("card", "search", " "), "card search QUERY requires non-whitespace text"),
         (
-            ("--search", "focus", "--lanes", "not_a_lane"),
-            "--lanes contains unknown lane(s): not_a_lane",
+            ("card", "search", "focus", "--lane", "not_a_lane"),
+            "contains unknown lane(s): not_a_lane",
         ),
-        (("--show", "focus", "--search", "focus"), "--show and --search cannot be combined"),
-        (
-            ("--next", "2", "--lanes", "backlog", "--search", "focus"),
-            "--next and --search cannot be combined",
-        ),
-        (("--search", "focus", "--verify"), "--search cannot be combined"),
-        (("--search", "focus", "--comment", "focus", "no"), "--search cannot be combined"),
     ],
 )
-def test_search_rejects_invalid_or_conflicting_arguments(
+def test_search_rejects_invalid_arguments(
     tmp_path: pathlib.Path,
     arguments: tuple[str, ...],
     message: str,
@@ -636,8 +685,8 @@ def test_newest_comments_is_bounded_newest_first_and_includes_text(
     path = tmp_path / "board.json"
     newest_comments_board(path)
 
-    result = run_cli(path, "--newest-comments", "2")
-    json_result = run_cli(path, "--newest-comments", "2", "--json")
+    result = run_cli(path, "comments", "newest", "2")
+    json_result = run_cli(path, "comments", "newest", "2", "--json")
 
     assert result.returncode == 0, result.stderr
     assert "Newest 2 comment(s):" in result.stdout
@@ -675,7 +724,7 @@ def test_newest_comments_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
     board.find("alpha").state = "completed"
     board_state.save(board, path)
 
-    result = run_cli(path, "--newest-comments", "1")
+    result = run_cli(path, "comments", "newest", "1")
 
     assert result.returncode != 0
     assert "newest-comments report refused 1 audit-trail problem" in result.stderr
@@ -685,19 +734,10 @@ def test_newest_comments_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (("--newest-comments", "0"), "must be a positive integer"),
-        (
-            ("--newest-comments", "1", "--show", "alpha"),
-            "cannot be combined with another inspection",
-        ),
-        (("--newest-comments", "1", "--verify"), "cannot be combined"),
-        (
-            ("--newest-comments", "1", "--comment", "alpha", "no"),
-            "cannot be combined",
-        ),
+        (("comments", "newest", "0"), "must be a positive integer"),
     ],
 )
-def test_newest_comments_rejects_invalid_or_conflicting_arguments(
+def test_newest_comments_rejects_invalid_arguments(
     tmp_path: pathlib.Path,
     arguments: tuple[str, ...],
     message: str,
@@ -720,7 +760,8 @@ def test_activity_between_is_inclusive_chronological_and_sanitized(
 
     result = run_cli(
         path,
-        "--activity-between",
+        "activity",
+        "between",
         "2026-08-23T10:01:00Z",
         "2026-08-23T10:04:00Z",
     )
@@ -746,7 +787,7 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
     path = tmp_path / "board.json"
     activity_board(path)
 
-    result = run_cli(path, "--activity-since", "2026-08-23T10:00:00Z", "--json")
+    result = run_cli(path, "activity", "since", "2026-08-23T10:00:00Z", "--json")
 
     assert result.returncode == 0, result.stderr
     events = cast("list[dict[str, Any]]", json.loads(result.stdout))
@@ -798,7 +839,7 @@ def test_activity_relationship_human_output_names_opposite_endpoint(
     path = tmp_path / "board.json"
     activity_board(path)
 
-    result = run_cli(path, "--activity-since", "2026-08-23T10:07:00Z")
+    result = run_cli(path, "activity", "since", "2026-08-23T10:07:00Z")
 
     assert result.returncode == 0, result.stderr
     assert (
@@ -830,7 +871,8 @@ def test_activity_microsecond_bounds_exclude_an_event_before_the_cursor(
 
     result = run_cli(
         path,
-        "--activity-between",
+        "activity",
+        "between",
         "2026-08-24T12:00:00.200000-04:00",
         "2026-08-24T12:00:00.400000-04:00",
     )
@@ -844,28 +886,19 @@ def test_activity_microsecond_bounds_exclude_an_event_before_the_cursor(
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (("--activity-since", "2026-08-23T10:00:00"), "UTC offset"),
+        (("activity", "since", "2026-08-23T10:00:00"), "UTC offset"),
         (
             (
-                "--activity-between",
+                "activity",
+                "between",
                 "2026-08-23T10:01:00Z",
                 "2026-08-23T10:00:00Z",
             ),
             "END must not be earlier",
         ),
-        (
-            (
-                "--activity-since",
-                "2026-08-23T10:00:00Z",
-                "--comment",
-                "alpha",
-                "no",
-            ),
-            "cannot be combined",
-        ),
     ],
 )
-def test_activity_query_rejects_invalid_or_conflicting_arguments(
+def test_activity_query_rejects_invalid_arguments(
     tmp_path: pathlib.Path,
     arguments: tuple[str, ...],
     message: str,
@@ -887,7 +920,7 @@ def test_cli_migrates_lane_state_and_history_offline(tmp_path: pathlib.Path) -> 
         unused_port = candidate.getsockname()[1]
     legacy_lane = write_schema_two_lane_board(path, unused_port)
 
-    result = run_cli(path, "--migrate-lane", legacy_lane, "ready_for_work")
+    result = run_cli(path, "lane", "migrate", legacy_lane, "ready_for_work")
 
     assert result.returncode == 0, result.stderr
     assert "migrated schema 2 -> 4" in result.stdout
@@ -908,7 +941,7 @@ def test_lane_migration_refuses_a_listening_board_port(tmp_path: pathlib.Path) -
         listener.listen()
         legacy_lane = write_schema_two_lane_board(path, listening_port)
         before = path.read_bytes()
-        result = run_cli(path, "--migrate-lane", legacy_lane, "ready_for_work")
+        result = run_cli(path, "lane", "migrate", legacy_lane, "ready_for_work")
 
     assert result.returncode != 0
     assert f"board port {listening_port} is listening" in result.stderr
@@ -921,7 +954,7 @@ def test_cli_initializes_stable_slugs_and_resolves_name_permissions(
     path = tmp_path / "board.json"
     description, permissions = initialization_inputs(tmp_path)
 
-    result = run_cli(path, "--init", str(description), str(permissions))
+    result = run_cli(path, "board", "init", str(description), str(permissions))
 
     assert result.returncode == 0, result.stderr
     board = board_state.load(path)
@@ -946,7 +979,7 @@ def test_cli_initializer_rejects_slug_collisions(tmp_path: pathlib.Path) -> None
     description["lanes"] = [{"name": "Ready For Work"}, {"name": "ready-for-work"}]
     description_path.write_text(json.dumps(description), encoding="utf-8")
 
-    result = run_cli(path, "--init", str(description_path), str(permissions))
+    result = run_cli(path, "board", "init", str(description_path), str(permissions))
 
     assert result.returncode != 0
     assert "slug collision" in result.stderr
@@ -961,7 +994,7 @@ def test_cli_initializer_accepts_an_explicit_import_id(tmp_path: pathlib.Path) -
     lanes[0]["id"] = "someday"
     description_path.write_text(json.dumps(description), encoding="utf-8")
 
-    result = run_cli(path, "--init", str(description_path), str(permissions))
+    result = run_cli(path, "board", "init", str(description_path), str(permissions))
 
     assert result.returncode == 0, result.stderr
     board = board_state.load(path)
@@ -972,9 +1005,9 @@ def test_cli_initializer_accepts_an_explicit_import_id(tmp_path: pathlib.Path) -
 def test_cli_renames_label_without_changing_lane_identity(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     description, permissions = initialization_inputs(tmp_path)
-    assert run_cli(path, "--init", str(description), str(permissions)).returncode == 0
+    assert run_cli(path, "board", "init", str(description), str(permissions)).returncode == 0
 
-    result = run_cli(path, "--rename-lane-label", "ready_for_work", "Selected Work")
+    result = run_cli(path, "lane", "rename-label", "ready_for_work", "Selected Work")
 
     assert result.returncode == 0, result.stderr
     board = board_state.load(path)
@@ -986,12 +1019,12 @@ def test_cli_renames_label_without_changing_lane_identity(tmp_path: pathlib.Path
 def test_cli_migrates_embedded_lane_id_atomically(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     description, permissions = initialization_inputs(tmp_path)
-    assert run_cli(path, "--init", str(description), str(permissions)).returncode == 0
+    assert run_cli(path, "board", "init", str(description), str(permissions)).returncode == 0
     board = board_state.load(path)
     board.create("alpha", "Alpha", "ready_for_work", "bot")
     board_state.save(board, path)
 
-    result = run_cli(path, "--migrate-lane-id", "ready_for_work", "selected_work")
+    result = run_cli(path, "lane", "migrate-id", "ready_for_work", "selected_work")
 
     assert result.returncode == 0, result.stderr
     migrated = board_state.load(path)
@@ -1021,7 +1054,7 @@ def test_cli_embeds_policy_into_a_schema_three_board(tmp_path: pathlib.Path) -> 
     del raw["policy"]
     path.write_text(json.dumps(raw), encoding="utf-8")
 
-    result = run_cli(path, "--embed-policy", str(board_state.RULES_PATH))
+    result = run_cli(path, "board", "embed-policy", str(board_state.RULES_PATH))
 
     assert result.returncode == 0, result.stderr
     migrated = board_state.load(path)

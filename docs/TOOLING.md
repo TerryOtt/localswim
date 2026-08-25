@@ -17,6 +17,10 @@ no duplicate checker added merely for quantity.
 - **uv_build** is the native build backend, bounded to its current compatible minor
   (`>=0.12.5,<0.13`). The package uses the standard `src/localswim` layout, publishes a
   `py.typed` marker, and includes `rules.json` plus the bundled Inter assets.
+- **Click 8.4.2** is the sole runtime dependency. Its BSD-3-Clause license is compatible
+  with localswim's MIT license, and its established nested-command and contextual-help
+  model replaces the increasingly brittle flat `argparse` option matrix. Terry
+  explicitly accepted this dependency tradeoff on 2026-08-25.
 - **`uv.lock` is committed.** Local development and CI use `--locked` or `--frozen` so
   a check cannot mutate or silently re-resolve the accepted environment.
 

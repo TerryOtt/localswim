@@ -3422,8 +3422,15 @@ def shutdown_service(path: pathlib.Path) -> str:
     return result
 
 
-def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:  # noqa: PLR0912
-    """Translate one CLI mutation into the same REST command the browser uses."""
+def apply_remote_mutation(
+    path: pathlib.Path,
+    route: str,
+    body: dict[str, object],
+) -> str:
+    """Apply one CLI mutation through the same REST boundary the browser uses."""
+    if not route.startswith(API_PREFIX + "/"):
+        raise BoardError("CLI mutation route must remain inside the versioned API")
+
     descriptor = _service_descriptor(path)
     base = f"http://{descriptor['host']}:{descriptor['port']}"
     token = str(descriptor["token"])
@@ -3431,6 +3438,16 @@ def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:  # noqa:
     revision = snapshot.get("revision")
     if not isinstance(revision, int):
         raise BoardError("board service response has no revision")
+
+    response = _service_json(base + route, token, body=body, revision=revision)
+    result = response.get("result")
+    if not isinstance(result, str):
+        raise BoardError("board service returned no result")
+    return result
+
+
+def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:
+    """Translate one legacy flat CLI mutation into a live-service command."""
 
     route: str
     body: dict[str, object]
@@ -3493,11 +3510,7 @@ def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:  # noqa:
     else:
         raise BoardError("no mutation requested")
 
-    response = _service_json(base + route, token, body=body, revision=revision)
-    result = response.get("result")
-    if not isinstance(result, str):
-        raise BoardError("board service returned no result")
-    return result
+    return apply_remote_mutation(path, route, body)
 
 
 def _add_offline_arguments(parser: argparse.ArgumentParser) -> None:
@@ -4186,11 +4199,11 @@ def inspect_next_items(
 ) -> tuple[ItemInspection, ...]:
     """Return the next cards across selected lanes using the board's total order."""
     if limit < 1:
-        raise BoardError("--next must be a positive integer")
+        raise BoardError("card next COUNT must be a positive integer")
     unknown = tuple(lane for lane in lanes if lane not in board.policy.states)
     if unknown:
         raise BoardError(
-            "--lanes contains unknown lane(s): "
+            "--lane contains unknown lane(s): "
             f"{', '.join(unknown)}; want one or more of {', '.join(board.policy.states)}"
         )
 
@@ -4231,13 +4244,13 @@ def inspect_search_items(
     """Find cards by concept without requiring a broad board export."""
     normalized_query = query.strip()
     if not normalized_query:
-        raise BoardError("--search requires non-whitespace text")
+        raise BoardError("card search QUERY requires non-whitespace text")
 
     selected_lanes = lanes or tuple(board.policy.states)
     unknown = tuple(lane for lane in selected_lanes if lane not in board.policy.states)
     if unknown:
         raise BoardError(
-            "--lanes contains unknown lane(s): "
+            "--lane contains unknown lane(s): "
             f"{', '.join(unknown)}; want one or more of {', '.join(board.policy.states)}"
         )
 
@@ -4711,5 +4724,85 @@ def _report(board: Board, args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def parse_activity_bound(raw: str, option: str) -> datetime.datetime:
+    """Expose strict RFC 3339 parsing to the command-oriented CLI."""
+    return _parse_activity_bound(raw, option)
+
+
+def report_activity(
+    board: Board,
+    start: datetime.datetime,
+    end: datetime.datetime | None,
+    *,
+    as_json: bool,
+) -> None:
+    """Expose the sanitized activity report to the command-oriented CLI."""
+    _report_activity(board, start, end, as_json=as_json)
+
+
+def report_item(
+    board: Board,
+    reference: str,
+    *,
+    as_json: bool,
+    include_comments: bool,
+) -> None:
+    """Expose one focused card report to the command-oriented CLI."""
+    _report_item(
+        board,
+        reference,
+        as_json=as_json,
+        include_comments=include_comments,
+    )
+
+
+def report_next_items(
+    board: Board,
+    lanes: list[str],
+    limit: int,
+    *,
+    as_json: bool,
+    include_comments: bool,
+) -> None:
+    """Expose prioritized focused inspection to the command-oriented CLI."""
+    _report_next_items(
+        board,
+        lanes,
+        limit,
+        as_json=as_json,
+        include_comments=include_comments,
+    )
+
+
+def report_search_items(
+    board: Board,
+    query: str,
+    lanes: list[str] | None,
+    *,
+    as_json: bool,
+    include_comments: bool,
+) -> None:
+    """Expose focused card search to the command-oriented CLI."""
+    _report_search_items(
+        board,
+        query,
+        lanes,
+        as_json=as_json,
+        include_comments=include_comments,
+    )
+
+
+def report_newest_comments(board: Board, limit: int, *, as_json: bool) -> None:
+    """Expose bounded newest-comment inspection to the command-oriented CLI."""
+    _report_newest_comments(board, limit, as_json=as_json)
+
+
+def report_board(board: Board, *, as_json: bool, verify: bool) -> None:
+    """Expose the complete board report to the command-oriented CLI."""
+    _report(board, argparse.Namespace(json=as_json, verify=verify))
+
+
 if __name__ == "__main__":
-    main()
+    from localswim.cli import main as cli_main
+
+    cli_main()

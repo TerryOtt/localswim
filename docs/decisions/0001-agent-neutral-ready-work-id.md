@@ -31,7 +31,7 @@ name from durable identifiers before more boards and integrations depend on it.
 The canonical lane ID is `ready_for_work`. Board schema 3 uses that ID in current card
 state and every lane-history endpoint. There is no runtime compatibility alias.
 
-`localswim-cli --migrate-lane <old-lane-id> ready_for_work` is the explicit offline
+`localswim-cli <board> lane migrate <old-lane-id> ready_for_work` is the explicit offline
 schema-2 migration. It refuses a listening board port, holds the board lock, rewrites
 only exact card-state and lane-history endpoint values, validates and replays the full
 schema-3 result, increments the revision, and atomically replaces the snapshot.

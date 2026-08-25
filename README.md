@@ -2,7 +2,7 @@
 
 A small, local swimlane board for one human and one automation agent. It serves a
 draggable browser UI over a single JSON file, binds only to loopback, and has no runtime
-dependencies outside Python's standard library.
+dependency beyond Click, the mature command-line parser used for its nested CLI.
 
 ## Quick start
 
@@ -16,7 +16,7 @@ Clone the repository and create a private board from the checked description and
 name-based permission examples:
 
 ~~~text
-uv run --frozen localswim-cli boards/my-project.json --init examples/board-description.example.json examples/permissions.example.json
+uv run --frozen localswim-cli boards/my-project.json board init examples/board-description.example.json examples/permissions.example.json
 ~~~
 
 Then start the service:
@@ -51,7 +51,7 @@ The generic example stays deliberately small. A second checked
 workflow, also used by FGA:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --init examples/board-description.terry-workflow.json examples/permissions.terry-workflow.json
+uv run --frozen localswim-cli boards/my-project.json board init examples/board-description.terry-workflow.json examples/permissions.terry-workflow.json
 ~~~
 
 The important fields are:
@@ -80,17 +80,17 @@ The browser supports creating, moving, editing, assigning, prioritizing and rela
 cards. The CLI can inspect the snapshot while the service is stopped or running:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json
-uv run --frozen localswim-cli boards/my-project.json --verify
-uv run --frozen localswim-cli boards/my-project.json --json
+uv run --frozen localswim-cli boards/my-project.json board show
+uv run --frozen localswim-cli boards/my-project.json board verify
+uv run --frozen localswim-cli boards/my-project.json board show --json
 ~~~
 
 Inspect one card by stable ID or ticket number without dumping the board:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --show 137
-uv run --frozen localswim-cli boards/my-project.json --show '#0137' --json
-uv run --frozen localswim-cli boards/my-project.json --show upload-retry --include-comments
+uv run --frozen localswim-cli boards/my-project.json card show 137
+uv run --frozen localswim-cli boards/my-project.json card show '#0137' --json
+uv run --frozen localswim-cli boards/my-project.json card show upload-retry --include-comments
 ~~~
 
 The focused report includes state, priority, owner, comment count, parent, children,
@@ -102,49 +102,49 @@ audit-history interface.
 Inspect the next cards across any set of lane IDs without exporting the whole board:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --next 5 --lanes needs_terry_action ready_for_review
-uv run --frozen localswim-cli boards/my-project.json --next 10 --lanes ready_for_work needs_terry_action --json
+uv run --frozen localswim-cli boards/my-project.json card next 5 --lane needs_terry_action --lane ready_for_review
+uv run --frozen localswim-cli boards/my-project.json card next 10 --lane ready_for_work --lane needs_terry_action --json
 ~~~
 
 The ordering contract is deliberately front and center: **embedded-policy priority
 first, then monotonically allocated ticket number**. Ticket number is creation order
 and the unique tie-breaker. Lane order only filters candidates; it never outranks card
 priority. Each result includes focused identity and status, its parent, child count,
-and directional relationships. Use `--show` when the full child list is useful. Detail
+and directional relationships. Use `card show` when the full child list is useful. Detail
 and comments remain absent unless `--include-comments` is supplied explicitly.
 
 Find an existing card by concept without exporting the whole board:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --search "upload ambiguity"
-uv run --frozen localswim-cli boards/my-project.json --search 137 --lanes ready_for_work needs_terry_action --json
-uv run --frozen localswim-cli boards/my-project.json --search "private detail phrase" --include-comments
+uv run --frozen localswim-cli boards/my-project.json card search "upload ambiguity"
+uv run --frozen localswim-cli boards/my-project.json card search 137 --lane ready_for_work --lane needs_terry_action --json
+uv run --frozen localswim-cli boards/my-project.json card search "private detail phrase" --include-comments
 ~~~
 
 Search is case-insensitive. Stable IDs and subjects use substring matching; a numeric
-or `#NNNN` query matches that exact ticket number. All lanes are searched unless
-`--lanes` filters them. Default matching and output exclude details and comments;
+or `#NNNN` query matches that exact ticket number. All lanes are searched unless a
+repeatable `--lane` option filters them. Default matching and output exclude details and comments;
 `--include-comments` explicitly adds both to the search surface and the results. Matches
-use the same embedded-policy priority then monotonic-ticket ordering as `--next`.
+use the same embedded-policy priority then monotonic-ticket ordering as `card next`.
 
 Catch up on the newest board comments without choosing a time boundary:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --newest-comments 10
-uv run --frozen localswim-cli boards/my-project.json --newest-comments 10 --json
+uv run --frozen localswim-cli boards/my-project.json comments newest 10
+uv run --frozen localswim-cli boards/my-project.json comments newest 10 --json
 ~~~
 
-`--newest-comments N` is an explicit, bounded request for private comment text. It
+`comments newest N` is an explicit, bounded request for private comment text. It
 returns at most N comments across the board, newest first, with each comment's ticket,
-stable card ID, timestamp, and author. It is a standalone read and cannot be combined
-with another report selector, a write, a migration, activity bounds, or `--verify`.
+stable card ID, timestamp, and author. Its command scope prevents accidental
+combination with a write, migration, or another report.
 
 Time-bounded activity reports combine card creation, movement, assignment, priority,
 comment, link, and unlink events into one chronological stream:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --activity-since 2026-08-23T10:53:09-04:00
-uv run --frozen localswim-cli boards/my-project.json --activity-between 2026-08-23T10:53:09-04:00 2026-08-23T11:09:02-04:00 --json
+uv run --frozen localswim-cli boards/my-project.json activity since 2026-08-23T10:53:09-04:00
+uv run --frozen localswim-cli boards/my-project.json activity between 2026-08-23T10:53:09-04:00 2026-08-23T11:09:02-04:00 --json
 ~~~
 
 Bounds are inclusive and require RFC 3339 timestamps with an explicit UTC offset.
@@ -163,28 +163,29 @@ CLI mutations use the running REST service so browser and CLI writes share valid
 locking and revision checks:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --create docs "Write setup docs" --state ready_for_work
-uv run --frozen localswim-cli boards/my-project.json --comment docs "First draft is ready"
-uv run --frozen localswim-cli boards/my-project.json --move docs in_progress
+uv run --frozen localswim-cli boards/my-project.json card create docs "Write setup docs" --state ready_for_work
+uv run --frozen localswim-cli boards/my-project.json card comment docs "First draft is ready"
+uv run --frozen localswim-cli boards/my-project.json card move docs in_progress
 ~~~
 
-Run **uv run --frozen localswim-cli --help** for the complete command list. CLI changes are
-attributed to cliUser; browser changes are attributed to browserUser. Request bodies
-cannot choose another identity. CLI stdout and stderr are always UTF-8, including when
-Windows redirects them through a legacy system encoding.
+Run **uv run --frozen localswim-cli --help** for the command groups, then append
+`--help` to any group or leaf command for contextual help. CLI changes are attributed
+to cliUser; browser changes are attributed to browserUser. Request bodies cannot
+choose another identity. CLI stdout and stderr are always UTF-8, including when Windows
+redirects them through a legacy system encoding.
 
 Schema 4 embeds the complete resolved policy so a board's lane identities and
 permissions travel atomically with its state. With the service stopped, upgrade a
 schema-3 board with the policy it already uses:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --embed-policy path/to/rules.json
+uv run --frozen localswim-cli boards/my-project.json board embed-policy path/to/rules.json
 ~~~
 
 The earlier schema-2 Ready For Work migration also produces a schema-4 board:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --migrate-lane <old-lane-id> ready_for_work
+uv run --frozen localswim-cli boards/my-project.json lane migrate <old-lane-id> ready_for_work
 ~~~
 
 Every structural migration refuses a listening board port, validates and replays the
@@ -193,8 +194,8 @@ complete result before replacing the file, and increments the board revision.
 Display renames and identity migrations are deliberately different operations:
 
 ~~~console
-uv run --frozen localswim-cli boards/my-project.json --rename-lane-label ready_for_work "Selected Work"
-uv run --frozen localswim-cli boards/my-project.json --migrate-lane-id ready_for_work selected_work
+uv run --frozen localswim-cli boards/my-project.json lane rename-label ready_for_work "Selected Work"
+uv run --frozen localswim-cli boards/my-project.json lane migrate-id ready_for_work selected_work
 ~~~
 
 The first changes only presentation. The second atomically rewrites the embedded
@@ -261,7 +262,7 @@ Stop a live service through its authenticated CLI rendezvous rather than termina
 its process:
 
 ~~~console
-localswim-cli path/to/board.json --shutdown
+localswim-cli path/to/board.json board shutdown
 ~~~
 
 The command stops accepting mutations, performs one final commit-and-push when

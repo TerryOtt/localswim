@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = ["click==8.4.2"]
 
 [project.urls]
 Homepage = "https://github.com/TerryOtt/localswim"
@@ -29,7 +29,7 @@ Repository = "https://github.com/TerryOtt/localswim"
 
 [project.scripts]
 localswim = "localswim.api_endpoint:main"
-localswim-cli = "localswim.board_state:main"
+localswim-cli = "localswim.cli:main"
 
 [dependency-groups]
 dev = [

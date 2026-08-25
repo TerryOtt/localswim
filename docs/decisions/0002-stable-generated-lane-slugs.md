@@ -37,7 +37,7 @@ It is not a routine way to hand-maintain parallel names.
 After initialization, identity and presentation have separate operations:
 
 - `--rename-lane-label` changes only the display label and keeps the persisted ID;
-- `--migrate-lane-id` atomically rewrites the embedded policy, current card states, and
+- `lane migrate-id` atomically rewrites the embedded policy, current card states, and
   lane-history endpoints while the service is stopped.
 
 An existing ID is never regenerated from its current label. Runtime authorization,

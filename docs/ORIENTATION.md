@@ -9,7 +9,7 @@ reading nearly 7,000 lines in an arbitrary order.
 ## The system in one page
 
 localswim is one Python process serving one local board from one JSON snapshot. It has
-no runtime dependency outside Python's standard library and makes no browser network
+one runtime dependency, Click, for the command-line tree and makes no browser network
 request beyond loopback.
 
 ```text
@@ -40,7 +40,8 @@ saved, and only then published as the current in-memory snapshot.
 
 | Path | Responsibility |
 |---|---|
-| `src/localswim/board_state.py` | Domain model, policy loading, validation, history replay, relationships, JSON storage, file locking, and CLI. |
+| `src/localswim/board_state.py` | Domain model, policy loading, validation, history replay, relationships, JSON storage, file locking, and report primitives. |
+| `src/localswim/cli.py` | Click command tree, contextual help, and command-to-service dispatch. |
 | `src/localswim/api_endpoint.py` | Loopback HTTP server, transactional store, REST boundary, embedded HTML/CSS/JavaScript, live reload, and optional Git publishing. |
 | `src/localswim/rules.json` | Checked legacy/default policy used by controlled migrations. |
 | `pyproject.toml` | uv build metadata, Python contract, dependencies, Ruff/formatter policy, and strict Pyright policy. |
@@ -58,10 +59,11 @@ saved, and only then published as the current in-memory snapshot.
 | `.github/repository-settings.json` | Reproducible recipe for merge methods, auto-merge availability, and branch cleanup. |
 | `.githooks/pre-commit` | Opt-in local hook that executes the frozen gate through uv. |
 
-There is no JavaScript build, template engine, database service, or runtime dependency
-outside the standard library. Python packaging uses uv's native build backend and a
-`src` layout; run the console entry points and development tools through `uv run
---frozen` so the checked lock and interpreter pin are honored.
+There is no JavaScript build, template engine, or database service. Click is the sole
+runtime dependency and supplies the nested command parser and help system. Python
+packaging uses uv's native build backend and a `src` layout; run the console entry
+points and development tools through `uv run --frozen` so the checked lock and
+interpreter pin are honored.
 
 ## Configuration and schema ownership
 
@@ -273,7 +275,7 @@ correctness boundary, not presentation polish: Windows may otherwise inherit CP1
 commit a service mutation, and then raise while printing the Unicode move arrow,
 turning a successful write into an apparent command failure.
 
-`--show REF` uses the domain model's stable ID-or-ticket lookup and returns one focused
+`card show REF` uses the domain model's stable ID-or-ticket lookup and returns one focused
 card report. It resolves the parent, children, and every relationship in the direction
 the selected card sees it, including the opposite endpoint's current state, priority,
 and owner. Both human and JSON defaults expose the subject and comment count but omit
@@ -281,31 +283,31 @@ detail and comment text. `--include-comments` opts into that private content for
 selected card. The report is read-only, works without a running service, and changes no
 persisted or REST schema.
 
-`--next N --lanes LANE [LANE ...]` applies those same focused-report boundaries to a
-bounded cross-lane triage query. It validates every lane against the embedded policy,
+`card next N --lane LANE [--lane LANE ...]` applies those same focused-report
+boundaries to a bounded cross-lane triage query. It validates every lane against the embedded policy,
 refuses audit drift, and orders all candidates with the same comparator as the browser:
 embedded-policy priority, then monotonically allocated ticket number. Input lane order
 is only a filter. JSON names that ordering explicitly and returns selection metadata
 plus compact focused items. A result carries its parent and child count rather than
-expanding a potentially large child subtree; `--show` owns full child expansion.
+expanding a potentially large child subtree; `card show` owns full child expansion.
 Detail and comments still require `--include-comments`.
 
-`--search QUERY` locates existing cards without a board dump. It performs
+`card search QUERY` locates existing cards without a board dump. It performs
 case-insensitive substring matching over stable IDs and subjects plus exact matching
-for numeric or `#NNNN` ticket references. It searches every lane by default;
-`--lanes` supplies an optional embedded-policy-validated filter. Results use the same
-priority-then-ticket total order and compact focused-item shape as `--next`.
+for numeric or `#NNNN` ticket references. It searches every lane by default; repeated
+`--lane` options supply an embedded-policy-validated filter. Results use the same
+priority-then-ticket total order and compact focused-item shape as `card next`.
 `--include-comments` explicitly expands both the matching surface and returned fields to
 details and comment text. Search refuses audit drift and changes no persisted or REST
 schema.
 
-`--newest-comments N` provides a bounded catch-up view without requiring a timestamp
+`comments newest N` provides a bounded catch-up view without requiring a timestamp
 cursor. It returns at most N comments across all cards in reverse chronological order,
 including ticket, stable card ID, timestamp, author, and the explicitly requested
-private comment text. Its JSON report names the limit and deterministic ordering. It
-refuses audit drift and cannot be combined with another report selector or mutation.
+private comment text. Its JSON report names the limit and deterministic ordering, and
+its command scope prevents combining it with another report or mutation.
 
-`--activity-since` and `--activity-between` merge creation, movement, assignment,
+`activity since` and `activity between` merge creation, movement, assignment,
 priority, comment, link, and unlink audit records into an inclusive chronological
 report. Their RFC 3339 bounds must carry an explicit UTC offset. Relationship events
 name the caller-facing kind and opposite ticket endpoint. The report intentionally
@@ -376,7 +378,7 @@ establish that a configured remote is private. A failed push keeps the successfu
 commit so a later push can carry it; the UI reports the failure. The ignored `boards/`
 directory in this public source checkout is therefore for local data, not for autopush.
 
-`localswim-cli <board> --shutdown` is the graceful service boundary. The authenticated
+`localswim-cli <board> board shutdown` is the graceful service boundary. The authenticated
 request serializes behind active mutations, performs a final autopush immediately, and
 shuts down only after that push succeeds. The service removes its rendezvous descriptor
 after request threads close; the CLI waits for that removal before reporting success.
