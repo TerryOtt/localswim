@@ -127,6 +127,18 @@ or `#NNNN` query matches that exact ticket number. All lanes are searched unless
 `--include-comments` explicitly adds both to the search surface and the results. Matches
 use the same embedded-policy priority then monotonic-ticket ordering as `--next`.
 
+Catch up on the newest board comments without choosing a time boundary:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json --newest-comments 10
+uv run --frozen localswim-cli boards/my-project.json --newest-comments 10 --json
+~~~
+
+`--newest-comments N` is an explicit, bounded request for private comment text. It
+returns at most N comments across the board, newest first, with each comment's ticket,
+stable card ID, timestamp, and author. It is a standalone read and cannot be combined
+with another report selector, a write, a migration, activity bounds, or `--verify`.
+
 Time-bounded activity reports combine card creation, movement, assignment, priority,
 comment, link, and unlink events into one chronological stream:
 

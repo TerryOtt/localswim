@@ -251,6 +251,26 @@ def activity_board(path: pathlib.Path) -> None:
     board_state.save(board, path)
 
 
+def newest_comments_board(path: pathlib.Path) -> None:
+    """Write comments on two cards at deterministic timestamps."""
+    board = board_state.Board(
+        project="Newest comments",
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
+    )
+    board.create("alpha", "Alpha subject", "ready_for_work", "bot")
+    board.create("beta", "Beta subject", "backlog", "bot")
+    board.comment("alpha", "Older comment", "bot")
+    board.find("alpha").comments[-1].at = "2026-08-23T10:00:00Z"
+    board.comment("beta", "Second-newest comment\nfollow-up line", "terry")
+    board.find("beta").comments[-1].at = "2026-08-23T11:00:00Z"
+    board.comment("alpha", "Newest comment", "terry")
+    board.find("alpha").comments[-1].at = "2026-08-23T12:00:00Z"
+    board_state.save(board, path)
+
+
 def inspection_board(path: pathlib.Path) -> None:
     """Write one card with every focused-inspection relationship shape."""
     board = board_state.Board(
@@ -602,6 +622,88 @@ def test_search_rejects_invalid_or_conflicting_arguments(
 ) -> None:
     path = tmp_path / "board.json"
     inspection_board(path)
+
+    result = run_cli(path, *arguments)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_newest_comments_is_bounded_newest_first_and_includes_text(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    newest_comments_board(path)
+
+    result = run_cli(path, "--newest-comments", "2")
+    json_result = run_cli(path, "--newest-comments", "2", "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert "Newest 2 comment(s):" in result.stdout
+    assert result.stdout.index("Newest comment") < result.stdout.index("Second-newest comment")
+    assert "  follow-up line" in result.stdout
+    assert "Older comment" not in result.stdout
+
+    assert json_result.returncode == 0, json_result.stderr
+    report = cast("dict[str, Any]", json.loads(json_result.stdout))
+    assert report["limit"] == 2
+    assert report["order"] == ["commentTimeDesc", "ticketDesc", "commentSequenceDesc"]
+    comments = cast("list[dict[str, Any]]", report["comments"])
+    assert comments == [
+        {
+            "ticket": 1,
+            "id": "alpha",
+            "at": "2026-08-23T12:00:00Z",
+            "by": "terry",
+            "text": "Newest comment",
+        },
+        {
+            "ticket": 2,
+            "id": "beta",
+            "at": "2026-08-23T11:00:00Z",
+            "by": "terry",
+            "text": "Second-newest comment\nfollow-up line",
+        },
+    ]
+
+
+def test_newest_comments_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    newest_comments_board(path)
+    board = board_state.load(path)
+    board.find("alpha").state = "completed"
+    board_state.save(board, path)
+
+    result = run_cli(path, "--newest-comments", "1")
+
+    assert result.returncode != 0
+    assert "newest-comments report refused 1 audit-trail problem" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (("--newest-comments", "0"), "must be a positive integer"),
+        (
+            ("--newest-comments", "1", "--show", "alpha"),
+            "cannot be combined with another inspection",
+        ),
+        (("--newest-comments", "1", "--verify"), "cannot be combined"),
+        (
+            ("--newest-comments", "1", "--comment", "alpha", "no"),
+            "cannot be combined",
+        ),
+    ],
+)
+def test_newest_comments_rejects_invalid_or_conflicting_arguments(
+    tmp_path: pathlib.Path,
+    arguments: tuple[str, ...],
+    message: str,
+) -> None:
+    path = tmp_path / "board.json"
+    newest_comments_board(path)
 
     result = run_cli(path, *arguments)
 

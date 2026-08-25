@@ -1551,6 +1551,29 @@ class Comment:
 
 
 @dataclass(frozen=True)
+class NewestComment:
+    """One comment plus the card identity needed for a bounded catch-up report."""
+
+    ticket: int
+    item_id: str
+    at: str
+    instant: datetime.datetime
+    by: str
+    text: str
+    sequence: int
+
+    def to_json(self) -> JsonObject:
+        """Return the CLI shape without internal sorting fields."""
+        return {
+            "ticket": self.ticket,
+            "id": self.item_id,
+            "at": self.at,
+            "by": self.by,
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True)
 class ActivityEvent:
     """One sanitized, time-addressable board event for CLI inspection.
 
@@ -3561,6 +3584,12 @@ def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
         help="show N cards from --lanes in policy-priority then ticket order",
     )
     parser.add_argument(
+        "--newest-comments",
+        type=_positive_count,
+        metavar="N",
+        help="show the N newest board comments with their ticket identities",
+    )
+    parser.add_argument(
         "--lanes",
         nargs="+",
         metavar="LANE",
@@ -3600,6 +3629,7 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
                 args.show,
                 args.search is not None,
                 args.next,
+                args.newest_comments,
                 args.lanes,
                 args.include_comments,
             )
@@ -3610,6 +3640,14 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
 
 def _validate_inspection_arguments(args: argparse.Namespace) -> None:
     """Keep focused inspection read-only and require an explicit content request."""
+    if args.newest_comments is not None and (
+        args.show
+        or args.next is not None
+        or args.search is not None
+        or args.lanes
+        or args.include_comments
+    ):
+        raise BoardError("--newest-comments cannot be combined with another inspection")
     if args.show and (args.next is not None or args.search is not None or args.lanes):
         if args.search is not None:
             raise BoardError("--show and --search cannot be combined")
@@ -3653,6 +3691,10 @@ def _validate_inspection_arguments(args: argparse.Namespace) -> None:
         raise BoardError(
             "--search cannot be combined with writes, migrations, activity, or --verify"
         )
+    if args.newest_comments is not None and shared_conflict:
+        raise BoardError(
+            "--newest-comments cannot be combined with writes, migrations, activity, or --verify"
+        )
 
 
 def _run_offline_operation(args: argparse.Namespace) -> str | None:
@@ -3682,6 +3724,7 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         or args.show
         or args.search is not None
         or args.next
+        or args.newest_comments
         or args.lanes
         or args.include_comments
     )
@@ -3723,6 +3766,7 @@ def _run_shutdown_operation(args: argparse.Namespace) -> str | None:
                 args.show,
                 args.search is not None,
                 args.next,
+                args.newest_comments,
                 args.lanes,
                 args.include_comments,
             )
@@ -3766,6 +3810,13 @@ def _handle_inspection_report(
 ) -> bool:
     """Run one focused inspection report when requested."""
     try:
+        if args.newest_comments is not None:
+            _report_newest_comments(
+                board,
+                int(args.newest_comments),
+                as_json=bool(args.json),
+            )
+            return True
         if args.show:
             _report_item(
                 board,
@@ -4362,6 +4413,65 @@ def activity_events(
     return sorted(
         events, key=lambda event: (event.instant, event.ticket, event.sequence, event.kind)
     )
+
+
+def newest_comments(board: Board, limit: int) -> tuple[NewestComment, ...]:
+    """Return the newest comments across the board in deterministic reverse time order."""
+    if limit < 1:
+        raise BoardError("--newest-comments must be a positive integer")
+    comments: list[NewestComment] = []
+    for item in board.items:
+        for sequence, comment in enumerate(item.comments):
+            comments.append(
+                NewestComment(
+                    ticket=item.ticket,
+                    item_id=item.id,
+                    at=comment.at,
+                    instant=_event_instant(comment.at, f"{item.id} comments[{sequence}]"),
+                    by=comment.by,
+                    text=comment.text,
+                    sequence=sequence,
+                )
+            )
+    return tuple(
+        sorted(
+            comments,
+            key=lambda comment: (
+                comment.instant,
+                comment.ticket,
+                comment.sequence,
+                comment.item_id,
+            ),
+            reverse=True,
+        )[:limit]
+    )
+
+
+def _report_newest_comments(board: Board, limit: int, *, as_json: bool) -> None:
+    """Print one bounded, newest-first comment catch-up report."""
+    drift = board.verify()
+    if drift:
+        raise BoardError(
+            f"newest-comments report refused {len(drift)} audit-trail problem(s): {drift[0]}"
+        )
+    comments = newest_comments(board, limit)
+    if as_json:
+        payload: JsonObject = {
+            "limit": limit,
+            "order": ["commentTimeDesc", "ticketDesc", "commentSequenceDesc"],
+            "comments": [cast("JsonValue", comment.to_json()) for comment in comments],
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    if not comments:
+        print("  No comments on the board.")
+        return
+    print(f"Newest {len(comments)} comment(s):")
+    for comment in comments:
+        print()
+        print(f"{comment.at}  #{comment.ticket:04d} {comment.item_id}  commented by {comment.by}")
+        for line in comment.text.splitlines():
+            print(f"  {line}")
 
 
 def _report_activity(

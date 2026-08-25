@@ -299,6 +299,12 @@ priority-then-ticket total order and compact focused-item shape as `--next`.
 details and comment text. Search refuses audit drift and changes no persisted or REST
 schema.
 
+`--newest-comments N` provides a bounded catch-up view without requiring a timestamp
+cursor. It returns at most N comments across all cards in reverse chronological order,
+including ticket, stable card ID, timestamp, author, and the explicitly requested
+private comment text. Its JSON report names the limit and deterministic ordering. It
+refuses audit drift and cannot be combined with another report selector or mutation.
+
 `--activity-since` and `--activity-between` merge creation, movement, assignment,
 priority, comment, link, and unlink audit records into an inclusive chronological
 report. Their RFC 3339 bounds must carry an explicit UTC offset. Relationship events
