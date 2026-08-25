@@ -2194,7 +2194,12 @@ function allItems(excludeId) {
       if (it.id !== excludeId) items.push(it);
     }
   }
-  return items;
+  // **Card #0020. Dependency choices are tickets, not lane contents.** Inheriting
+  // lane order made the numbers jump at every lane boundary. Parse the displayed
+  // ticket label so the selector has one ascending numeric order across the board.
+  return items.sort((left, right) => (
+    Number.parseInt(left.ticket.slice(1), 10) - Number.parseInt(right.ticket.slice(1), 10)
+  ));
 }
 
 function relationshipKindSelect(selected) {

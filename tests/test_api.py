@@ -564,6 +564,9 @@ def test_card_drawer_exposes_relationship_add_change_and_remove_controls(
     assert 'id="p-rel-add"' in page
     assert 'aria-label="Add relationship" title="Add relationship">+</button>' in page
     assert "#p-rel-h { display: flex; align-items: center; gap: 5px; }" in page
+    assert "return items.sort((left, right) => (" in page
+    assert "Number.parseInt(left.ticket.slice(1), 10)" in page
+    assert "Number.parseInt(right.ticket.slice(1), 10)" in page
     assert "replaces: ref.kind" in page
     assert "remove: true" in page
 
