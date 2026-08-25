@@ -403,6 +403,73 @@ def test_authenticated_create_uses_browser_actor(api: RunningApi) -> None:
     assert saved.find("1").history[0].by == "terry"
 
 
+def test_create_can_atomically_add_relationships(api: RunningApi) -> None:
+    first_code, _first = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=0,
+        body={"subject": "Target", "state": "backlog"},
+    )
+    code, response = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=1,
+        body={
+            "subject": "New card",
+            "state": "backlog",
+            "links": [{"kind": "blocks", "other": "target"}],
+        },
+    )
+
+    saved = board_state.load(api.path)
+    assert first_code == 200
+    assert code == 200
+    assert response["revision"] == 2
+    assert saved.links_for("new-card") == [("blocks", "target")]
+    assert saved.links_for("target") == [("blocked_by", "new-card")]
+    assert saved.relationship_history[-1].by == "terry"
+
+
+def test_failed_create_relationship_rolls_back_card_and_every_link(api: RunningApi) -> None:
+    first_code, _first = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=0,
+        body={"subject": "Target", "state": "backlog"},
+    )
+    code, response = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=1,
+        body={
+            "subject": "New card",
+            "state": "backlog",
+            "links": [
+                {"kind": "blocks", "other": "target"},
+                {"kind": "relates_to", "other": "missing"},
+            ],
+        },
+    )
+
+    saved = board_state.load(api.path)
+    assert first_code == 200
+    assert code == 409
+    assert "no item" in response["error"]
+    assert saved.revision == 1
+    assert [item.id for item in saved.items] == ["target"]
+    assert saved.links == []
+    assert saved.relationship_history == []
+
+
+def test_new_card_dialog_exposes_repeatable_relationship_controls(api: RunningApi) -> None:
+    with urllib.request.urlopen(api.base + "/", timeout=5) as response:
+        page = response.read().decode("utf-8")
+
+    assert 'id="mk-relations"' in page
+    assert 'id="mk-rel-add"' in page
+    assert "links: relationshipSpecs(document.getElementById('mk-relations'))" in page
+
+
 def test_missing_credential_returns_401(api: RunningApi) -> None:
     code, response = request_json(
         api.base + API + "/cards", revision=0, body={"subject": "Alpha", "state": "backlog"}

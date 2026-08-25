@@ -1531,6 +1531,10 @@ PAGE = """<!doctype html>
         border: 1px solid var(--line); border-radius: 5px; padding: 7px 9px;
         background: #FFFFFF; color: var(--ink); }
   #mk textarea { min-height: 190px; resize: vertical; line-height: 1.45; }
+  #mk .mk-rel { display: grid; grid-template-columns: 145px 1fr auto; gap: 7px;
+                align-items: center; margin-bottom: 7px; }
+  #mk .mk-rel button { padding: 7px 10px; }
+  #mk #mk-rel-add { padding: 5px 9px; font-size: 12px; }
   /* **The hint is not decoration.** The comment box posts on Enter and this field
      does not, so two multi-line fields on one page disagree about the same key.
      Terry chose that deliberately -- a comment is one thought, a description is
@@ -1908,6 +1912,12 @@ move any card whoever owns it. Click to hand it over."></button>
                   placeholder="The reasoning, the constraints, the traps..."></textarea>
         <div class="hint">Enter adds a new line. Use Add card to submit.</div>
       </div>
+      <div class="field">
+        <label>Relationships</label>
+        <div id="mk-relations"></div>
+        <button id="mk-rel-add" type="button">Add relationship</button>
+        <div class="hint">Each relationship is saved atomically with the new card.</div>
+      </div>
     </div>
     <footer>
       <span class="grow"></span>
@@ -2157,6 +2167,61 @@ const REL_WORD = {
   referenced_by: 'Referenced by',
   relates_to: 'Relates to',
 };
+
+function allItems(excludeId) {
+  const items = [];
+  for (const lane of data.lanes) {
+    for (const it of lane.items) {
+      if (it.id !== excludeId) items.push(it);
+    }
+  }
+  return items;
+}
+
+function addRelationshipRow(container, initial, excludeId) {
+  const targets = allItems(excludeId);
+  if (!targets.length) return false;
+
+  const row = document.createElement('div');
+  row.className = 'mk-rel';
+  const kind = document.createElement('select');
+  kind.className = 'rel-kind';
+  kind.setAttribute('aria-label', 'Relationship type');
+  for (const [value, label] of Object.entries(REL_WORD)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    if (initial && initial.kind === value) option.selected = true;
+    kind.appendChild(option);
+  }
+
+  const target = document.createElement('select');
+  target.className = 'rel-target';
+  target.setAttribute('aria-label', 'Related card');
+  for (const it of targets) {
+    const option = document.createElement('option');
+    option.value = it.id;
+    option.textContent = it.ticket + '  ' + it.subject;
+    if (initial && initial.other === it.id) option.selected = true;
+    target.appendChild(option);
+  }
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.textContent = 'Remove';
+  remove.setAttribute('aria-label', 'Remove relationship');
+  remove.addEventListener('click', () => row.remove());
+  row.append(kind, target, remove);
+  container.appendChild(row);
+  return true;
+}
+
+function relationshipSpecs(container) {
+  return Array.from(container.querySelectorAll('.mk-rel')).map(row => ({
+    kind: row.querySelector('.rel-kind').value,
+    other: row.querySelector('.rel-target').value,
+  }));
+}
 
 function relRow(word, ref) {
   const row = document.createElement('div');
@@ -2548,7 +2613,8 @@ let mkOpen = null;
 
 function mkDirty() {
   return !!(document.getElementById('mk-subject').value.trim()
-         || document.getElementById('mk-detail').value.trim());
+         || document.getElementById('mk-detail').value.trim()
+         || document.getElementById('mk-relations').children.length);
 }
 
 function openMake(lane) {
@@ -2580,6 +2646,7 @@ function openMake(lane) {
     if (a.id === data.defaultOwner) o.selected = true;
     own.appendChild(o);
   }
+  document.getElementById('mk-rel-add').disabled = allItems(null).length === 0;
   document.getElementById('mkscrim').classList.add('show');
   document.getElementById('mk').classList.add('show');
   document.getElementById('mk-subject').focus();
@@ -2595,12 +2662,18 @@ function closeMake(force) {
   mkOpen = null;
   document.getElementById('mk-subject').value = '';
   document.getElementById('mk-detail').value = '';
+  document.getElementById('mk-relations').replaceChildren();
   document.getElementById('mkscrim').classList.remove('show');
   document.getElementById('mk').classList.remove('show');
 }
 
 document.getElementById('mkscrim').addEventListener('click', () => closeMake(false));
 document.getElementById('mk-cancel').addEventListener('click', () => closeMake(false));
+document.getElementById('mk-rel-add').addEventListener('click', () => {
+  if (!addRelationshipRow(document.getElementById('mk-relations'), null, null)) {
+    toast('There is no other card to relate', true);
+  }
+});
 
 // **Enter in the TITLE moves to the description. It does not submit.** A
 // single-line input's default is to submit its form, which is exactly the
@@ -2630,6 +2703,7 @@ async function submitMake() {
         detail: document.getElementById('mk-detail').value,
         priority: document.getElementById('mk-priority').value,
         owner: document.getElementById('mk-owner').value,
+        links: relationshipSpecs(document.getElementById('mk-relations')),
     });
     const out = await res.json();
     acceptRevision(out);
@@ -3689,6 +3763,32 @@ def slug_for(board: board_state.Board, subject: str) -> str:
     return f"{base}-{board.next_ticket:04d}"
 
 
+def create_relationship_specs(
+    body: board_state.JsonObject,
+) -> tuple[tuple[str, str], ...]:
+    """Validate the optional relationships carried by one atomic card creation."""
+    raw_specs = body.get("links", [])
+    if not isinstance(raw_specs, list):
+        raise board_state.BoardError("links must be a list")
+
+    specs: list[tuple[str, str]] = []
+    for index, raw_spec in enumerate(raw_specs):
+        if not isinstance(raw_spec, dict):
+            raise board_state.BoardError(f"links[{index}] must be an object")
+        unknown = sorted(set(raw_spec) - {"kind", "other"})
+        if unknown:
+            raise board_state.BoardError(
+                f"links[{index}] has unknown field(s): {', '.join(unknown)}"
+            )
+        kind, other = raw_spec.get("kind"), raw_spec.get("other")
+        if not isinstance(kind, str) or not kind:
+            raise board_state.BoardError(f"links[{index}].kind must be a non-empty string")
+        if not isinstance(other, str) or not other:
+            raise board_state.BoardError(f"links[{index}].other must be a non-empty string")
+        specs.append((kind.lower(), other))
+    return tuple(specs)
+
+
 def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per REST action
     board: board_state.Board,
     command_parts: list[str],
@@ -3703,7 +3803,8 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
         if not subject:
             raise board_state.BoardError("a card needs a title")
         item_id = str(body.get("id") or slug_for(board, subject))
-        return board.create(
+        relationships = create_relationship_specs(body)
+        result = board.create(
             item_id,
             subject,
             state,
@@ -3712,6 +3813,9 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
             detail=str(body.get("detail") or ""),
             owner=board_state.as_actor(str(body.get("owner") or board_state.DEFAULT_OWNER)),
         )
+        for kind, other in relationships:
+            board.link(item_id, kind, other, actor)
+        return result
 
     if command_parts == ["board", "project"]:
         was = board.project
