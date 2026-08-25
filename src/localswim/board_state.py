@@ -3549,7 +3549,10 @@ def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--search",
         metavar="QUERY",
-        help="find cards by ID, ticket, or subject; --include-prose searches prose too",
+        help=(
+            "find cards by ID, ticket, or subject; "
+            "--include-comments searches details and comments too"
+        ),
     )
     parser.add_argument(
         "--next",
@@ -3564,7 +3567,7 @@ def _add_inspection_arguments(parser: argparse.ArgumentParser) -> None:
         help="lane IDs included in a --next or --search query",
     )
     parser.add_argument(
-        "--include-prose",
+        "--include-comments",
         action="store_true",
         help="include detail and comment text in focused inspection output",
     )
@@ -3598,7 +3601,7 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
                 args.search is not None,
                 args.next,
                 args.lanes,
-                args.include_prose,
+                args.include_comments,
             )
         )
     ):
@@ -3617,8 +3620,10 @@ def _validate_inspection_arguments(args: argparse.Namespace) -> None:
         raise BoardError("--lanes requires --next or --search")
     if args.next is not None and not args.lanes:
         raise BoardError("--next requires --lanes")
-    if args.include_prose and not (args.show or args.next is not None or args.search is not None):
-        raise BoardError("--include-prose requires --show, --next, or --search")
+    if args.include_comments and not (
+        args.show or args.next is not None or args.search is not None
+    ):
+        raise BoardError("--include-comments requires --show, --next, or --search")
 
     shared_conflict = (
         args.shutdown
@@ -3678,7 +3683,7 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         or args.search is not None
         or args.next
         or args.lanes
-        or args.include_prose
+        or args.include_comments
     )
     if conflict:
         raise BoardError("offline board setup and migration flags cannot be combined")
@@ -3719,7 +3724,7 @@ def _run_shutdown_operation(args: argparse.Namespace) -> str | None:
                 args.search is not None,
                 args.next,
                 args.lanes,
-                args.include_prose,
+                args.include_comments,
             )
         )
     )
@@ -3766,7 +3771,7 @@ def _handle_inspection_report(
                 board,
                 str(args.show),
                 as_json=bool(args.json),
-                include_prose=bool(args.include_prose),
+                include_comments=bool(args.include_comments),
             )
             return True
         if args.search is not None:
@@ -3775,7 +3780,7 @@ def _handle_inspection_report(
                 str(args.search),
                 cast("list[str] | None", args.lanes),
                 as_json=bool(args.json),
-                include_prose=bool(args.include_prose),
+                include_comments=bool(args.include_comments),
             )
             return True
         if args.next is not None:
@@ -3784,7 +3789,7 @@ def _handle_inspection_report(
                 cast("list[str]", args.lanes),
                 int(args.next),
                 as_json=bool(args.json),
-                include_prose=bool(args.include_prose),
+                include_comments=bool(args.include_comments),
             )
             return True
     except BoardError as exc:
@@ -4086,7 +4091,7 @@ def _next_item_json(inspection: ItemInspection) -> JsonObject:
     return out
 
 
-def inspect_item(board: Board, ref: str, *, include_prose: bool = False) -> ItemInspection:
+def inspect_item(board: Board, ref: str, *, include_comments: bool = False) -> ItemInspection:
     """Resolve one card plus its parent, children, and directional relationships."""
     item = board.find(ref)
     parent = ItemSummary.from_item(board.find(item.parent)) if item.parent else None
@@ -4116,8 +4121,8 @@ def inspect_item(board: Board, ref: str, *, include_prose: bool = False) -> Item
         parent=parent,
         children=children,
         relationships=relationships,
-        detail=item.detail if include_prose else None,
-        comments=tuple(item.comments) if include_prose else None,
+        detail=item.detail if include_comments else None,
+        comments=tuple(item.comments) if include_comments else None,
     )
 
 
@@ -4126,7 +4131,7 @@ def inspect_next_items(
     lanes: tuple[str, ...],
     limit: int,
     *,
-    include_prose: bool = False,
+    include_comments: bool = False,
 ) -> tuple[ItemInspection, ...]:
     """Return the next cards across selected lanes using the board's total order."""
     if limit < 1:
@@ -4143,7 +4148,7 @@ def inspect_next_items(
         (item for item in board.items if item.state in selected),
         key=lambda item: item_order_key(item, board.policy),
     )[:limit]
-    return tuple(inspect_item(board, item.id, include_prose=include_prose) for item in items)
+    return tuple(inspect_item(board, item.id, include_comments=include_comments) for item in items)
 
 
 def _item_matches_search(
@@ -4151,14 +4156,14 @@ def _item_matches_search(
     needle: str,
     ticket_query: int | None,
     *,
-    include_prose: bool,
+    include_comments: bool,
 ) -> bool:
-    """Match only visible fields unless the caller explicitly opts into prose."""
+    """Match only visible fields unless the caller requests details and comments."""
     if ticket_query is not None:
         return item.ticket == ticket_query
     if needle in item.id.casefold() or needle in item.subject.casefold():
         return True
-    if not include_prose:
+    if not include_comments:
         return False
     if needle in item.detail.casefold():
         return True
@@ -4170,7 +4175,7 @@ def inspect_search_items(
     query: str,
     lanes: tuple[str, ...] | None = None,
     *,
-    include_prose: bool = False,
+    include_comments: bool = False,
 ) -> tuple[ItemInspection, ...]:
     """Find cards by concept without requiring a broad board export."""
     normalized_query = query.strip()
@@ -4198,12 +4203,12 @@ def inspect_search_items(
                 item,
                 needle,
                 ticket_query,
-                include_prose=include_prose,
+                include_comments=include_comments,
             )
         ),
         key=lambda item: item_order_key(item, board.policy),
     )
-    return tuple(inspect_item(board, item.id, include_prose=include_prose) for item in items)
+    return tuple(inspect_item(board, item.id, include_comments=include_comments) for item in items)
 
 
 def _detail_text(args: argparse.Namespace) -> str:
@@ -4393,7 +4398,7 @@ def _print_report_section(label: str, lines: tuple[str, ...]) -> None:
 
 
 def _comment_report_lines(comments: tuple[Comment, ...]) -> tuple[str, ...]:
-    """Render explicit comment prose with its author and timestamp."""
+    """Render explicit comment text with its author and timestamp."""
     lines: list[str] = []
     for comment in comments:
         lines.append(f"{comment.at}  {comment.by}")
@@ -4406,26 +4411,26 @@ def _report_item(
     ref: str,
     *,
     as_json: bool,
-    include_prose: bool,
+    include_comments: bool,
 ) -> None:
-    """Print one focused card report with optional private prose."""
+    """Print one focused card report with optional private detail and comments."""
     drift = board.verify()
     if drift:
         raise BoardError(
             f"focused inspection refused {len(drift)} audit-trail problem(s): {drift[0]}"
         )
-    inspection = inspect_item(board, ref, include_prose=include_prose)
+    inspection = inspect_item(board, ref, include_comments=include_comments)
     if as_json:
         print(json.dumps(inspection.to_json(), indent=2, ensure_ascii=False))
         return
 
-    _print_item_inspection(inspection, include_prose=include_prose)
+    _print_item_inspection(inspection, include_comments=include_comments)
 
 
 def _print_item_inspection(
     inspection: ItemInspection,
     *,
-    include_prose: bool,
+    include_comments: bool,
     expand_children: bool = True,
 ) -> None:
     """Print one already-validated card inspection in the human format."""
@@ -4454,7 +4459,7 @@ def _print_item_inspection(
         ),
     )
 
-    if not include_prose:
+    if not include_comments:
         return
     _print_report_section(
         "detail",
@@ -4469,7 +4474,7 @@ def _report_next_items(
     limit: int,
     *,
     as_json: bool,
-    include_prose: bool,
+    include_comments: bool,
 ) -> None:
     """Print prioritized cards from selected lanes without exporting the whole board."""
     drift = board.verify()
@@ -4482,7 +4487,7 @@ def _report_next_items(
         board,
         selected_lanes,
         limit,
-        include_prose=include_prose,
+        include_comments=include_comments,
     )
     if as_json:
         payload: JsonObject = {
@@ -4505,7 +4510,7 @@ def _report_next_items(
         print()
         _print_item_inspection(
             inspection,
-            include_prose=include_prose,
+            include_comments=include_comments,
             expand_children=False,
         )
 
@@ -4516,7 +4521,7 @@ def _report_search_items(
     lanes: list[str] | None,
     *,
     as_json: bool,
-    include_prose: bool,
+    include_comments: bool,
 ) -> None:
     """Print deterministic focused matches without exporting the whole board."""
     drift = board.verify()
@@ -4527,10 +4532,10 @@ def _report_search_items(
         board,
         query,
         selected_lanes,
-        include_prose=include_prose,
+        include_comments=include_comments,
     )
     fields: list[JsonValue] = ["id", "ticket", "subject"]
-    if include_prose:
+    if include_comments:
         fields.extend(("detail", "comments"))
     if as_json:
         payload: JsonObject = {
@@ -4554,7 +4559,7 @@ def _report_search_items(
         print()
         _print_item_inspection(
             inspection,
-            include_prose=include_prose,
+            include_comments=include_comments,
             expand_children=False,
         )
 

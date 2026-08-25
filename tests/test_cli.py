@@ -278,7 +278,7 @@ def inspection_board(path: pathlib.Path) -> None:
     board_state.save(board, path)
 
 
-def test_show_json_resolves_ticket_and_relationships_without_prose(
+def test_show_json_resolves_ticket_and_relationships_without_private_text(
     tmp_path: pathlib.Path,
 ) -> None:
     path = tmp_path / "board.json"
@@ -317,15 +317,15 @@ def test_show_json_resolves_ticket_and_relationships_without_prose(
     assert "Private focused comment" not in result.stdout
 
 
-def test_show_human_output_is_safe_until_prose_is_explicitly_requested(
+def test_show_human_output_is_safe_until_private_text_is_explicitly_requested(
     tmp_path: pathlib.Path,
 ) -> None:
     path = tmp_path / "board.json"
     inspection_board(path)
 
     safe = run_cli(path, "--show", "2")
-    with_prose = run_cli(path, "--show", "focus", "--include-prose")
-    with_prose_json = run_cli(path, "--show", "focus", "--include-prose", "--json")
+    with_comments = run_cli(path, "--show", "focus", "--include-comments")
+    with_comments_json = run_cli(path, "--show", "focus", "--include-comments", "--json")
 
     assert safe.returncode == 0, safe.stderr
     assert "#0002 focus" in safe.stdout
@@ -333,13 +333,13 @@ def test_show_human_output_is_safe_until_prose_is_explicitly_requested(
     assert "comments: 1" in safe.stdout
     assert "Private focused detail" not in safe.stdout
     assert "Private focused comment" not in safe.stdout
-    assert with_prose.returncode == 0, with_prose.stderr
-    assert "Private focused detail" in with_prose.stdout
-    assert "Private focused comment" in with_prose.stdout
-    assert with_prose_json.returncode == 0, with_prose_json.stderr
-    prose_report = cast("dict[str, Any]", json.loads(with_prose_json.stdout))
-    assert prose_report["detail"] == "Private focused detail"
-    comments = cast("list[dict[str, Any]]", prose_report["comments"])
+    assert with_comments.returncode == 0, with_comments.stderr
+    assert "Private focused detail" in with_comments.stdout
+    assert "Private focused comment" in with_comments.stdout
+    assert with_comments_json.returncode == 0, with_comments_json.stderr
+    comments_report = cast("dict[str, Any]", json.loads(with_comments_json.stdout))
+    assert comments_report["detail"] == "Private focused detail"
+    comments = cast("list[dict[str, Any]]", comments_report["comments"])
     assert comments[0]["text"] == "Private focused comment"
 
 
@@ -360,7 +360,8 @@ def test_show_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (("--include-prose",), "requires --show"),
+        (("--include-comments",), "requires --show"),
+        (("--include-prose",), "unrecognized arguments: --include-prose"),
         (("--show", "focus", "--verify"), "cannot be combined"),
         (("--show", "focus", "--comment", "focus", "no"), "cannot be combined"),
         (("--show", "999"), "no card with ticket #0999"),
@@ -417,21 +418,21 @@ def test_next_json_uses_shared_total_order_and_returns_focused_details(
     assert "Private focused comment" not in result.stdout
 
 
-def test_next_human_output_exposes_prose_only_when_requested(
+def test_next_human_output_exposes_details_and_comments_when_requested(
     tmp_path: pathlib.Path,
 ) -> None:
     path = tmp_path / "board.json"
     inspection_board(path)
 
     safe = run_cli(path, "--next", "1", "--lanes", "backlog", "ready_for_work")
-    with_prose = run_cli(
+    with_comments = run_cli(
         path,
         "--next",
         "1",
         "--lanes",
         "backlog",
         "ready_for_work",
-        "--include-prose",
+        "--include-comments",
     )
 
     assert safe.returncode == 0, safe.stderr
@@ -441,9 +442,9 @@ def test_next_human_output_exposes_prose_only_when_requested(
     assert "blocked_by: #0004 blocker" in safe.stdout
     assert "Private focused detail" not in safe.stdout
     assert "Private focused comment" not in safe.stdout
-    assert with_prose.returncode == 0, with_prose.stderr
-    assert "Private focused detail" in with_prose.stdout
-    assert "Private focused comment" in with_prose.stdout
+    assert with_comments.returncode == 0, with_comments.stderr
+    assert "Private focused detail" in with_comments.stdout
+    assert "Private focused comment" in with_comments.stdout
 
 
 def test_next_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
@@ -535,20 +536,26 @@ def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
     assert [item["id"] for item in id_items] == ["blocker"]
 
 
-def test_search_prose_is_unsearchable_and_unreported_until_explicitly_requested(
+def test_search_details_and_comments_require_explicit_request(
     tmp_path: pathlib.Path,
 ) -> None:
     path = tmp_path / "board.json"
     inspection_board(path)
 
     safe = run_cli(path, "--search", "private focused")
-    with_prose = run_cli(path, "--search", "PRIVATE FOCUSED", "--include-prose", "--json")
+    with_comments = run_cli(
+        path,
+        "--search",
+        "PRIVATE FOCUSED",
+        "--include-comments",
+        "--json",
+    )
 
     assert safe.returncode == 0, safe.stderr
     assert "No cards matched" in safe.stdout
     assert "#0002 focus" not in safe.stdout
-    assert with_prose.returncode == 0, with_prose.stderr
-    report = cast("dict[str, Any]", json.loads(with_prose.stdout))
+    assert with_comments.returncode == 0, with_comments.stderr
+    report = cast("dict[str, Any]", json.loads(with_comments.stdout))
     assert report["searchedFields"] == ["id", "ticket", "subject", "detail", "comments"]
     items = cast("list[dict[str, Any]]", report["items"])
     assert [item["id"] for item in items] == ["focus"]

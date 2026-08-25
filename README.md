@@ -90,12 +90,12 @@ Inspect one card by stable ID or ticket number without dumping the board:
 ~~~console
 uv run --frozen localswim-cli boards/my-project.json --show 137
 uv run --frozen localswim-cli boards/my-project.json --show '#0137' --json
-uv run --frozen localswim-cli boards/my-project.json --show upload-retry --include-prose
+uv run --frozen localswim-cli boards/my-project.json --show upload-retry --include-comments
 ~~~
 
 The focused report includes state, priority, owner, comment count, parent, children,
 and directional relationships with each related card's current status. Its default
-human and JSON forms omit detail and comment text. `--include-prose` is the explicit
+human and JSON forms omit detail and comment text. `--include-comments` is the explicit
 opt-in for that selected card's description and comments; bounded activity remains the
 audit-history interface.
 
@@ -111,20 +111,20 @@ first, then monotonically allocated ticket number**. Ticket number is creation o
 and the unique tie-breaker. Lane order only filters candidates; it never outranks card
 priority. Each result includes focused identity and status, its parent, child count,
 and directional relationships. Use `--show` when the full child list is useful. Detail
-and comments remain absent unless `--include-prose` is supplied explicitly.
+and comments remain absent unless `--include-comments` is supplied explicitly.
 
 Find an existing card by concept without exporting the whole board:
 
 ~~~console
 uv run --frozen localswim-cli boards/my-project.json --search "upload ambiguity"
 uv run --frozen localswim-cli boards/my-project.json --search 137 --lanes ready_for_work needs_terry_action --json
-uv run --frozen localswim-cli boards/my-project.json --search "private detail phrase" --include-prose
+uv run --frozen localswim-cli boards/my-project.json --search "private detail phrase" --include-comments
 ~~~
 
 Search is case-insensitive. Stable IDs and subjects use substring matching; a numeric
 or `#NNNN` query matches that exact ticket number. All lanes are searched unless
 `--lanes` filters them. Default matching and output exclude details and comments;
-`--include-prose` explicitly adds both to the search surface and the results. Matches
+`--include-comments` explicitly adds both to the search surface and the results. Matches
 use the same embedded-policy priority then monotonic-ticket ordering as `--next`.
 
 Time-bounded activity reports combine card creation, movement, assignment, priority,
