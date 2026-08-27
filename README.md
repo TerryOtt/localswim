@@ -146,7 +146,7 @@ stable card ID, timestamp, and author. Its command scope prevents accidental
 combination with a write, migration, or another report.
 
 Time-bounded activity reports combine card creation, movement, assignment, priority,
-comment, link, and unlink events into one chronological stream:
+comment, link, unlink, parent, and unparent events into one chronological stream:
 
 ~~~console
 uv run --frozen localswim-cli boards/my-project.json activity since 2026-08-23T10:53:09-04:00
@@ -155,11 +155,13 @@ uv run --frozen localswim-cli boards/my-project.json activity between 2026-08-23
 
 Bounds are inclusive and require RFC 3339 timestamps with an explicit UTC offset.
 Output is intentionally safe for coordination: it identifies the card, event, actor,
-and changed lane, owner, priority, or relationship, but never emits card prose or
-comment text. Relationship events name the caller-facing relationship kind plus the
-opposite ticket number and stable ID. Comment events expose only their character count.
-Events recorded in different history arrays at the same instant have deterministic
-output order, not a recoverable causal order.
+and changed lane, owner, priority, relationship, or hierarchy, but never emits card
+prose or comment text. Relationship events name the caller-facing relationship kind
+plus the opposite ticket number and stable ID. Hierarchy events name the before and
+after parent ticket endpoints, using the top level when either endpoint has no parent.
+Comment events expose only their character count. Events recorded in different history
+arrays at the same instant have deterministic output order, not a recoverable causal
+order.
 
 New audit events retain microsecond precision so a filesystem monitor can supply
 consecutive, non-overlapping activity windows without repeating a boundary event.

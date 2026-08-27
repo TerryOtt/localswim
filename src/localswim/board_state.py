@@ -366,6 +366,59 @@ class RelationshipChange:
         )
 
 
+@dataclass
+class ParentChange:
+    """One append-only parent mutation for hierarchy attribution.
+
+    Existing boards may already contain parent fields without this history. The optional
+    board-level array therefore begins with the first mutation made by a supporting
+    build, recording the observed previous parent without inventing earlier events.
+    """
+
+    at: str
+    by: str
+    child: str
+    frm: str | None
+    to: str | None
+
+    def to_json(self) -> JsonObject:
+        return {
+            "at": self.at,
+            "by": self.by,
+            "child": self.child,
+            "from": self.frm,
+            "to": self.to,
+        }
+
+    @classmethod
+    def from_json(cls, raw: JsonValue, where: str) -> Self:
+        if not isinstance(raw, dict):
+            raise BoardError(
+                f"{where}: a parent-history entry is {type(raw).__name__}, want object"
+            )
+        values = {key: raw.get(key) for key in ("at", "by", "child")}
+        for key, value in values.items():
+            if not isinstance(value, str) or not value:
+                raise BoardError(f"{where}: parent-history entry has no {key}")
+        for key in ("from", "to"):
+            if key not in raw:
+                raise BoardError(f"{where}: parent-history entry has no {key}")
+            value = raw[key]
+            if value is not None and (not isinstance(value, str) or not value):
+                raise BoardError(f"{where}: parent-history entry has invalid {key}")
+        frm = cast("str | None", raw["from"])
+        to = cast("str | None", raw["to"])
+        if frm == to:
+            raise BoardError(f"{where}: parent-history entry does not change the parent")
+        return cls(
+            at=str(values["at"]),
+            by=str(values["by"]),
+            child=str(values["child"]),
+            frm=frm,
+            to=to,
+        )
+
+
 # **THREE STATES MEAN "NOT MOVING", AND TERRY DREW THE LINES HIMSELF.** They get
 # confused constantly, and the whole value of the board is that a stalled card says WHO
 # is holding it.
@@ -1598,6 +1651,10 @@ class ActivityEvent:
     relationship_kind: str | None = None
     other_ticket: int | None = None
     other_id: str | None = None
+    parent_from_ticket: int | None = None
+    parent_from_id: str | None = None
+    parent_to_ticket: int | None = None
+    parent_to_id: str | None = None
     sequence: int = 0
 
     def to_json(self) -> JsonObject:
@@ -1629,6 +1686,11 @@ class ActivityEvent:
             out["otherTicket"] = self.other_ticket
         if self.other_id is not None:
             out["otherId"] = self.other_id
+        if self.kind in {"parented", "unparented"}:
+            out["parentFromTicket"] = self.parent_from_ticket
+            out["parentFromId"] = self.parent_from_id
+            out["parentToTicket"] = self.parent_to_ticket
+            out["parentToId"] = self.parent_to_id
         return out
 
     def describe(self) -> str:
@@ -1648,6 +1710,18 @@ class ActivityEvent:
             and self.other_id is not None
         ):
             return f"{base}  {self.relationship_kind} #{self.other_ticket:04d} {self.other_id}"
+        if self.kind in {"parented", "unparented"}:
+            source = (
+                f"#{self.parent_from_ticket:04d} {self.parent_from_id}"
+                if self.parent_from_ticket is not None and self.parent_from_id is not None
+                else "(top level)"
+            )
+            target = (
+                f"#{self.parent_to_ticket:04d} {self.parent_to_id}"
+                if self.parent_to_ticket is not None and self.parent_to_id is not None
+                else "(top level)"
+            )
+            return f"{base}  {source} -> {target}"
         return f"{base}  {self.comment_chars} character(s)"
 
 
@@ -1912,6 +1986,25 @@ def _relationship_history_from_json(
     return changes
 
 
+def _parent_history_from_json(raw: JsonValue, known: set[str], where: str) -> list[ParentChange]:
+    """Validate parent audit records without reconstructing missing history."""
+    if not isinstance(raw, list):
+        raise BoardError(f"{where}: 'parentHistory' is not a list")
+    changes: list[ParentChange] = []
+    for index, change_raw in enumerate(raw):
+        spot = f"{where}: parentHistory[{index}]"
+        change = ParentChange.from_json(change_raw, spot)
+        if change.child not in known:
+            raise BoardError(f"{spot} names unknown child {change.child!r}")
+        for parent in (change.frm, change.to):
+            if parent is not None and parent not in known:
+                raise BoardError(f"{spot} names unknown parent {parent!r}")
+            if parent == change.child:
+                raise BoardError(f"{spot} makes {change.child!r} its own parent")
+        changes.append(change)
+    return changes
+
+
 def _check_parents(board: Board, known: set[str], where: str) -> None:
     """Refuse a parent that does not exist or that closes a loop. Card #0028.
 
@@ -1970,6 +2063,11 @@ class Board:
     # audit metadata.
     relationship_history: list[RelationshipChange] = field(default_factory=list[RelationshipChange])
 
+    # Parent state, like relationship state, cannot answer when or who. This optional
+    # append-only log starts with the first hierarchy mutation made by a supporting
+    # build and preserves the observed before/after endpoints.
+    parent_history: list[ParentChange] = field(default_factory=list[ParentChange])
+
     # **THE CAST LIVES WITH THE DATA, NOT WITH THE CODE. Card #0083.**
     #
     # Card #0072 put users in `rules.json`, which sits next to `board_state.py` inside the
@@ -2019,6 +2117,10 @@ class Board:
         if self.relationship_history:
             out["relationshipHistory"] = [
                 cast("JsonValue", change.to_json()) for change in self.relationship_history
+            ]
+        if self.parent_history:
+            out["parentHistory"] = [
+                cast("JsonValue", change.to_json()) for change in self.parent_history
             ]
         return out
 
@@ -2106,6 +2208,7 @@ class Board:
             relationship_history=_relationship_history_from_json(
                 raw.get("relationshipHistory", []), seen, where
             ),
+            parent_history=_parent_history_from_json(raw.get("parentHistory", []), seen, where),
             users=users,
             browser_user=browser_user,
             cli_user=cli_user,
@@ -2167,6 +2270,30 @@ class Board:
             for state, label in self.policy.lanes
         ]
 
+    def _parent_history_problems(self, known_actors: set[str]) -> list[str]:
+        """Check hierarchy attribution, chain continuity, and current parent state."""
+        problems = [
+            f"parentHistory[{index}] names unknown actor {change.by!r}"
+            for index, change in enumerate(self.parent_history)
+            if change.by not in known_actors
+        ]
+        parent_where: dict[str, str | None] = {}
+        for index, change in enumerate(self.parent_history):
+            if change.child in parent_where and change.frm != parent_where[change.child]:
+                problems.append(
+                    f"parentHistory[{index}] leaves {change.frm!r} but the previous entry "
+                    f"for {change.child!r} arrived at {parent_where[change.child]!r}"
+                )
+            parent_where[change.child] = change.to
+        for child_id, parent_id in parent_where.items():
+            child = self.find(child_id)
+            if child.parent != parent_id:
+                problems.append(
+                    f"{child_id}: stored parent is {child.parent!r} but parentHistory ends at "
+                    f"{parent_id!r} -- something changed it without going through set_parent()"
+                )
+        return problems
+
     def verify(self) -> list[str]:
         """Replay every item's history and report anything the transition policy forbids.
 
@@ -2198,11 +2325,13 @@ class Board:
         migrated from the markdown log carry none, and inventing a trail for them would
         have been fabricating evidence.
         """
+        known_actors = {user.id for user in self.users}
         problems: list[str] = [
             f"relationshipHistory[{index}] names unknown actor {change.by!r}"
             for index, change in enumerate(self.relationship_history)
-            if change.by not in {user.id for user in self.users}
+            if change.by not in known_actors
         ]
+        problems.extend(self._parent_history_problems(known_actors))
         for item in self.items:
             if not item.history:
                 continue
@@ -2390,17 +2519,14 @@ class Board:
         return None
 
     def set_parent(self, child_id: str, parent_ref: str | None, by: Actor) -> str:
-        """Give a card a parent, or clear it with `None`. Card #0028.
-
-        **No history entry**, for the reason `set_priority` gives: `verify()` replays
-        LANES and OWNERS, and a third shape would have to be taught to it. Git is the
-        trail.
-        """
+        """Give a card a parent, or clear it with `None`, and record the change."""
         child = self.find(child_id)
         if parent_ref is None:
             if child.parent is None:
                 return f"{child.label} already has no parent"
             was = child.parent
+            child_change = ParentChange(at=now(), by=by, child=child.id, frm=was, to=None)
+            self.parent_history.append(child_change)
             child.parent = None
             return f"{child.label} parent cleared (was {was}, by {by})"
 
@@ -2408,6 +2534,8 @@ class Board:
         if parent.id == child.id:
             raise BoardError(f"{child.label} cannot be its own parent")
         was_parent = child.parent
+        if was_parent == parent.id:
+            return f"{child.label} already has parent {parent.id}"
         child.parent = parent.id
         # **Set it, then check, then put it back.** Testing the loop before the write
         # would have to simulate the new edge anyway, and this way the check reads the
@@ -2415,6 +2543,9 @@ class Board:
         if cycle := self.parent_cycle(child):
             child.parent = was_parent
             raise BoardError(f"that would make a parent cycle: {' -> '.join(cycle)}")
+        self.parent_history.append(
+            ParentChange(at=now(), by=by, child=child.id, frm=was_parent, to=parent.id)
+        )
         return f"{child.label} parent: {was_parent or 'none'} -> {parent.id} (by {by})"
 
     def _link_parts(
@@ -4388,9 +4519,10 @@ def activity_events(
 ) -> list[ActivityEvent]:
     """Return sanitized events in one inclusive window, oldest first.
 
-    History, comments, and relationship history are separate persisted arrays, so events
-    sharing a timestamp have no recoverable cross-array causal order. Ticket, source
-    sequence, and kind provide a deterministic tie-break without pretending otherwise.
+    Item history, comments, relationship history, and parent history are separate
+    persisted arrays, so events sharing a timestamp have no recoverable cross-array
+    causal order. Ticket, source sequence, and kind provide a deterministic tie-break
+    without pretending otherwise.
     """
     events: list[ActivityEvent] = []
     for item in board.items:
@@ -4470,6 +4602,30 @@ def activity_events(
                 other_ticket=other.ticket,
                 other_id=other.id,
                 sequence=len(item.history) + len(item.comments) + index,
+            )
+        )
+    for index, change in enumerate(board.parent_history):
+        instant = _event_instant(change.at, f"parentHistory[{index}]")
+        if instant < start or (end is not None and instant > end):
+            continue
+        item = board.find(change.child)
+        parent_from = board.find(change.frm) if change.frm is not None else None
+        parent_to = board.find(change.to) if change.to is not None else None
+        events.append(
+            ActivityEvent(
+                ticket=item.ticket,
+                item_id=item.id,
+                kind="unparented" if change.to is None else "parented",
+                at=change.at,
+                instant=instant,
+                by=change.by,
+                parent_from_ticket=parent_from.ticket if parent_from is not None else None,
+                parent_from_id=parent_from.id if parent_from is not None else None,
+                parent_to_ticket=parent_to.ticket if parent_to is not None else None,
+                parent_to_id=parent_to.id if parent_to is not None else None,
+                sequence=(
+                    len(item.history) + len(item.comments) + len(board.relationship_history) + index
+                ),
             )
         )
     return sorted(

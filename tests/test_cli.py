@@ -299,6 +299,10 @@ def activity_board(path: pathlib.Path) -> None:
     board.relationship_history[-1].at = "2026-08-23T10:07:00Z"
     board.unlink("alpha", "blocked_by", "beta", "bot")
     board.relationship_history[-1].at = "2026-08-23T10:08:00Z"
+    board.set_parent("alpha", "beta", "bot")
+    board.parent_history[-1].at = "2026-08-23T10:09:00Z"
+    board.set_parent("alpha", None, "bot")
+    board.parent_history[-1].at = "2026-08-23T10:10:00Z"
     board_state.save(board, path)
 
 
@@ -800,6 +804,8 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
         "created",
         "linked",
         "unlinked",
+        "parented",
+        "unparented",
     ]
     comment = next(event for event in events if event["kind"] == "commented")
     assert comment["commentChars"] == 19
@@ -831,6 +837,31 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
             "otherId": "beta",
         },
     ]
+    hierarchy_events = [event for event in events if event["kind"] in {"parented", "unparented"}]
+    assert hierarchy_events == [
+        {
+            "ticket": 1,
+            "id": "alpha",
+            "kind": "parented",
+            "at": "2026-08-23T10:09:00Z",
+            "by": "bot",
+            "parentFromTicket": None,
+            "parentFromId": None,
+            "parentToTicket": 2,
+            "parentToId": "beta",
+        },
+        {
+            "ticket": 1,
+            "id": "alpha",
+            "kind": "unparented",
+            "at": "2026-08-23T10:10:00Z",
+            "by": "bot",
+            "parentFromTicket": 2,
+            "parentFromId": "beta",
+            "parentToTicket": None,
+            "parentToId": None,
+        },
+    ]
 
 
 def test_activity_relationship_human_output_names_opposite_endpoint(
@@ -847,6 +878,26 @@ def test_activity_relationship_human_output_names_opposite_endpoint(
     )
     assert (
         "2026-08-23T10:08:00Z  #0001 alpha  unlinked by bot  blocked_by #0002 beta" in result.stdout
+    )
+    assert "Private subject" not in result.stdout
+
+
+def test_activity_hierarchy_human_output_names_before_and_after_parents(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+
+    result = run_cli(path, "activity", "since", "2026-08-23T10:09:00Z")
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "2026-08-23T10:09:00Z  #0001 alpha  parented by bot  "
+        "(top level) -> #0002 beta" in result.stdout
+    )
+    assert (
+        "2026-08-23T10:10:00Z  #0001 alpha  unparented by bot  "
+        "#0002 beta -> (top level)" in result.stdout
     )
     assert "Private subject" not in result.stdout
 

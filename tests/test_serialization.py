@@ -56,6 +56,26 @@ def test_relationship_history_round_trips_after_link_is_removed(tmp_path: pathli
     assert loaded.to_json() == board.to_json()
 
 
+def test_parent_history_round_trips_after_parent_is_cleared(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    board = saved_board(path)
+    board.create("beta", "Beta", "backlog", "bot")
+    board.set_parent("beta", "alpha", "bot")
+    board.parent_history[-1].at = "2026-08-24T10:00:00Z"
+    board.set_parent("beta", None, "bot")
+    board.parent_history[-1].at = "2026-08-24T10:01:00Z"
+    board_state.save(board, path)
+
+    loaded = board_state.load(path)
+
+    assert loaded.find("beta").parent is None
+    assert [(change.frm, change.to) for change in loaded.parent_history] == [
+        (None, "alpha"),
+        ("alpha", None),
+    ]
+    assert loaded.to_json() == board.to_json()
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -73,6 +93,29 @@ def test_invalid_relationship_history_is_refused(
     board.link("alpha", "blocks", "beta", "bot")
     raw = editable_json(board)
     raw["relationshipHistory"][0][field] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(board_state.BoardError, match=message):
+        board_state.load(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("from", "missing", "unknown parent"),
+        ("from", "alpha", "does not change the parent"),
+        ("child", "missing", "unknown child"),
+    ],
+)
+def test_invalid_parent_history_is_refused(
+    tmp_path: pathlib.Path, field: str, value: str, message: str
+) -> None:
+    path = tmp_path / "board.json"
+    board = saved_board(path)
+    board.create("beta", "Beta", "backlog", "bot")
+    board.set_parent("beta", "alpha", "bot")
+    raw = editable_json(board)
+    raw["parentHistory"][0][field] = value
     path.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(board_state.BoardError, match=message):

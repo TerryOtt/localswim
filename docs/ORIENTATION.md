@@ -128,9 +128,9 @@ monotonically allocated ticket number. Ticket order is creation order, so parsin
 timestamps would add another failure mode without changing the result. The browser and
 focused CLI triage queries share this exact comparator.
 
-Item history, relationship history, and comments are separate. Both histories are
-machine-written and append-only; comments are human/bot prose. Item history has three
-event shapes:
+Item history, relationship history, parent history, and comments are separate. All
+three histories are machine-written and append-only; comments are human/bot prose.
+Item history has three event shapes:
 
 | Kind | Discriminant | Meaning |
 |---|---|---|
@@ -149,9 +149,15 @@ separate from current canonical `links` state so a removed link remains attribut
 The field is optional under schema 4: older boards begin recording with their first new
 relationship mutation, and no timestamp or actor is fabricated for an existing link.
 
-Title, description, project, and parent edits do not receive their own board-history
-entries. The existing design expects Git history to carry those earlier values when the
-board lives in a Git repository. Automatic Git publishing is off by default, so that
+Parent changes similarly append a board-level `parentHistory` entry containing the
+timestamp, actor, child stable ID, and nullable before/after parent IDs. The field is
+optional under schema 4, and an existing parent receives no fabricated earlier event.
+`Board.verify()` checks each recorded child's hierarchy chain and compares its last
+event with current parent state.
+
+Title, description, and project edits do not receive their own board-history entries.
+The existing design expects Git history to carry those earlier values when the board
+lives in a Git repository. Automatic Git publishing is off by default, so that
 expectation is only true when the operator has deliberately arranged versioned board
 storage.
 
@@ -315,13 +321,14 @@ private comment text. Its JSON report names the limit and deterministic ordering
 its command scope prevents combining it with another report or mutation.
 
 `activity since` and `activity between` merge creation, movement, assignment,
-priority, comment, link, and unlink audit records into an inclusive chronological
-report. Their RFC 3339 bounds must carry an explicit UTC offset. Relationship events
-name the caller-facing kind and opposite ticket endpoint. The report intentionally
-omits card subjects, details, and comment text; JSON output is therefore composable
-without turning routine coordination into a prose export. Cross-array events recorded
-at the same instant have a deterministic tie-break order, because the snapshot cannot
-recover their original causal order.
+priority, comment, link, unlink, parent, and unparent audit records into an inclusive
+chronological report. Their RFC 3339 bounds must carry an explicit UTC offset.
+Relationship events name the caller-facing kind and opposite ticket endpoint;
+hierarchy events name nullable before/after parent ticket endpoints. The report
+intentionally omits card subjects, details, and comment text; JSON output is therefore
+composable without turning routine coordination into a prose export. Cross-array
+events recorded at the same instant have a deterministic tie-break order, because the
+snapshot cannot recover their original causal order.
 
 New audit timestamps retain six fractional digits. That precision lets an external
 filesystem monitor use its exact preceding-signature observation as the next inclusive

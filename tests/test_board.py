@@ -208,11 +208,51 @@ def test_parent_cycle_is_refused_and_rolled_back(board: board_state.Board) -> No
     board.create("alpha", "Alpha", "backlog", "bot")
     board.create("beta", "Beta", "backlog", "bot")
     board.set_parent("beta", "alpha", "bot")
+    original_history = list(board.parent_history)
 
     with pytest.raises(board_state.BoardError, match="parent cycle"):
         board.set_parent("alpha", "beta", "bot")
     assert board.find("alpha").parent is None
     assert board.find("beta").parent == "alpha"
+    assert board.parent_history == original_history
+
+
+def test_parent_changes_record_before_and_after_without_no_op_events(
+    board: board_state.Board,
+) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("beta", "Beta", "backlog", "bot")
+
+    board.set_parent("beta", "alpha", "bot")
+    assert board.parent_history[-1] == board_state.ParentChange(
+        at=board.parent_history[-1].at,
+        by="bot",
+        child="beta",
+        frm=None,
+        to="alpha",
+    )
+
+    board.set_parent("beta", "alpha", "bot")
+    assert len(board.parent_history) == 1
+
+    board.set_parent("beta", None, "bot")
+    assert board.parent_history[-1] == board_state.ParentChange(
+        at=board.parent_history[-1].at,
+        by="bot",
+        child="beta",
+        frm="alpha",
+        to=None,
+    )
+    assert board.verify() == []
+
+
+def test_verify_detects_parent_history_drift(board: board_state.Board) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("beta", "Beta", "backlog", "bot")
+    board.set_parent("beta", "alpha", "bot")
+    board.find("beta").parent = None
+
+    assert "something changed it without going through set_parent()" in board.verify()[0]
 
 
 def test_lanes_sort_by_priority_then_monotonic_ticket(board: board_state.Board) -> None:
