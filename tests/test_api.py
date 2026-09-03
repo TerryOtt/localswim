@@ -571,6 +571,13 @@ def test_card_drawer_exposes_relationship_add_change_and_remove_controls(
     assert "remove: true" in page
 
 
+def test_card_drawer_puts_comment_entry_before_comment_history(api: RunningApi) -> None:
+    with urllib.request.urlopen(api.base + "/", timeout=5) as response:
+        page = response.read().decode("utf-8")
+
+    assert page.index('id="say"') < page.index('id="p-comments"')
+
+
 def test_missing_credential_returns_401(api: RunningApi) -> None:
     code, response = request_json(
         api.base + API + "/cards", revision=0, body={"subject": "Alpha", "state": "backlog"}

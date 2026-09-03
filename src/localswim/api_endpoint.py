@@ -1881,7 +1881,9 @@ move any card whoever owns it. Click to hand it over."></button>
       </h3>
       <div id="p-rel"></div>
       <h3>Comments</h3>
-      <div id="p-comments"></div>
+      <!-- **Card #0022.** Keep comment entry before comment history so an active card
+           with a long discussion does not make the primary write action require a
+           scroll to the bottom of that history. -->
       <textarea id="say" placeholder="Leave a note on this card..."></textarea>
       <!-- **The hint is not decoration.** This box posts on Enter and the new-card
            dialog's description does not, so two multi-line fields on one page
@@ -1890,6 +1892,7 @@ move any card whoever owns it. Click to hand it over."></button>
            decision. Cards #0039 and #0040. -->
       <div class="keyhint">Enter posts. Shift+Enter adds a line break.</div>
       <button id="post">Comment</button>
+      <div id="p-comments"></div>
       <h3>Audit trail</h3>
       <div class="trail" id="p-trail"></div>
     </div>
