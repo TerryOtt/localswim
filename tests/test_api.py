@@ -578,6 +578,13 @@ def test_card_drawer_puts_comment_entry_before_comment_history(api: RunningApi) 
     assert page.index('id="say"') < page.index('id="p-comments"')
 
 
+def test_card_drawer_renders_newest_comments_first(api: RunningApi) -> None:
+    with urllib.request.urlopen(api.base + "/", timeout=5) as response:
+        page = response.read().decode("utf-8")
+
+    assert "for (const c of [...it.comments].reverse())" in page
+
+
 def test_missing_credential_returns_401(api: RunningApi) -> None:
     code, response = request_json(
         api.base + API + "/cards", revision=0, body={"subject": "Alpha", "state": "backlog"}

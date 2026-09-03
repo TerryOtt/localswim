@@ -2494,7 +2494,10 @@ function openCard(id) {
     e.textContent = 'No comments yet.';
     cs.appendChild(e);
   }
-  for (const c of it.comments) {
+  // **Card #0023.** The entry controls sit immediately above this list, so put the
+  // newest response next to them instead of making the reader cross old history.
+  // Copy before reversing because the board payload remains the rendering authority.
+  for (const c of [...it.comments].reverse()) {
     const d = document.createElement('div');
     d.className = 'comment';
     d.innerHTML = '<div class="head"><span class="who ' + c.by + '"></span>'
