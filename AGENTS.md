@@ -46,9 +46,11 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   migration operations for those different intents.
 - Keep durable product identifiers agent-neutral. Do not put a human assistant,
   automation product, model, or vendor name into lane, field, or protocol IDs.
-- An automation agent must not promote a backlog card to `ready_for_work` without
-  explicit permission for that specific card, even though the edge exists for that
-  exceptional case. It must never move its own work to `completed`.
+- Board-specific working agreements decide how an allowed transition is used. In the
+  Terry workflow, Bot triages sufficiently scoped work from `backlog` to
+  `ready_for_work` without per-ticket permission and orders it one card at a time;
+  dependencies between ready cards affect execution order, not readiness. Bot must
+  never move its own work to `completed`.
 - Keep the checked generic and Terry-workflow examples distinct. Terry's seven-lane
   workflow is an intentional public example of how he works, not a universal default.
 

@@ -14,6 +14,67 @@ TERRY_LANES = [
     "completed",
 ]
 
+TERRY_LANE_POLICY: list[board_state.JsonObject] = [
+    {
+        "id": "backlog",
+        "label": "Backlog",
+        "create": ["bot", "terry"],
+        "note": (
+            "Work Terry has explicitly held back, work that is not yet scoped well enough "
+            "for Bot to perform, and optional umbrella cards that organize executable child "
+            "cards."
+        ),
+    },
+    {
+        "id": "ready_for_work",
+        "label": "Ready For Work",
+        "create": ["bot", "terry"],
+        "note": (
+            "Work scoped well enough for Bot to perform, ordered by priority. Dependencies "
+            "on other Ready For Work cards affect execution order, not readiness."
+        ),
+    },
+    {
+        "id": "in_progress",
+        "label": "In progress",
+        "create": [],
+        "note": "The one card Bot is actively performing.",
+    },
+    {
+        "id": "blocked",
+        "label": "Blocked",
+        "create": [],
+        "note": (
+            "Neither Bot nor Terry can act until an external condition changes, such as "
+            "hardware arriving from a vendor."
+        ),
+    },
+    {
+        "id": "needs_terry_action",
+        "label": "Needs Terry",
+        "create": [],
+        "note": (
+            "Bot work waiting for Terry to answer, approve a recommendation, make a judgment "
+            "call, or personally act."
+        ),
+    },
+    {
+        "id": "ready_for_review",
+        "label": "Ready for review",
+        "create": [],
+        "note": (
+            "Bot believes the work is complete and awaits Terry's review; Bot may not sign "
+            "off its own work."
+        ),
+    },
+    {
+        "id": "completed",
+        "label": "Completed",
+        "create": [],
+        "note": "Work Terry reviewed and accepted.",
+    },
+]
+
 
 def test_example_board_is_valid_and_empty() -> None:
     example = pathlib.Path(__file__).resolve().parents[1] / "examples" / "board.example.json"
@@ -49,6 +110,7 @@ def test_terry_workflow_board_preserves_personal_lane_and_priority_model() -> No
     assert board.port == 8793
     assert board.items == []
     assert [lane_id for lane_id, _label in board.policy.lanes] == TERRY_LANES
+    assert board.policy.to_json()["lanes"] == TERRY_LANE_POLICY
     assert [
         (priority, board.policy.priority_label[priority]) for priority in board.policy.priorities
     ] == [

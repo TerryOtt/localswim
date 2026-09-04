@@ -189,7 +189,7 @@ The drawer adds and removes one canonical link per request; changing a type uses
 stored row and appending its unlink/link audit pair. A refusal discards the candidate,
 so no client has to coordinate two half-mutations.
 
-## Lane policy and the non-table rule
+## Lane policy and working conventions
 
 Each board's embedded policy is its executable allow-list. The small generic example
 is the product-oriented starting point. The separately checked Terry-workflow example
@@ -198,21 +198,25 @@ are:
 
 | Lane | Meaning |
 |---|---|
-| `backlog` | Someday queue controlled by the human. |
-| `ready_for_work` | Work selected for the automation agent. Display label: Ready For Work. |
-| `in_progress` | Work actively being performed. |
-| `blocked` | Nobody can act, such as waiting for an external license key. |
-| `needs_terry_action` | The human must answer, decide, or personally act. |
-| `ready_for_review` | Automation believes the work is done and awaits signoff. |
-| `completed` | Terminal, append-only lane. |
+| `backlog` | Terry held the work back, or Bot lacks enough scope to perform it. Umbrella cards may stay here while their executable children advance. |
+| `ready_for_work` | Bot has enough scope to perform the work. Display label: Ready For Work. |
+| `in_progress` | The one card Bot is actively performing. |
+| `blocked` | Neither Bot nor Terry can act until an external condition changes. |
+| `needs_terry_action` | Bot is waiting for Terry to answer, approve, decide, or personally act. |
+| `ready_for_review` | Bot believes the work is done and awaits Terry's signoff. |
+| `completed` | Work Terry accepted; terminal and append-only. |
 
-Two constraints matter beyond a simple `may_move()` lookup:
+Four conventions matter beyond a simple `may_move()` lookup:
 
-1. The automation actor has a `backlog -> ready_for_work` edge only so the human can
-   authorize that move for one named ticket. It must never use the edge unsolicited.
-2. Automation cannot sign off its own work. Only the browser/human actor has
+1. Terry delegates triage to Bot. Bot should move every sufficiently scoped card from
+   `backlog` to `ready_for_work` without waiting for per-ticket permission.
+2. A dependency on another Ready For Work card changes execution order, not readiness.
+   Bot selects and performs work one card at a time. Use `blocked` only when neither
+   actor can act until something external changes, such as hardware arriving from a
+   vendor.
+3. Bot cannot sign off its own work. Only the browser/human actor has
    `ready_for_review -> completed`.
-3. The human actor may move `ready_for_work -> in_progress` when starting selected
+4. The human actor may move `ready_for_work -> in_progress` when starting selected
    work directly in the browser. Card ownership remains independent of movement
    permission.
 

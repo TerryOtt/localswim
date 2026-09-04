@@ -54,6 +54,22 @@ workflow, also used by FGA:
 uv run --frozen localswim-cli boards/my-project.json board init examples/board-description.terry-workflow.json examples/permissions.terry-workflow.json
 ~~~
 
+That example carries Terry's working agreement, not merely his lane names:
+
+| Lane | Terry workflow meaning |
+|---|---|
+| Backlog | Terry held the work back, or Bot does not yet have enough scope to do it. Umbrella cards may remain here while their executable children advance. |
+| Ready For Work | Bot has enough scope to perform the work. Dependencies on other ready cards affect ordering, not readiness. |
+| In progress | The one card Bot is actively performing. |
+| Blocked | Neither Bot nor Terry can act until an external condition changes, such as vendor hardware arriving. |
+| Needs Terry | Bot is waiting for Terry to answer, approve a recommendation, make a judgment call, or personally act. |
+| Ready for review | Bot believes the work is complete and awaits Terry's review. |
+| Completed | Terry reviewed and accepted the work. |
+
+Terry delegates backlog triage and work ordering to Bot. Bot should promote every
+sufficiently scoped card to Ready For Work, then take work one card at a time. Only
+Terry may sign off Bot's work by moving it from Ready for review to Completed.
+
 The important fields are:
 
 | Field | Meaning |

@@ -1170,20 +1170,12 @@ def may_move(actor: str, from_state: str, to_state: str) -> bool:
     -- and answered yes to combinations nobody intended, `backlog -> completed` among
     them.
 
-    **THIS FUNCTION IS NOT THE WHOLE RULE FOR ONE EDGE, AND THAT IS DELIBERATE.**
-    `backlog -> ready_for_work` carries the `bot` actor, so this returns True for it.
-    **Automation MUST NOT use it without Terry's explicit per-ticket instruction.** Terry,
-    2026-08-19: *"claude MUST NOT move out of backlog until/unless Terry gives explicit
-    guidance for one specific ticket."*
-
-    **The table cannot express that constraint** -- the grant is PER TICKET and verbal,
-    and a permission model grants an edge or it does not. The edge exists so Terry can
-    say *"promote #0027"* and it happens without him reaching for the mouse.
-
-    **So a caller that trusts this function alone will get that one edge wrong.** The
-    restraint lives in that edge's `description`, in FlickrGroupAddr's
-    `CLAUDE.md`, and in its `docs/ORIENTATION.md`. **Every other edge here IS the whole
-    rule.**
+    **This function answers only the executable permission question.** Working
+    conventions can still say when an allowed edge should be used. For example, the
+    Terry workflow grants Bot `backlog -> ready_for_work` and directs Bot to use it
+    whenever a card is sufficiently scoped; dependencies between ready cards affect
+    execution order rather than readiness. Those board-specific meanings belong in
+    the selected example and its working agreement, not in this generic lookup.
     """
     return _POLICY.may_move(actor, from_state, to_state)
 

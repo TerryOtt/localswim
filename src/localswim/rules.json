@@ -32,7 +32,7 @@
     {
       "id": "backlog",
       "label": "Backlog",
-      "note": "Someday. Terry's queue, and the only lane Claude may CREATE in besides Ready for Work. Terry gained create here on 2026-08-19 for the + button in the lane header (card #0038). He could always ADD a card -- by asking Claude to run the CLI -- so this grants him the keystroke rather than the power.",
+      "note": "Work Terry has explicitly held back, work that is not yet scoped well enough for Bot to perform, and optional umbrella cards that organize executable child cards.",
       "create": [
         "bot",
         "terry"
@@ -41,7 +41,7 @@
     {
       "id": "ready_for_work",
       "label": "Ready For Work",
-      "note": "Do this next, in priority order. Terry selects the queue; Terry or the automation actor may move selected work into In progress. CREATING here is not PROMOTING here: either actor may create a newly requested card directly in Ready For Work, but the automation actor may move an existing backlog card here only after Terry gives explicit permission for that specific card. The display label became Ready For Work on 2026-08-19. Board schema 3 made the durable lane id agent-neutral as ready_for_work on 2026-08-22 under ADR 0001.",
+      "note": "Work scoped well enough for Bot to perform, ordered by priority. Dependencies on other Ready For Work cards affect execution order, not readiness.",
       "create": [
         "bot",
         "terry"
@@ -50,31 +50,31 @@
     {
       "id": "in_progress",
       "label": "In progress",
-      "note": "Being worked now. Either actor may enter only through its explicit transition edges.",
+      "note": "The one card Bot is actively performing.",
       "create": []
     },
     {
       "id": "blocked",
       "label": "Blocked",
-      "note": "NEITHER of us can move it. Terry's example: \"awaiting license key.\" MUST NOT be used for \"waiting on a decision\" -- that is needs_terry_action -- and MUST NOT be used for \"hard\".",
+      "note": "Neither Bot nor Terry can act until an external condition changes, such as hardware arriving from a vendor. Do not use this lane for dependencies on other board cards.",
       "create": []
     },
     {
       "id": "needs_terry_action",
       "label": "Needs Terry",
-      "note": "Claude is STOPPED until Terry answers. His definition: \"that's 'need a judgement call'.\" Distinct from blocked, where nobody can act, and from review, where the work is done and only a tick is missing.",
+      "note": "Bot work waiting for Terry to answer, approve a recommendation, make a judgment call, or personally act.",
       "create": []
     },
     {
       "id": "ready_for_review",
       "label": "Ready for review",
-      "note": "Claude believes it is done and is waiting on a signoff. This is as far as Claude may take anything.",
+      "note": "Bot believes the work is complete and awaits Terry's review; Bot may not sign off its own work.",
       "create": []
     },
     {
       "id": "completed",
       "label": "Completed",
-      "note": "Terminal. An empty `out` IS append-only, enforced by the same rule as everything else rather than by a special flag.",
+      "note": "Work Terry reviewed and accepted. Terminal because no transition leaves this lane.",
       "create": []
     }
   ],
@@ -83,12 +83,12 @@
       {
         "from": "backlog",
         "to": "ready_for_work",
-        "description": "Terry promotes from the backlog, and that is what makes the queue his. CLAUDE HAS THIS EDGE AND MUST NOT USE IT UNSOLICITED. Terry, 2026-08-19: \"If something changes on a ticket in backlog that suddenly makes it eligible for work, Terry can grant *per-ticket* permission to move from backlog to RFW. Note that claude MUST NOT move out of backlog until/unless Terry gives explicit guidance for one specific ticket.\" The grant is PER TICKET and verbal; the table cannot express that, so the restraint lives in CLAUDE.md and ORIENTATION.md. A standing permission read off this row alone would let Claude fill its own queue, which is the one thing every other edge here is shaped to prevent."
+        "description": "Promotion means Bot has enough scope to perform the card. Terry may promote it directly; under the current Terry workflow, Bot also triages every sufficiently scoped backlog card without per-ticket permission. Dependencies on other Ready For Work cards affect execution order, not readiness."
       },
       {
         "from": "backlog",
         "to": "in_progress",
-        "description": "Terry starting something straight out of his own queue. Claude has no such edge and MUST NOT gain one -- promotion out of the backlog is what makes the queue his."
+        "description": "Terry may start a backlog card directly. Bot has no direct edge and promotes sufficiently scoped Bot work to Ready For Work before starting it."
       },
       {
         "from": "backlog",
@@ -185,7 +185,7 @@
       {
         "from": "backlog",
         "to": "ready_for_work",
-        "description": "Terry promotes from the backlog, and that is what makes the queue his. CLAUDE HAS THIS EDGE AND MUST NOT USE IT UNSOLICITED. Terry, 2026-08-19: \"If something changes on a ticket in backlog that suddenly makes it eligible for work, Terry can grant *per-ticket* permission to move from backlog to RFW. Note that claude MUST NOT move out of backlog until/unless Terry gives explicit guidance for one specific ticket.\" The grant is PER TICKET and verbal; the table cannot express that, so the restraint lives in CLAUDE.md and ORIENTATION.md. A standing permission read off this row alone would let Claude fill its own queue, which is the one thing every other edge here is shaped to prevent."
+        "description": "Promotion means Bot has enough scope to perform the card. Terry delegates backlog triage and work ordering to Bot, so Bot promotes every sufficiently scoped card without per-ticket permission. Dependencies on other Ready For Work cards affect execution order, not readiness."
       },
       {
         "from": "backlog",

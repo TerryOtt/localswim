@@ -49,32 +49,32 @@
   "lanes": [
     {
       "name": "Backlog",
-      "note": "Someday work selected by the human."
+      "note": "Work Terry has explicitly held back, work that is not yet scoped well enough for Bot to perform, and optional umbrella cards that organize executable child cards."
     },
     {
       "name": "Ready For Work",
-      "note": "Selected work, ordered by priority."
+      "note": "Work scoped well enough for Bot to perform, ordered by priority. Dependencies on other Ready For Work cards affect execution order, not readiness."
     },
     {
       "name": "In progress",
-      "note": "Work actively being performed."
+      "note": "The one card Bot is actively performing."
     },
     {
       "name": "Blocked",
-      "note": "Neither actor can proceed because action depends on an external change."
+      "note": "Neither Bot nor Terry can act until an external condition changes, such as hardware arriving from a vendor."
     },
     {
       "id": "needs_terry_action",
       "name": "Needs Terry",
-      "note": "Bot is stopped until Terry answers, decides, or personally acts."
+      "note": "Bot work waiting for Terry to answer, approve a recommendation, make a judgment call, or personally act."
     },
     {
       "name": "Ready for review",
-      "note": "Bot believes the work is done and awaits Terry's signoff."
+      "note": "Bot believes the work is complete and awaits Terry's review; Bot may not sign off its own work."
     },
     {
       "name": "Completed",
-      "note": "Signed-off terminal work."
+      "note": "Work Terry reviewed and accepted."
     }
   ]
 }
