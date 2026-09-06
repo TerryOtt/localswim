@@ -419,6 +419,39 @@ class ParentChange:
         )
 
 
+@dataclass
+class SubjectChange:
+    """One privacy-safe card rename for activity attribution.
+
+    The old and new subjects deliberately stay out of this record. Git history may retain
+    those prose values when a board is versioned, while routine activity inspection needs
+    only the affected card, timestamp, and actor.
+    """
+
+    at: str
+    by: str
+    item_id: str
+
+    def to_json(self) -> dict[str, str]:
+        return {"at": self.at, "by": self.by, "item": self.item_id}
+
+    @classmethod
+    def from_json(cls, raw: JsonValue, where: str) -> Self:
+        if not isinstance(raw, dict):
+            raise BoardError(
+                f"{where}: a subject-history entry is {type(raw).__name__}, want object"
+            )
+        values = {key: raw.get(key) for key in ("at", "by", "item")}
+        for key, value in values.items():
+            if not isinstance(value, str) or not value:
+                raise BoardError(f"{where}: subject-history entry has no {key}")
+        return cls(
+            at=str(values["at"]),
+            by=str(values["by"]),
+            item_id=str(values["item"]),
+        )
+
+
 # **THREE STATES MEAN "NOT MOVING", AND TERRY DREW THE LINES HIMSELF.** They get
 # confused constantly, and the whole value of the board is that a stalled card says WHO
 # is holding it.
@@ -1714,7 +1747,9 @@ class ActivityEvent:
                 else "(top level)"
             )
             return f"{base}  {source} -> {target}"
-        return f"{base}  {self.comment_chars} character(s)"
+        return (
+            f"{base}  {self.comment_chars} character(s)" if self.comment_chars is not None else base
+        )
 
 
 @dataclass
@@ -1997,6 +2032,20 @@ def _parent_history_from_json(raw: JsonValue, known: set[str], where: str) -> li
     return changes
 
 
+def _subject_history_from_json(raw: JsonValue, known: set[str], where: str) -> list[SubjectChange]:
+    """Validate rename audit records without reconstructing missing history."""
+    if not isinstance(raw, list):
+        raise BoardError(f"{where}: 'subjectHistory' is not a list")
+    changes: list[SubjectChange] = []
+    for index, change_raw in enumerate(raw):
+        spot = f"{where}: subjectHistory[{index}]"
+        change = SubjectChange.from_json(change_raw, spot)
+        if change.item_id not in known:
+            raise BoardError(f"{spot} names unknown card {change.item_id!r}")
+        changes.append(change)
+    return changes
+
+
 def _check_parents(board: Board, known: set[str], where: str) -> None:
     """Refuse a parent that does not exist or that closes a loop. Card #0028.
 
@@ -2060,6 +2109,10 @@ class Board:
     # build and preserves the observed before/after endpoints.
     parent_history: list[ParentChange] = field(default_factory=list[ParentChange])
 
+    # A subject-change event needs attribution but not a second copy of private prose.
+    # This optional append-only log therefore retains only the card, actor, and time.
+    subject_history: list[SubjectChange] = field(default_factory=list[SubjectChange])
+
     # **THE CAST LIVES WITH THE DATA, NOT WITH THE CODE. Card #0083.**
     #
     # Card #0072 put users in `rules.json`, which sits next to `board_state.py` inside the
@@ -2113,6 +2166,10 @@ class Board:
         if self.parent_history:
             out["parentHistory"] = [
                 cast("JsonValue", change.to_json()) for change in self.parent_history
+            ]
+        if self.subject_history:
+            out["subjectHistory"] = [
+                cast("JsonValue", change.to_json()) for change in self.subject_history
             ]
         return out
 
@@ -2201,6 +2258,7 @@ class Board:
                 raw.get("relationshipHistory", []), seen, where
             ),
             parent_history=_parent_history_from_json(raw.get("parentHistory", []), seen, where),
+            subject_history=_subject_history_from_json(raw.get("subjectHistory", []), seen, where),
             users=users,
             browser_user=browser_user,
             cli_user=cli_user,
@@ -2324,6 +2382,11 @@ class Board:
             if change.by not in known_actors
         ]
         problems.extend(self._parent_history_problems(known_actors))
+        problems.extend(
+            f"subjectHistory[{index}] names unknown actor {change.by!r}"
+            for index, change in enumerate(self.subject_history)
+            if change.by not in known_actors
+        )
         for item in self.items:
             if not item.history:
                 continue
@@ -2707,10 +2770,10 @@ class Board:
         """Rename one card. **Card #0081.** Terry: *"Sometimes I want to change ticket
         titles, and I have no way to do that currently."*
 
-        **No history entry, for the reason `set_detail` gives.** `verify()` replays LANES
-        and OWNERS, and a title is neither. **The audit trail for text is git** -- the
-        board file is committed after every write, so the old title is one `git diff`
-        away and never rides in the JSON twice.
+        **The rename event is recorded without either subject value.** Routine activity
+        inspection needs to attribute the write that woke its monitor, while the board
+        must not copy private prose into a sanitized report. Git history remains the
+        optional source for comparing the old and new text.
 
         **THE `id` AND THE `ticket` DO NOT MOVE, and that is the whole safety of this.**
         The slug was derived from the ORIGINAL title and stays put: Terry says *"ticket
@@ -2731,6 +2794,7 @@ class Board:
         if item.subject == text:
             return f"{item.label} is already called that"
         was = item.subject
+        self.subject_history.append(SubjectChange(at=now(), by=by, item_id=item.id))
         item.subject = text
         return f"{item.label}: {was!r} -> {text!r} (by {by})"
 
@@ -4504,6 +4568,38 @@ def _event_instant(raw: str, where: str) -> datetime.datetime:
     return instant
 
 
+def _subject_activity_events(
+    board: Board,
+    start: datetime.datetime,
+    end: datetime.datetime | None,
+) -> list[ActivityEvent]:
+    """Return privacy-safe rename events inside one inclusive window."""
+    events: list[ActivityEvent] = []
+    for index, change in enumerate(board.subject_history):
+        instant = _event_instant(change.at, f"subjectHistory[{index}]")
+        if instant < start or (end is not None and instant > end):
+            continue
+        item = board.find(change.item_id)
+        events.append(
+            ActivityEvent(
+                ticket=item.ticket,
+                item_id=item.id,
+                kind="renamed",
+                at=change.at,
+                instant=instant,
+                by=change.by,
+                sequence=(
+                    len(item.history)
+                    + len(item.comments)
+                    + len(board.relationship_history)
+                    + len(board.parent_history)
+                    + index
+                ),
+            )
+        )
+    return events
+
+
 def activity_events(
     board: Board,
     start: datetime.datetime,
@@ -4511,10 +4607,10 @@ def activity_events(
 ) -> list[ActivityEvent]:
     """Return sanitized events in one inclusive window, oldest first.
 
-    Item history, comments, relationship history, and parent history are separate
-    persisted arrays, so events sharing a timestamp have no recoverable cross-array
-    causal order. Ticket, source sequence, and kind provide a deterministic tie-break
-    without pretending otherwise.
+    Item history, comments, relationship history, parent history, and subject history
+    are separate persisted arrays, so events sharing a timestamp have no recoverable
+    cross-array causal order. Ticket, source sequence, and kind provide a deterministic
+    tie-break without pretending otherwise.
     """
     events: list[ActivityEvent] = []
     for item in board.items:
@@ -4620,6 +4716,7 @@ def activity_events(
                 ),
             )
         )
+    events.extend(_subject_activity_events(board, start, end))
     return sorted(
         events, key=lambda event: (event.instant, event.ticket, event.sequence, event.kind)
     )

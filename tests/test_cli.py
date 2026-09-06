@@ -195,6 +195,8 @@ def test_every_cli_mutation_uses_service(served_board: pathlib.Path) -> None:
     assert item.owner == "terry"
     assert item.priority == "P1"
     assert item.comments[0].by == "bot"
+    assert board.subject_history[0].by == "bot"
+    assert board.subject_history[0].item_id == "a"
     assert board.links == []
     assert board.find("b").parent is None
 
@@ -285,6 +287,8 @@ def activity_board(path: pathlib.Path) -> None:
     board.create("alpha", "Private subject", "ready_for_work", "bot")
     alpha = board.find("alpha")
     alpha.history[-1].at = "2026-08-23T10:00:00Z"
+    board.set_subject("alpha", "Private renamed subject", "bot")
+    board.subject_history[-1].at = "2026-08-23T10:00:30Z"
     board.move("alpha", "in_progress", "bot")
     alpha.history[-1].at = "2026-08-23T10:01:00Z"
     board.assign("alpha", "terry", "bot")
@@ -797,6 +801,7 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
     events = cast("list[dict[str, Any]]", json.loads(result.stdout))
     assert [event["kind"] for event in events] == [
         "created",
+        "renamed",
         "moved",
         "assigned",
         "prioritized",
@@ -812,8 +817,17 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
     assert "text" not in comment
     assert "instant" not in comment
     assert "sequence" not in comment
+    renamed = next(event for event in events if event["kind"] == "renamed")
+    assert renamed == {
+        "ticket": 1,
+        "id": "alpha",
+        "kind": "renamed",
+        "at": "2026-08-23T10:00:30Z",
+        "by": "bot",
+    }
     assert "private board words" not in result.stdout
     assert "Private subject" not in result.stdout
+    assert "Private renamed subject" not in result.stdout
     relationship_events = [event for event in events if event["kind"] in {"linked", "unlinked"}]
     assert relationship_events == [
         {
@@ -862,6 +876,33 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
             "parentToId": None,
         },
     ]
+
+
+def test_activity_between_includes_only_rename_at_exact_bounds(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+
+    result = run_cli(
+        path,
+        "activity",
+        "between",
+        "2026-08-23T10:00:30Z",
+        "2026-08-23T10:00:30Z",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        {
+            "ticket": 1,
+            "id": "alpha",
+            "kind": "renamed",
+            "at": "2026-08-23T10:00:30Z",
+            "by": "bot",
+        }
+    ]
+    assert "Private subject" not in result.stdout
+    assert "Private renamed subject" not in result.stdout
 
 
 def test_activity_relationship_human_output_names_opposite_endpoint(

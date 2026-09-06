@@ -155,11 +155,12 @@ optional under schema 4, and an existing parent receives no fabricated earlier e
 `Board.verify()` checks each recorded child's hierarchy chain and compares its last
 event with current parent state.
 
-Title, description, and project edits do not receive their own board-history entries.
-The existing design expects Git history to carry those earlier values when the board
-lives in a Git repository. Automatic Git publishing is off by default, so that
-expectation is only true when the operator has deliberately arranged versioned board
-storage.
+Subject changes append a board-level `subjectHistory` entry containing only the
+timestamp, actor, and stable card ID. The optional schema-4 field begins with the first
+rename made by a supporting build; no earlier events are fabricated. Neither subject
+value is duplicated into the event, so Git history remains the optional source for
+comparing text when the operator has deliberately arranged versioned board storage.
+Description and project edits do not receive their own board-history entries.
 
 ## Relationships and hierarchy
 
@@ -325,8 +326,9 @@ private comment text. Its JSON report names the limit and deterministic ordering
 its command scope prevents combining it with another report or mutation.
 
 `activity since` and `activity between` merge creation, movement, assignment,
-priority, comment, link, unlink, parent, and unparent audit records into an inclusive
-chronological report. Their RFC 3339 bounds must carry an explicit UTC offset.
+priority, rename, comment, link, unlink, parent, and unparent audit records into an
+inclusive chronological report. Their RFC 3339 bounds must carry an explicit UTC
+offset.
 Relationship events name the caller-facing kind and opposite ticket endpoint;
 hierarchy events name nullable before/after parent ticket endpoints. The report
 intentionally omits card subjects, details, and comment text; JSON output is therefore

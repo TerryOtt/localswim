@@ -112,6 +112,32 @@ def test_assignment_and_priority_are_non_lane_history(board: board_state.Board) 
     assert board.verify() == []
 
 
+def test_subject_change_records_attribution_without_prose(board: board_state.Board) -> None:
+    board.create("alpha", "Private original", "backlog", "bot")
+
+    board.set_subject("alpha", "Private replacement", "terry")
+
+    assert board.find("alpha").subject == "Private replacement"
+    assert board.subject_history == [
+        board_state.SubjectChange(
+            at=board.subject_history[0].at,
+            by="terry",
+            item_id="alpha",
+        )
+    ]
+    assert board.subject_history[0].to_json() == {
+        "at": board.subject_history[0].at,
+        "by": "terry",
+        "item": "alpha",
+    }
+    assert "Private original" not in str(board.subject_history[0].to_json())
+    assert "Private replacement" not in str(board.subject_history[0].to_json())
+    assert board.verify() == []
+
+    board.set_subject("alpha", "Private replacement", "terry")
+    assert len(board.subject_history) == 1
+
+
 def test_comment_refuses_blank_text(board: board_state.Board) -> None:
     board.create("alpha", "Alpha", "backlog", "bot")
     with pytest.raises(board_state.BoardError, match="needs text"):
