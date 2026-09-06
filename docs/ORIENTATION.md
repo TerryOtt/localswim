@@ -389,14 +389,18 @@ preflight and graceful re-exec boundary owns it.
 
 `--autopush` is off unless explicitly supplied. When enabled, a daemon thread waits
 five quiet seconds after the latest board write, commits only the board path, and pushes
-the board repository's current branch.
+the board repository's current branch. Every service using the same Git common
+directory serializes that whole operation with an operating-system file lock in
+the common directory; process exit releases the lock without stale-lock recovery.
 
 The first pass adopts an otherwise valid untracked board at that exact path. It neither
 stages nor commits unrelated tracked or untracked files. It refuses boards that are
 ignored, outside a Git repository, or in a repository with no remote. It cannot
 establish that a configured remote is private. A failed push keeps the successful local
-commit so a later push can carry it; the UI reports the failure. The ignored `boards/`
-directory in this public source checkout is therefore for local data, not for autopush.
+commit and schedules a retry without another board mutation. Even when its board path
+is clean, a retry pushes outstanding repository history before reporting recovery. The
+UI reports failures between attempts. The ignored `boards/` directory in this public
+source checkout is therefore for local data, not for autopush.
 
 `localswim-cli <board> board shutdown` is the graceful service boundary. The authenticated
 request serializes behind active mutations, performs a final autopush immediately, and

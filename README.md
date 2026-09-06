@@ -278,10 +278,12 @@ uv run --frozen localswim --autopush path/to/board.json
 ~~~
 
 When enabled, the server commits only the board path after five quiet seconds and pushes
-the board repository's current branch. A valid new board that is not yet tracked is
-adopted on the first pass; unrelated tracked or untracked files remain untouched. The
-server refuses ignored boards, non-repositories and repositories without a remote; it
-cannot prove that a configured remote is private.
+the board repository's current branch. Multiple board services sharing one Git
+repository serialize their commit-and-push operations through one repository-scoped
+process lock. A failed push is retried without requiring another board edit. A valid new
+board that is not yet tracked is adopted on the first pass; unrelated tracked or
+untracked files remain untouched. The server refuses ignored boards, non-repositories
+and repositories without a remote; it cannot prove that a configured remote is private.
 
 Stop a live service through its authenticated CLI rendezvous rather than terminating
 its process:

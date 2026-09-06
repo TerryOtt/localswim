@@ -61,6 +61,7 @@ import argparse
 import contextlib
 import copy
 import datetime
+import errno
 import hashlib
 import html
 import http.server
@@ -80,7 +81,7 @@ from . import board_state
 
 if TYPE_CHECKING:
     import socketserver
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
 
 HOST = "127.0.0.1"
 API_PREFIX = board_state.API_PREFIX
@@ -441,6 +442,9 @@ def _reexec_if_requested() -> None:
 _PUSH_QUIET_S = 5.0
 _PUSH_TICK_S = 1.0
 _PUSH_TIMEOUT_S = 120
+_PUSH_RETRY_S = 30.0
+_PUSH_LOCK_WAIT_S = _PUSH_TIMEOUT_S + 5.0
+_PUSH_LOCK_POLL_S = 0.05
 
 # **Five states, and only ONE of them is allowed to raise a pill.** Same doctrine as
 # the toolchain banner: loudness tracks what Terry can act on. `off` is a legitimate
@@ -496,6 +500,73 @@ def _git(args: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess[str]
         return subprocess.CompletedProcess(args, 1, "", str(exc))
 
 
+def _try_repository_lock(fd: int) -> bool:
+    """Try one non-blocking, process-scoped operating-system file lock."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        import msvcrt  # noqa: PLC0415 -- platform module must not import on POSIX
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                return False
+            raise
+        return True
+
+    import fcntl  # noqa: PLC0415 -- platform module must not import on Windows
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _release_repository_lock(fd: int) -> None:
+    """Release the platform lock; closing the descriptor remains the crash fallback."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        import msvcrt  # noqa: PLC0415 -- platform module must not import on POSIX
+
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl  # noqa: PLC0415 -- platform module must not import on Windows
+
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _repository_push_locked(cwd: pathlib.Path) -> Generator[None]:
+    """Serialize Git mutation and push across every localswim process in one repository."""
+    common = _git(["rev-parse", "--git-common-dir"], cwd)
+    if common.returncode != 0:
+        raise OSError(f"git common-directory lookup failed: {common.stderr.strip()[:200]}")
+    common_dir = pathlib.Path(common.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (cwd / common_dir).resolve()
+    lock_path = common_dir / "localswim-autopush.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    try:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        deadline = time.monotonic() + _PUSH_LOCK_WAIT_S
+        while not _try_repository_lock(fd):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for repository autopush lock {lock_path}")
+            time.sleep(_PUSH_LOCK_POLL_S)
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired:
+                _release_repository_lock(fd)
+        finally:
+            os.close(fd)
+
+
 def push_unavailable(board_path: pathlib.Path) -> str:
     """Why autopush cannot run here, or "" when it can.
 
@@ -526,33 +597,46 @@ def push_board(board_path: pathlib.Path) -> tuple[bool, str]:
     staged, and untracked changes without widening what the later add may stage.
     """
     cwd = board_path.parent
+    try:
+        with _repository_push_locked(cwd):
+            return _push_board_locked(board_path)
+    except (OSError, TimeoutError) as exc:
+        return False, f"repository autopush lock failed: {exc!s:.200}"
+
+
+def _push_board_locked(board_path: pathlib.Path) -> tuple[bool, str]:
+    """Commit one exact board path and synchronize all already-committed history."""
+    cwd = board_path.parent
     status = _git(["status", "--porcelain=v1", "--untracked-files=all", "--", str(board_path)], cwd)
     if status.returncode != 0:
         return False, f"git status failed: {status.stderr.strip()[:200]}"
-    if not status.stdout.strip():
-        return True, "no board change to commit"
-    when = datetime.datetime.now(tz=datetime.UTC).astimezone()
-    # Terry's stamp format, from his display preferences: `2026-08-19 02:56pm`.
-    stamp = f"{when:%Y-%m-%d %I:%M:%S}" + f"{when:%p}".lower()
-    message = (
-        f"Board: automatic snapshot {stamp}\n\n"
-        "Written by api_endpoint.py's autopush thread, not by a person. The card's own\n"
-        "history array carries the per-move audit, so this commit exists for\n"
-        "durability rather than for granularity.\n"
-    )
-    add = _git(["add", "--", str(board_path)], cwd)
-    if add.returncode != 0:
-        return False, f"git add failed: {add.stderr.strip()[:200]}"
-    commit = _git(["commit", "-m", message, "--", str(board_path)], cwd)
-    if commit.returncode != 0:
-        return False, f"git commit failed: {commit.stderr.strip()[:200]}"
+    committed = bool(status.stdout.strip())
+    if committed:
+        when = datetime.datetime.now(tz=datetime.UTC).astimezone()
+        # Terry's stamp format, from his display preferences: `2026-08-19 02:56pm`.
+        stamp = f"{when:%Y-%m-%d %I:%M:%S}" + f"{when:%p}".lower()
+        message = (
+            f"Board: automatic snapshot {stamp}\n\n"
+            "Written by api_endpoint.py's autopush thread, not by a person. The card's own\n"
+            "history array carries the per-move audit, so this commit exists for\n"
+            "durability rather than for granularity.\n"
+        )
+        add = _git(["add", "--", str(board_path)], cwd)
+        if add.returncode != 0:
+            return False, f"git add failed: {add.stderr.strip()[:200]}"
+        commit = _git(["commit", "-m", message, "--", str(board_path)], cwd)
+        if commit.returncode != 0:
+            return False, f"git commit failed: {commit.stderr.strip()[:200]}"
     push = _git(["push"], cwd)
     if push.returncode != 0:
         # **The commit STANDS when the push fails, deliberately.** The change is safe on
         # disk and in local history; the next successful push carries it. Rolling it back
         # would throw away the only durable copy that did succeed.
-        return False, f"committed, but push failed: {push.stderr.strip()[:200]}"
-    return True, "committed and pushed"
+        prefix = "committed, but" if committed else "reconciliation"
+        return False, f"{prefix} push failed: {push.stderr.strip()[:200]}"
+    if committed:
+        return True, "committed and pushed"
+    return True, "repository synchronized"
 
 
 def _push_loop(board_path: pathlib.Path) -> None:
@@ -580,6 +664,7 @@ def _push_loop(board_path: pathlib.Path) -> None:
     except OSError:
         seen = 0.0
     dirty_at: float | None = time.time()
+    retry_at: float | None = None
     while True:
         time.sleep(_PUSH_TICK_S)
         try:
@@ -589,14 +674,22 @@ def _push_loop(board_path: pathlib.Path) -> None:
         if now_mtime != seen:
             seen = now_mtime
             dirty_at = time.time()
+            retry_at = None
             _set_push("pending", "board changed; waiting for it to go quiet")
             continue
-        if dirty_at is None or time.time() - dirty_at < _PUSH_QUIET_S:
+        now = time.time()
+        changed_is_due = dirty_at is not None and now - dirty_at >= _PUSH_QUIET_S
+        retry_is_due = retry_at is not None and now >= retry_at
+        if not changed_is_due and not retry_is_due:
             continue
         dirty_at = None
+        retry_at = None
+        if retry_is_due:
+            _set_push("pending", "retrying failed autopush")
         ok, detail = _push_once(board_path)
         if not ok:
             print(f"  AUTOPUSH FAILED: {detail}", flush=True)
+            retry_at = time.time() + _PUSH_RETRY_S
 
 
 def start_autopush(

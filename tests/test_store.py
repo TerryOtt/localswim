@@ -2,6 +2,8 @@
 
 import pathlib
 import subprocess
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -20,6 +22,31 @@ def run_git(cwd: pathlib.Path, *arguments: str) -> subprocess.CompletedProcess[s
         timeout=10,
         check=True,
     )
+
+
+def initialize_autopush_repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """Create one working repository with a local bare upstream."""
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "state-store"
+    run_git(tmp_path, "init", "--bare", "--quiet", str(remote))
+    run_git(tmp_path, "init", "--initial-branch=main", "--quiet", str(repo))
+    run_git(repo, "config", "user.name", "localswim test")
+    run_git(repo, "config", "user.email", "localswim@example.invalid")
+    (repo / "anchor.txt").write_text("anchor\n", encoding="utf-8")
+    run_git(repo, "add", "anchor.txt")
+    run_git(repo, "commit", "--quiet", "-m", "Anchor")
+    run_git(repo, "remote", "add", "origin", str(remote))
+    run_git(repo, "push", "--quiet", "--set-upstream", "origin", "main")
+    return remote, repo
+
+
+def wait_for_file(path: pathlib.Path) -> None:
+    """Wait briefly for one child-process handoff file."""
+    deadline = time.monotonic() + 5.0
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path.name}")
+        time.sleep(0.01)
 
 
 def make_store(path: pathlib.Path) -> api_endpoint.BoardStore:
@@ -156,17 +183,7 @@ def test_ignored_board_disables_autopush(tmp_path: pathlib.Path) -> None:
 def test_autopush_adopts_an_untracked_board_without_staging_other_files(
     tmp_path: pathlib.Path,
 ) -> None:
-    remote = tmp_path / "remote.git"
-    repo = tmp_path / "state-store"
-    run_git(tmp_path, "init", "--bare", "--quiet", str(remote))
-    run_git(tmp_path, "init", "--initial-branch=main", "--quiet", str(repo))
-    run_git(repo, "config", "user.name", "localswim test")
-    run_git(repo, "config", "user.email", "localswim@example.invalid")
-    (repo / "anchor.txt").write_text("anchor\n", encoding="utf-8")
-    run_git(repo, "add", "anchor.txt")
-    run_git(repo, "commit", "--quiet", "-m", "Anchor")
-    run_git(repo, "remote", "add", "origin", str(remote))
-    run_git(repo, "push", "--quiet", "--set-upstream", "origin", "main")
+    _remote, repo = initialize_autopush_repository(tmp_path)
 
     board_path = repo / "localswim" / "board.json"
     board_path.parent.mkdir()
@@ -202,6 +219,177 @@ def test_autopush_adopts_an_untracked_board_without_staging_other_files(
     assert second_head != first_head
     assert run_git(repo, "rev-parse", "@{upstream}").stdout.strip() == second_head
     assert run_git(repo, "status", "--short").stdout.splitlines() == ["?? unrelated.txt"]
+
+
+def test_concurrent_board_pushes_serialize_for_one_repository(tmp_path: pathlib.Path) -> None:
+    _remote, repo = initialize_autopush_repository(tmp_path)
+    paths = [repo / name / "board.json" for name in ("alpha", "beta")]
+    for path in paths:
+        path.parent.mkdir()
+        board_state.save(
+            board_state.Board(
+                project=path.parent.name.title(),
+                users=USERS,
+                browser_user="terry",
+                cli_user="bot",
+                default_owner="bot",
+            ),
+            path,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(api_endpoint.push_board, paths))
+
+    assert results == [(True, "committed and pushed"), (True, "committed and pushed")]
+    assert (
+        run_git(repo, "rev-parse", "HEAD").stdout
+        == run_git(repo, "rev-parse", "@{upstream}").stdout
+    )
+    assert run_git(repo, "status", "--short").stdout == ""
+    tracked = run_git(repo, "ls-files", "*/board.json").stdout.splitlines()
+    assert tracked == ["alpha/board.json", "beta/board.json"]
+
+
+def test_repository_push_lock_serializes_separate_processes(tmp_path: pathlib.Path) -> None:
+    _remote, repo = initialize_autopush_repository(tmp_path)
+    first_ready = tmp_path / "first-ready"
+    release_first = tmp_path / "release-first"
+    second_ready = tmp_path / "second-ready"
+    first_code = """
+import pathlib
+import sys
+import time
+from localswim import api_endpoint
+
+repo = pathlib.Path(sys.argv[1])
+ready = pathlib.Path(sys.argv[2])
+release = pathlib.Path(sys.argv[3])
+with api_endpoint._repository_push_locked(repo):
+    ready.write_text("ready", encoding="utf-8")
+    while not release.exists():
+        time.sleep(0.01)
+"""
+    second_code = """
+import pathlib
+import sys
+from localswim import api_endpoint
+
+repo = pathlib.Path(sys.argv[1])
+ready = pathlib.Path(sys.argv[2])
+with api_endpoint._repository_push_locked(repo):
+    ready.write_text("ready", encoding="utf-8")
+"""
+    first = subprocess.Popen(
+        [sys.executable, "-c", first_code, str(repo), str(first_ready), str(release_first)],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        wait_for_file(first_ready)
+        second = subprocess.Popen(
+            [sys.executable, "-c", second_code, str(repo), str(second_ready)],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            time.sleep(0.2)
+            assert not second_ready.exists()
+            release_first.write_text("release", encoding="utf-8")
+            first_stdout, first_stderr = first.communicate(timeout=5)
+            second_stdout, second_stderr = second.communicate(timeout=5)
+        finally:
+            release_first.write_text("release", encoding="utf-8")
+            if second.poll() is None:
+                second.kill()
+                second.communicate(timeout=5)
+    finally:
+        release_first.write_text("release", encoding="utf-8")
+        if first.poll() is None:
+            first.kill()
+            first.communicate(timeout=5)
+
+    assert (first.returncode, first_stdout, first_stderr) == (0, "", "")
+    assert (second.returncode, second_stdout, second_stderr) == (0, "", "")
+    assert second_ready.read_text(encoding="utf-8") == "ready"
+
+
+def test_clean_board_reconciles_an_already_committed_push_failure(tmp_path: pathlib.Path) -> None:
+    remote, repo = initialize_autopush_repository(tmp_path)
+    board_path = repo / "project" / "board.json"
+    board_path.parent.mkdir()
+    board_state.save(
+        board_state.Board(
+            project="Recovery",
+            users=USERS,
+            browser_user="terry",
+            cli_user="bot",
+            default_owner="bot",
+        ),
+        board_path,
+    )
+    run_git(repo, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+
+    ok, detail = api_endpoint.push_board(board_path)
+
+    assert ok is False
+    assert detail.startswith("committed, but push failed:")
+    assert run_git(repo, "status", "--short", "--", str(board_path)).stdout == ""
+    run_git(repo, "remote", "set-url", "origin", str(remote))
+
+    ok, detail = api_endpoint.push_board(board_path)
+
+    assert ok is True
+    assert detail == "repository synchronized"
+    assert (
+        run_git(repo, "rev-parse", "HEAD").stdout
+        == run_git(repo, "rev-parse", "@{upstream}").stdout
+    )
+
+
+def test_autopush_loop_retries_failure_without_another_board_write(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopLoopError(Exception):
+        """Terminate the deliberately infinite daemon loop after recovery."""
+
+    board = tmp_path / "board.json"
+    board.write_text("{}\n", encoding="utf-8")
+    clock = 0.0
+    outcomes = iter([(False, "push failed"), (True, "repository synchronized")])
+    calls: list[pathlib.Path] = []
+
+    def fake_time() -> float:
+        return clock
+
+    def fake_sleep(_seconds: float) -> None:
+        nonlocal clock
+        clock += 1.0
+        if clock > 3.0:
+            raise StopLoopError
+
+    def fake_push(path: pathlib.Path) -> tuple[bool, str]:
+        calls.append(path)
+        return next(outcomes)
+
+    def push_is_available(_path: pathlib.Path) -> str:
+        return ""
+
+    monkeypatch.setattr(api_endpoint, "push_unavailable", push_is_available)
+    monkeypatch.setattr(api_endpoint, "_PUSH_QUIET_S", 0.0)
+    monkeypatch.setattr(api_endpoint, "_PUSH_RETRY_S", 2.0)
+    monkeypatch.setattr(api_endpoint.time, "time", fake_time)
+    monkeypatch.setattr(api_endpoint.time, "sleep", fake_sleep)
+    monkeypatch.setattr(api_endpoint, "_push_once", fake_push)
+
+    with pytest.raises(StopLoopError):
+        api_endpoint._push_loop(board)  # noqa: SLF001 -- exercise daemon retry scheduling
+
+    assert calls == [board, board]
 
 
 def test_autopush_is_disabled_unless_explicitly_enabled(
