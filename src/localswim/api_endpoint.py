@@ -1436,11 +1436,12 @@ PAGE = """<!doctype html>
      edge -- **the horizontal overflow is the failure, and card height is not.**
 
      118px keeps all seven visible down to about a 900px viewport. Below that the row
-     scrolls, which is the honest behavior for a window too small for the board. */
+     scrolls, which is the honest behavior for a window too small for the board.
+     Leave the maximum width unconstrained so the lanes also fill wide viewports. */
   #board { display: flex; gap: 8px; padding: 10px; align-items: stretch;
            overflow-x: auto; height: calc(100vh - 44px); }
   .lane { background: var(--lane); border-radius: 8px;
-          flex: 1 1 0; min-width: 118px; max-width: 340px;
+          flex: 1 1 0; min-width: 118px;
           display: flex; flex-direction: column;
           border-top: 3px solid var(--dim); }
   /* **Per-user lane accents are GENERATED, card #0072.** See `user_css()`. */
