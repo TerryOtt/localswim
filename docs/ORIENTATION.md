@@ -477,9 +477,11 @@ the documentation or JSON recipe by itself, is the enforcement boundary:
 A local Codex session uses the Git credential supplied by its environment. In this
 checkout that is Terry's credential, so GitHub sees local Codex pushes as `TerryOtt`.
 OpenAI's installed `chatgpt-codex-connector` (GitHub App ID `1144995`) gives cloud
-Codex a separately auditable GitHub identity and direct-push bypass. The branch bypass
-does not override the repository instruction that Codex commits and pushes only after
-an explicit user request.
+Codex a separately auditable GitHub identity and direct-push bypass. Terry's standing
+order of 2026-09-12 authorizes all future code commits and pushes across all
+repositories, including direct commits and pushes to `main`, without asking for
+permission again. Codex must complete the required verification and preserve
+unrelated user changes.
 
 For every non-bypass PR, the main ruleset requires one approval of the current changes,
 and that approval RFC 2119 MUST come from GitHub user `TerryOtt`.
