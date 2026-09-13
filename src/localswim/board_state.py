@@ -452,6 +452,41 @@ class SubjectChange:
         )
 
 
+@dataclass(frozen=True)
+class ArchiveChange:
+    """An append-only visibility change; archiving never changes a card's lane."""
+
+    at: str
+    by: str
+    item_id: str
+    archived: bool
+
+    def to_json(self) -> JsonObject:
+        return {"at": self.at, "by": self.by, "item": self.item_id, "archived": self.archived}
+
+    @classmethod
+    def from_json(cls, raw: JsonValue, where: str) -> Self:
+        if not isinstance(raw, dict):
+            raise BoardError(f"{where}: archive-history entry must be an object")
+        unknown = set(raw) - {"at", "by", "item", "archived"}
+        if unknown:
+            raise BoardError(f"{where}: unknown field(s): {', '.join(sorted(unknown))}")
+        values = {key: raw.get(key) for key in ("at", "by", "item")}
+        for key, value in values.items():
+            if not isinstance(value, str) or not value:
+                raise BoardError(f"{where}: archive-history entry has no {key}")
+        archived = raw.get("archived")
+        if not isinstance(archived, bool):
+            raise BoardError(f"{where}: archived must be a boolean")
+        _event_instant(str(values["at"]), where)
+        return cls(
+            at=str(values["at"]),
+            by=str(values["by"]),
+            item_id=str(values["item"]),
+            archived=archived,
+        )
+
+
 # **THREE STATES MEAN "NOT MOVING", AND TERRY DREW THE LINES HIMSELF.** They get
 # confused constantly, and the whole value of the board is that a stalled card says WHO
 # is holding it.
@@ -1805,6 +1840,7 @@ class Item:
     parent: str | None = None
     history: list[Change] = field(default_factory=list[Change])
     comments: list[Comment] = field(default_factory=list[Comment])
+    archived: bool = False
 
     @property
     def created_at(self) -> str | None:
@@ -1890,6 +1926,8 @@ class Item:
         # Omitted when empty, so a board full of comment-less cards stays readable.
         if self.comments:
             out["comments"] = [cast("JsonValue", comment.to_json()) for comment in self.comments]
+        if self.archived:
+            out["archived"] = True
         return out
 
     @classmethod
@@ -1930,6 +1968,9 @@ class Item:
         parent = raw.get("parent")
         if parent is not None and not isinstance(parent, str):
             raise BoardError(f"{where}: parent is not a string")
+        archived = raw.get("archived", False)
+        if not isinstance(archived, bool):
+            raise BoardError(f"{where}: archived must be a boolean")
         history_raw = raw.get("history", [])
         if not isinstance(history_raw, list) or not all(
             isinstance(change, dict) for change in history_raw
@@ -1955,6 +1996,7 @@ class Item:
             # **Existence and cycles are checked in `Board.from_json`, not here.** An item
             # cannot see its siblings, so this only records what the file said.
             parent=parent,
+            archived=archived,
             history=[
                 Change.from_json(change, where)
                 for change in history_raw
@@ -2046,6 +2088,20 @@ def _subject_history_from_json(raw: JsonValue, known: set[str], where: str) -> l
     return changes
 
 
+def _archive_history_from_json(raw: JsonValue, known: set[str], where: str) -> list[ArchiveChange]:
+    """Validate archive records and retain references to every archived card."""
+    if not isinstance(raw, list):
+        raise BoardError(f"{where}: 'archiveHistory' is not a list")
+    changes: list[ArchiveChange] = []
+    for index, change_raw in enumerate(raw):
+        spot = f"{where}: archiveHistory[{index}]"
+        change = ArchiveChange.from_json(change_raw, spot)
+        if change.item_id not in known:
+            raise BoardError(f"{spot} names unknown card {change.item_id!r}")
+        changes.append(change)
+    return changes
+
+
 def _check_parents(board: Board, known: set[str], where: str) -> None:
     """Refuse a parent that does not exist or that closes a loop. Card #0028.
 
@@ -2085,7 +2141,7 @@ class Board:
 
     # **The next ticket to hand out. It only ever goes UP.**
     #
-    # **A number MUST NOT be reused, even after a card is archived or deleted.** The
+    # **A number MUST NOT be reused, even after a card is archived.** The
     # whole point is that Terry can say "ticket 137" and mean one thing forever; two
     # pieces of work sharing a reference in git history would destroy that.
     #
@@ -2112,6 +2168,9 @@ class Board:
     # A subject-change event needs attribution but not a second copy of private prose.
     # This optional append-only log therefore retains only the card, actor, and time.
     subject_history: list[SubjectChange] = field(default_factory=list[SubjectChange])
+    # Schema-4 boards without these records start with every card unarchived.
+    # Cards, relationships, and all other history remain intact when hidden.
+    archive_history: list[ArchiveChange] = field(default_factory=list[ArchiveChange])
 
     # **THE CAST LIVES WITH THE DATA, NOT WITH THE CODE. Card #0083.**
     #
@@ -2171,6 +2230,8 @@ class Board:
             out["subjectHistory"] = [
                 cast("JsonValue", change.to_json()) for change in self.subject_history
             ]
+        if self.archive_history:
+            out["archiveHistory"] = [change.to_json() for change in self.archive_history]
         return out
 
     @classmethod
@@ -2259,6 +2320,7 @@ class Board:
             ),
             parent_history=_parent_history_from_json(raw.get("parentHistory", []), seen, where),
             subject_history=_subject_history_from_json(raw.get("subjectHistory", []), seen, where),
+            archive_history=_archive_history_from_json(raw.get("archiveHistory", []), seen, where),
             users=users,
             browser_user=browser_user,
             cli_user=cli_user,
@@ -2295,7 +2357,7 @@ class Board:
 
         raise BoardError(f"no item with id {ref!r}")
 
-    def lanes(self) -> list[Lane]:
+    def lanes(self, *, include_archived: bool = False) -> list[Lane]:
         """Return lanes whose cards use the shared priority-then-ticket order.
 
         Policy priority is primary. The monotonically allocated ticket number is both
@@ -2305,6 +2367,8 @@ class Board:
 
         buckets: dict[str, list[Item]] = {state: [] for state in self.policy.states}
         for item in self.items:
+            if item.archived and not include_archived:
+                continue
             buckets.setdefault(item.state, []).append(item)
         return [
             Lane(
@@ -2342,6 +2406,24 @@ class Board:
                     f"{child_id}: stored parent is {child.parent!r} but parentHistory ends at "
                     f"{parent_id!r} -- something changed it without going through set_parent()"
                 )
+        return problems
+
+    def _archive_history_problems(self) -> list[str]:
+        """Replay visibility independently of lane transitions and completion rights."""
+        problems: list[str] = []
+        archived: dict[str, bool] = {}
+        actors = {self.browser_user, self.cli_user}
+        for index, change in enumerate(self.archive_history):
+            if change.by not in actors:
+                problems.append(f"archiveHistory[{index}] names unauthorized actor {change.by!r}")
+            if change.archived == archived.get(change.item_id, False):
+                problems.append(f"archiveHistory[{index}] does not change archive state")
+            archived[change.item_id] = change.archived
+        problems.extend(
+            f"{item.id}: stored archived flag disagrees with archiveHistory"
+            for item in self.items
+            if item.archived != archived.get(item.id, False)
+        )
         return problems
 
     def verify(self) -> list[str]:
@@ -2382,6 +2464,7 @@ class Board:
             if change.by not in known_actors
         ]
         problems.extend(self._parent_history_problems(known_actors))
+        problems.extend(self._archive_history_problems())
         problems.extend(
             f"subjectHistory[{index}] names unknown actor {change.by!r}"
             for index, change in enumerate(self.subject_history)
@@ -2797,6 +2880,18 @@ class Board:
         self.subject_history.append(SubjectChange(at=now(), by=by, item_id=item.id))
         item.subject = text
         return f"{item.label}: {was!r} -> {text!r} (by {by})"
+
+    def set_archived(self, item_id: str, *, archived: bool, by: Actor) -> str:
+        """Hide or restore one card without deleting data or recording a lane move."""
+        if by not in {self.browser_user, self.cli_user}:
+            raise BoardError(f"unauthorized archive actor {by!r}")
+        item = self.find(item_id)
+        action = "archived" if archived else "unarchived"
+        if item.archived == archived:
+            return f"{item.label} is already {action}"
+        self.archive_history.append(ArchiveChange(now(), by, item.id, archived))
+        item.archived = archived
+        return f"{item.label} {action} (by {by})"
 
     def assign(self, item_id: str, owner: Actor, by: Actor) -> str:
         """Reassign one card's owner, appending to its history. Card #0053.
@@ -4294,6 +4389,7 @@ class ItemSummary:
     state: str
     priority: str
     owner: str
+    archived: bool = False
 
     @classmethod
     def from_item(cls, item: Item) -> Self:
@@ -4305,6 +4401,7 @@ class ItemSummary:
             state=item.state,
             priority=item.priority,
             owner=item.owner,
+            archived=item.archived,
         )
 
     @property
@@ -4321,13 +4418,14 @@ class ItemSummary:
             "state": self.state,
             "priority": self.priority,
             "owner": self.owner,
+            **({"archived": True} if self.archived else {}),
         }
 
     def describe(self) -> str:
         """Return one compact relationship endpoint for human output."""
         return (
             f"{self.label} {self.item_id} [{self.state}, {self.priority}, owner {self.owner}] "
-            f"{self.subject}"
+            f"{self.subject}" + (" [archived]" if self.archived else "")
         )
 
 
@@ -4352,6 +4450,7 @@ class ItemInspection:
     parent: ItemSummary | None
     children: tuple[ItemSummary, ...]
     relationships: tuple[ItemRelationship, ...]
+    archive_history: tuple[ArchiveChange, ...] = ()
     detail: str | None = None
     comments: tuple[Comment, ...] | None = None
 
@@ -4366,6 +4465,8 @@ class ItemInspection:
         out["relationships"] = [
             cast("JsonValue", relationship.to_json()) for relationship in self.relationships
         ]
+        if self.archive_history:
+            out["archiveHistory"] = [change.to_json() for change in self.archive_history]
         if self.detail is not None:
             out["detail"] = self.detail
         if self.comments is not None:
@@ -4421,6 +4522,9 @@ def inspect_item(board: Board, ref: str, *, include_comments: bool = False) -> I
         parent=parent,
         children=children,
         relationships=relationships,
+        archive_history=tuple(
+            change for change in board.archive_history if change.item_id == item.id
+        ),
         detail=item.detail if include_comments else None,
         comments=tuple(item.comments) if include_comments else None,
     )
@@ -4432,6 +4536,7 @@ def inspect_next_items(
     limit: int,
     *,
     include_comments: bool = False,
+    include_archived: bool = False,
 ) -> tuple[ItemInspection, ...]:
     """Return the next cards across selected lanes using the board's total order."""
     if limit < 1:
@@ -4445,7 +4550,11 @@ def inspect_next_items(
 
     selected = frozenset(lanes)
     items = sorted(
-        (item for item in board.items if item.state in selected),
+        (
+            item
+            for item in board.items
+            if item.state in selected and (include_archived or not item.archived)
+        ),
         key=lambda item: item_order_key(item, board.policy),
     )[:limit]
     return tuple(inspect_item(board, item.id, include_comments=include_comments) for item in items)
@@ -4476,6 +4585,7 @@ def inspect_search_items(
     lanes: tuple[str, ...] | None = None,
     *,
     include_comments: bool = False,
+    include_archived: bool = False,
 ) -> tuple[ItemInspection, ...]:
     """Find cards by concept without requiring a broad board export."""
     normalized_query = query.strip()
@@ -4499,6 +4609,7 @@ def inspect_search_items(
             item
             for item in board.items
             if item.state in selected
+            and (include_archived or not item.archived)
             and _item_matches_search(
                 item,
                 needle,
@@ -4600,6 +4711,39 @@ def _subject_activity_events(
     return events
 
 
+def _archive_activity_events(
+    board: Board,
+    start: datetime.datetime,
+    end: datetime.datetime | None,
+) -> list[ActivityEvent]:
+    """Keep archive events in audit queries even while the affected cards are hidden."""
+    events: list[ActivityEvent] = []
+    for index, change in enumerate(board.archive_history):
+        instant = _event_instant(change.at, f"archiveHistory[{index}]")
+        if instant < start or (end is not None and instant > end):
+            continue
+        item = board.find(change.item_id)
+        events.append(
+            ActivityEvent(
+                ticket=item.ticket,
+                item_id=item.id,
+                kind="archived" if change.archived else "unarchived",
+                at=change.at,
+                instant=instant,
+                by=change.by,
+                sequence=(
+                    len(item.history)
+                    + len(item.comments)
+                    + len(board.relationship_history)
+                    + len(board.parent_history)
+                    + len(board.subject_history)
+                    + index
+                ),
+            )
+        )
+    return events
+
+
 def activity_events(
     board: Board,
     start: datetime.datetime,
@@ -4607,8 +4751,8 @@ def activity_events(
 ) -> list[ActivityEvent]:
     """Return sanitized events in one inclusive window, oldest first.
 
-    Item history, comments, relationship history, parent history, and subject history
-    are separate persisted arrays, so events sharing a timestamp have no recoverable
+    Item history, comments, relationship, parent, subject, and archive history are
+    separate persisted arrays, so events sharing a timestamp have no recoverable
     cross-array causal order. Ticket, source sequence, and kind provide a deterministic
     tie-break without pretending otherwise.
     """
@@ -4717,17 +4861,25 @@ def activity_events(
             )
         )
     events.extend(_subject_activity_events(board, start, end))
+    events.extend(_archive_activity_events(board, start, end))
     return sorted(
         events, key=lambda event: (event.instant, event.ticket, event.sequence, event.kind)
     )
 
 
-def newest_comments(board: Board, limit: int) -> tuple[NewestComment, ...]:
+def newest_comments(
+    board: Board,
+    limit: int,
+    *,
+    include_archived: bool = False,
+) -> tuple[NewestComment, ...]:
     """Return the newest comments across the board in deterministic reverse time order."""
     if limit < 1:
         raise BoardError("--newest-comments must be a positive integer")
     comments: list[NewestComment] = []
     for item in board.items:
+        if item.archived and not include_archived:
+            continue
         for sequence, comment in enumerate(item.comments):
             comments.append(
                 NewestComment(
@@ -4754,14 +4906,20 @@ def newest_comments(board: Board, limit: int) -> tuple[NewestComment, ...]:
     )
 
 
-def _report_newest_comments(board: Board, limit: int, *, as_json: bool) -> None:
+def _report_newest_comments(
+    board: Board,
+    limit: int,
+    *,
+    as_json: bool,
+    include_archived: bool = False,
+) -> None:
     """Print one bounded, newest-first comment catch-up report."""
     drift = board.verify()
     if drift:
         raise BoardError(
             f"newest-comments report refused {len(drift)} audit-trail problem(s): {drift[0]}"
         )
-    comments = newest_comments(board, limit)
+    comments = newest_comments(board, limit, include_archived=include_archived)
     if as_json:
         payload: JsonObject = {
             "limit": limit,
@@ -4855,6 +5013,8 @@ def _print_item_inspection(
     print(f"{item.label} {item.item_id}")
     print(f"  subject: {item.subject}")
     print(f"  state: {item.state}")
+    if item.archived:
+        print("  archived: yes")
     print(f"  priority: {item.priority}")
     print(f"  owner: {item.owner}")
     print(f"  comments: {inspection.comment_count}")
@@ -4885,13 +5045,14 @@ def _print_item_inspection(
     _print_report_section("comment text", _comment_report_lines(inspection.comments or ()))
 
 
-def _report_next_items(
+def _report_next_items(  # noqa: PLR0913 -- explicit selection and output options
     board: Board,
     lanes: list[str],
     limit: int,
     *,
     as_json: bool,
     include_comments: bool,
+    include_archived: bool = False,
 ) -> None:
     """Print prioritized cards from selected lanes without exporting the whole board."""
     drift = board.verify()
@@ -4905,6 +5066,7 @@ def _report_next_items(
         selected_lanes,
         limit,
         include_comments=include_comments,
+        include_archived=include_archived,
     )
     if as_json:
         payload: JsonObject = {
@@ -4932,13 +5094,14 @@ def _report_next_items(
         )
 
 
-def _report_search_items(
+def _report_search_items(  # noqa: PLR0913 -- explicit selection and output options
     board: Board,
     query: str,
     lanes: list[str] | None,
     *,
     as_json: bool,
     include_comments: bool,
+    include_archived: bool = False,
 ) -> None:
     """Print deterministic focused matches without exporting the whole board."""
     drift = board.verify()
@@ -4950,6 +5113,7 @@ def _report_search_items(
         query,
         selected_lanes,
         include_comments=include_comments,
+        include_archived=include_archived,
     )
     fields: list[JsonValue] = ["id", "ticket", "subject"]
     if include_comments:
@@ -5005,13 +5169,17 @@ def _report(board: Board, args: argparse.Namespace) -> None:
     # belong here rather than on every mutation, where they would double the output.
     sort_problems = report_sort_health(board) if args.verify else []
 
-    print(f"\n{board.project}  ({len(board.items)} items, port {board.port})")
-    for lane in board.lanes():
+    lanes = board.lanes(include_archived=bool(getattr(args, "include_archived", False)))
+    visible_count = sum(len(lane.items) for lane in lanes)
+    print(f"\n{board.project}  ({visible_count} items, port {board.port})")
+    for lane in lanes:
         if not lane.items:
             continue
         print(f"\n  {lane.label}  [{lane.owner_label}]  {len(lane.items)}")
         for item in lane.items:
             note = f"  ({len(item.comments)} comment(s))" if item.comments else ""
+            if item.archived:
+                note += " [archived]"
             print(f"    {item.priority}  {item.subject}{note}")
 
     if bad_edges or drift or sort_problems:
@@ -5050,13 +5218,14 @@ def report_item(
     )
 
 
-def report_next_items(
+def report_next_items(  # noqa: PLR0913 -- explicit selection and output options
     board: Board,
     lanes: list[str],
     limit: int,
     *,
     as_json: bool,
     include_comments: bool,
+    include_archived: bool = False,
 ) -> None:
     """Expose prioritized focused inspection to the command-oriented CLI."""
     _report_next_items(
@@ -5065,16 +5234,18 @@ def report_next_items(
         limit,
         as_json=as_json,
         include_comments=include_comments,
+        include_archived=include_archived,
     )
 
 
-def report_search_items(
+def report_search_items(  # noqa: PLR0913 -- explicit selection and output options
     board: Board,
     query: str,
     lanes: list[str] | None,
     *,
     as_json: bool,
     include_comments: bool,
+    include_archived: bool = False,
 ) -> None:
     """Expose focused card search to the command-oriented CLI."""
     _report_search_items(
@@ -5083,17 +5254,32 @@ def report_search_items(
         lanes,
         as_json=as_json,
         include_comments=include_comments,
+        include_archived=include_archived,
     )
 
 
-def report_newest_comments(board: Board, limit: int, *, as_json: bool) -> None:
+def report_newest_comments(
+    board: Board,
+    limit: int,
+    *,
+    as_json: bool,
+    include_archived: bool = False,
+) -> None:
     """Expose bounded newest-comment inspection to the command-oriented CLI."""
-    _report_newest_comments(board, limit, as_json=as_json)
+    _report_newest_comments(board, limit, as_json=as_json, include_archived=include_archived)
 
 
-def report_board(board: Board, *, as_json: bool, verify: bool) -> None:
+def report_board(
+    board: Board,
+    *,
+    as_json: bool,
+    verify: bool,
+    include_archived: bool = False,
+) -> None:
     """Expose the complete board report to the command-oriented CLI."""
-    _report(board, argparse.Namespace(json=as_json, verify=verify))
+    _report(
+        board, argparse.Namespace(json=as_json, verify=verify, include_archived=include_archived)
+    )
 
 
 if __name__ == "__main__":

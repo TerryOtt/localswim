@@ -162,6 +162,15 @@ value is duplicated into the event, so Git history remains the optional source f
 comparing text when the operator has deliberately arranged versioned board storage.
 Description and project edits do not receive their own board-history entries.
 
+Archiving is independent of lane state. `Item.archived` defaults to false and is omitted
+from persisted cards while false. The optional schema-4 `archiveHistory` array records
+each change as `{at, by, item, archived}`. Its parser rejects invalid booleans, timestamps,
+unknown fields, and missing card references. Verification replays archive state from
+false, checks the actor and alternating states, and compares it with every stored flag.
+Both configured mutation actors may archive or restore a card in any lane; this grants
+no additional lane transitions. No deletion operation exists, and all identifiers,
+relationships, comments, and other history survive archiving.
+
 ## Relationships and hierarchy
 
 Parent/child hierarchy is separate from general relationships because a tree needs one
@@ -259,7 +268,7 @@ Current API routes:
 GET  /api/v001/status
 GET  /api/v001/board
 POST /api/v001/cards
-POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent}
+POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
 POST /api/v001/board/project
 ```
 
@@ -287,6 +296,15 @@ CLI reports load the board directly and work while the service is stopped. Publi
 mutations do not write the file directly: they locate the running service, fetch its
 revision, and use the same REST mutation path as the browser. CLI mutations are always
 attributed to `cliUser`; there is no impersonation flag.
+
+`card archive REF` and `card unarchive REF` use the same authenticated, revision-checked
+transaction boundary. Repeating the current archive state adds no duplicate audit entry;
+as with other no-op mutations, a successful service transaction still advances revision.
+`board show`, `card search`, `card next`, and `comments newest` exclude archived cards
+before ordering and limits unless `--include-archived` is supplied. The complete
+`board show --json` export, verification, activity, focused inspection, and relationship
+endpoints retain archived cards. Focused JSON marks an archived card and includes its
+archive events; referenced archived cards carry an archive marker too.
 
 The CLI establishes UTF-8 for stdout and stderr before argument parsing. This is a
 correctness boundary, not presentation polish: Windows may otherwise inherit CP1252,
@@ -326,7 +344,7 @@ private comment text. Its JSON report names the limit and deterministic ordering
 its command scope prevents combining it with another report or mutation.
 
 `activity since` and `activity between` merge creation, movement, assignment,
-priority, rename, comment, link, unlink, parent, and unparent audit records into an
+priority, rename, comment, link, unlink, parent, unparent, archive, and unarchive records into an
 inclusive chronological report. Their RFC 3339 bounds must carry an explicit UTC
 offset.
 Relationship events name the caller-facing kind and opposite ticket endpoint;
@@ -373,6 +391,9 @@ Important UI mechanics:
   invalid state or policy is reported rather than partially applied.
 - Search titles, descriptions, comments, and tickets entirely in the browser.
 - Hide completed cards after 24 hours only when the lane-entry time is known.
+- Hide explicitly archived cards regardless of the completed-card visibility toggle.
+  The browser payload retains them for relationship navigation and open drawers, while
+  lane/open counts and old-card counts exclude them. Archived drawers identify their status.
 - Derive draggable edges, creatable lanes, labels, priorities, actors, and colors from
   server data rather than duplicating policy in JavaScript.
 
@@ -414,6 +435,7 @@ The suite spans these boundaries:
 | Module | Coverage focus |
 |---|---|
 | `test_board.py` | Card operations, transitions, history, links, hierarchy, and sorting. |
+| `test_archiving.py` | Reversible visibility, archive persistence and audit, intact relationships, and filtered queries. |
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |
 | `test_policy.py` | Policy immutability, strict edge parsing, actor matching, isolation, and reload. |
 | `test_store.py` | Transactionality, revision races, board placement, and autopush integration. |

@@ -92,10 +92,16 @@ def board_commands() -> None:
 
 @board_commands.command("show")
 @click.option("--json", "as_json", is_flag=True, help="Emit the complete board as JSON.")
+@click.option("--include-archived", is_flag=True, help="Include archived cards in the summary.")
 @click.pass_obj
-def board_show(context: CliContext, *, as_json: bool) -> None:
+def board_show(context: CliContext, *, as_json: bool, include_archived: bool) -> None:
     """Show the board summary or its complete JSON document."""
-    board_state.report_board(_load(context), as_json=as_json, verify=False)
+    board_state.report_board(
+        _load(context),
+        as_json=as_json,
+        verify=False,
+        include_archived=include_archived,
+    )
 
 
 @board_commands.command("verify")
@@ -258,6 +264,7 @@ def card_show(
 
 
 @card_commands.command("search")
+@click.option("--include-archived", is_flag=True, help="Search archived cards too.")
 @click.argument("query")
 @click.option("--lane", "lanes", multiple=True, help="Limit results to this lane; repeatable.")
 @click.option("--json", "as_json", is_flag=True, help="Emit structured JSON.")
@@ -267,13 +274,14 @@ def card_show(
     help="Search and return detail and comment text too.",
 )
 @click.pass_obj
-def card_search(
+def card_search(  # noqa: PLR0913 -- Click binds each explicit query option separately
     context: CliContext,
     query: str,
     lanes: tuple[str, ...],
     *,
     as_json: bool,
     include_comments: bool,
+    include_archived: bool,
 ) -> None:
     """Find cards by ID, ticket, subject, and optionally private prose."""
     selected_lanes = list(lanes) if lanes else None
@@ -284,11 +292,13 @@ def card_search(
             selected_lanes,
             as_json=as_json,
             include_comments=include_comments,
+            include_archived=include_archived,
         )
     )
 
 
 @card_commands.command("next")
+@click.option("--include-archived", is_flag=True, help="Include archived cards in the results.")
 @click.argument("count", type=int, callback=_positive_count)
 @click.option(
     "--lane",
@@ -304,13 +314,14 @@ def card_search(
     help="Include detail and comment text in focused results.",
 )
 @click.pass_obj
-def card_next(
+def card_next(  # noqa: PLR0913 -- Click binds each explicit query option separately
     context: CliContext,
     count: int,
     lanes: tuple[str, ...],
     *,
     as_json: bool,
     include_comments: bool,
+    include_archived: bool,
 ) -> None:
     """Show prioritized cards from one or more explicit lanes."""
     _board_call(
@@ -320,6 +331,7 @@ def card_next(
             count,
             as_json=as_json,
             include_comments=include_comments,
+            include_archived=include_archived,
         )
     )
 
@@ -376,6 +388,22 @@ def card_move(context: CliContext, reference: str, state: str) -> None:
         f"{board_state.API_PREFIX}/cards/{_quote(reference)}/move",
         {"to": state},
     )
+
+
+@card_commands.command("archive")
+@click.argument("reference")
+@click.pass_obj
+def card_archive(context: CliContext, reference: str) -> None:
+    """Hide a card without deleting its data or changing its lane."""
+    _mutate(context, f"{board_state.API_PREFIX}/cards/{_quote(reference)}/archive", {})
+
+
+@card_commands.command("unarchive")
+@click.argument("reference")
+@click.pass_obj
+def card_unarchive(context: CliContext, reference: str) -> None:
+    """Restore an archived card in its existing lane."""
+    _mutate(context, f"{board_state.API_PREFIX}/cards/{_quote(reference)}/unarchive", {})
 
 
 @card_commands.command("comment")
@@ -522,12 +550,26 @@ def comment_commands() -> None:
 
 
 @comment_commands.command("newest")
+@click.option("--include-archived", is_flag=True, help="Include comments on archived cards.")
 @click.argument("count", type=int, callback=_positive_count)
 @click.option("--json", "as_json", is_flag=True, help="Emit structured JSON.")
 @click.pass_obj
-def comments_newest(context: CliContext, count: int, *, as_json: bool) -> None:
+def comments_newest(
+    context: CliContext,
+    count: int,
+    *,
+    as_json: bool,
+    include_archived: bool,
+) -> None:
     """Show the newest board comments with their card identities."""
-    _board_call(lambda: board_state.report_newest_comments(_load(context), count, as_json=as_json))
+    _board_call(
+        lambda: board_state.report_newest_comments(
+            _load(context),
+            count,
+            as_json=as_json,
+            include_archived=include_archived,
+        )
+    )
 
 
 def main() -> None:

@@ -87,6 +87,7 @@ def assert_cli(path: pathlib.Path, *arguments: str) -> None:
         ("board", "shutdown"),
         ("board", "verify"),
         ("card",),
+        ("card", "archive"),
         ("card", "assign"),
         ("card", "clear-parent"),
         ("card", "comment"),
@@ -101,6 +102,7 @@ def assert_cli(path: pathlib.Path, *arguments: str) -> None:
         ("card", "set-subject"),
         ("card", "show"),
         ("card", "unlink"),
+        ("card", "unarchive"),
         ("comments",),
         ("comments", "newest"),
         ("lane",),
@@ -199,6 +201,62 @@ def test_every_cli_mutation_uses_service(served_board: pathlib.Path) -> None:
     assert board.subject_history[0].item_id == "a"
     assert board.links == []
     assert board.find("b").parent is None
+
+
+def test_archive_cli_hides_lists_preserves_export_and_restores(served_board: pathlib.Path) -> None:
+    assert_cli(served_board, "card", "create", "hidden", "Hidden subject", "--state", "backlog")
+    assert_cli(served_board, "card", "comment", "hidden", "Retained comment")
+    before = board_state.load(served_board)
+    assert_cli(served_board, "card", "archive", "#0001")
+    archived = board_state.load(served_board)
+    assert archived.find("hidden").archived
+    assert archived.archive_history[0].by == "bot"
+    assert archived.revision == before.revision + 1
+
+    for arguments in [
+        ("board", "show"),
+        ("card", "search", "Hidden", "--json"),
+        ("card", "next", "1", "--lane", "backlog", "--json"),
+        ("comments", "newest", "1", "--json"),
+    ]:
+        default = run_cli(served_board, *arguments)
+        included = run_cli(served_board, *arguments, "--include-archived")
+        assert default.returncode == 0, default.stderr
+        assert included.returncode == 0, included.stderr
+        marker = "Retained comment" if arguments[0] == "comments" else "Hidden subject"
+        assert marker not in default.stdout
+        assert marker in included.stdout
+
+    focused = run_cli(served_board, "card", "show", "1", "--json", "--include-comments")
+    assert focused.returncode == 0, focused.stderr
+    report = json.loads(focused.stdout)
+    assert report["archived"] is True
+    assert report["comments"][0]["text"] == "Retained comment"
+    assert report["archiveHistory"][0]["by"] == "bot"
+    exported = run_cli(served_board, "board", "show", "--json")
+    assert exported.returncode == 0, exported.stderr
+    exported_board = board_state.Board.from_json(json.loads(exported.stdout), "CLI export")
+    assert exported_board.to_json() == archived.to_json()
+    assert_cli(served_board, "card", "unarchive", "hidden")
+    restored = board_state.load(served_board)
+    assert not restored.find("hidden").archived
+    assert restored.find("hidden").to_json() == before.find("hidden").to_json()
+    assert "Hidden subject" in run_cli(served_board, "board", "show").stdout
+
+
+@pytest.mark.parametrize("command", ["archive", "unarchive", "delete"])
+def test_archive_requires_live_service_and_delete_is_unavailable(
+    tmp_path: pathlib.Path,
+    command: str,
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+    before = path.read_bytes()
+    result = run_cli(path, "card", command, "focus")
+    assert result.returncode != 0
+    assert path.read_bytes() == before
+    if command == "delete":
+        assert "No such command" in result.stderr
 
 
 def test_cli_forces_utf8_when_inherited_output_encoding_cannot_print_move_arrow(

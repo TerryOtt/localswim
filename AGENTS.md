@@ -55,6 +55,11 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 - Keep the checked generic and Terry-workflow examples distinct. Terry's seven-lane
   workflow is an intentional public example of how he works, not a universal default.
 
+- Cards may be archived and unarchived, never deleted. Preserve their IDs, tickets,
+  lane states, relationships, contents, and history. Archive changes use the live
+  service and append to `archiveHistory`; default lists hide archived cards, while
+  focused inspection, full snapshot exports, verification, and activity retain them.
+
 ## Code conventions
 
 - Target exactly the Python version in `.python-version` for development and CI

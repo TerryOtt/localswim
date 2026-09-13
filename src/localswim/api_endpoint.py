@@ -2568,6 +2568,7 @@ function openCard(id) {
     it.laneLabel + '  \\u00b7  ' + it.id;
 
   const own = document.getElementById('p-owner');
+  if (it.archived) document.getElementById('p-sub').textContent += '  (archived)';
   own.textContent = userLabel(it.owner);
   own.className = it.owner;
   own.disabled = false;
@@ -3019,7 +3020,7 @@ function card(item) {
 // The search half had the same hole in the other direction: it counted a match on a
 // card that had been hidden and therefore had no element to highlight.
 function visibleItems(lane) {
-  return unhideOld ? lane.items : lane.items.filter(i => !i.old);
+  return lane.items.filter(i => !i.archived && (unhideOld || !i.old));
 }
 
 function laneEl(lane) {
@@ -3826,7 +3827,9 @@ def payload() -> bytes:
     # history; a mismatch means something changed a state without going through
     # `move()`, and that is exactly the news a board must not keep to itself.
     drift = board.verify()
-    lanes = board.lanes()
+    # Retain archived cards for relationship lookups and existing open drawers.
+    # Only active cards contribute to lane rendering, counts, and search matches.
+    lanes = board.lanes(include_archived=True)
     policy = board.policy
     browser_edges = policy.edges_for(board.browser_user)
 
@@ -3854,8 +3857,10 @@ def payload() -> bytes:
             kids.setdefault(child.parent, []).append(
                 {"ticket": child.label, "subject": child.subject}
             )
-    counts: dict[str, int] = {lane.state: len(lane.items) for lane in lanes}
-    counts["open"] = sum(len(lane.items) for lane in lanes if lane.state != "completed")
+    counts: dict[str, int] = {
+        lane.state: sum(not item.archived for item in lane.items) for lane in lanes
+    }
+    counts["open"] = sum(counts[lane.state] for lane in lanes if lane.state != "completed")
 
     return json.dumps(
         {
@@ -3874,7 +3879,7 @@ def payload() -> bytes:
                     "creatable": policy.may_create(board.browser_user, lane.state),
                     # **Card #0063. Counted on the server, beside the flag it counts**, so the
                     # checkbox label and the hiding can never disagree about how many.
-                    "oldCount": sum(1 for i in lane.items if is_old(i)),
+                    "oldCount": sum(1 for i in lane.items if not i.archived and is_old(i)),
                     "items": [
                         {
                             "id": item.id,
@@ -3883,6 +3888,7 @@ def payload() -> bytes:
                             "laneLabel": lane.label,
                             "subject": item.subject,
                             "priority": item.priority,
+                            **({"archived": True} if item.archived else {}),
                             "priorityLabel": policy.priority_label.get(item.priority, ""),
                             # **Card #0063.** Computed on the SERVER so one clock decides it, and
                             # so the 24-hour rule lives in exactly one place. The page re-fetches
@@ -4091,6 +4097,8 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
         return f"project renamed: {was!r} -> {name!r}"
 
     ref, action = command_parts[1], command_parts[2]
+    if action in {"archive", "unarchive"}:
+        return board.set_archived(ref, archived=action == "archive", by=actor)
     if action == "move":
         return board.move(ref, str(body["to"]), actor)
     if action == "comment":

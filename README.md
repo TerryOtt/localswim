@@ -227,6 +227,36 @@ The first changes only presentation. The second atomically rewrites the embedded
 policy, current card states, and lane-history endpoints. Neither operation derives an
 existing ID from the current label.
 
+## Archiving cards
+
+Archive a card to hide it without deleting its contents or changing its lane:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json card archive 137
+uv run --frozen localswim-cli boards/my-project.json card unarchive 137
+~~~
+
+Both commands accept a stable ID or ticket number and require the live service. Either
+authenticated board actor may archive or restore a card. Its ticket, lane, owner,
+priority, description, comments, relationships, and audit history remain intact.
+Repeated requests for the same archive state add no duplicate archive event. There is
+no card deletion command or API operation.
+
+Archived cards disappear from swimlanes, lane counts, browser search, and the default
+`board show`, `card search`, `card next`, and `comments newest` results. Add
+`--include-archived` to those CLI reports to include them. `card show REF` always finds
+the card, identifies it as archived, and includes archive events in its JSON report.
+Existing relationships can still open an archived card's browser drawer. Unarchiving
+restores its visibility in the same lane; the existing 24-hour completed-card filter
+still applies.
+
+`board show --json` always exports the complete snapshot, including archived cards.
+Verification and activity reports also retain archived cards; activity records
+`archived` and `unarchived` events with the card identity, actor, and timestamp.
+Archiving is an optional schema-4 extension: older boards start with no archived cards.
+The snapshot stores a card's `archived` flag only when true and an append-only
+`archiveHistory` array after the first archive operation.
+
 ## Transition permissions
 
 The embedded policy is the allow-list for lanes, priorities, card creation, and
@@ -305,7 +335,7 @@ The browser and CLI use these loopback routes:
 GET  /api/v001/status
 GET  /api/v001/board
 POST /api/v001/cards
-POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent}
+POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
 POST /api/v001/board/project
 POST /api/v001/shutdown
 ~~~

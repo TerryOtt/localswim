@@ -403,6 +403,62 @@ def test_authenticated_create_uses_browser_actor(api: RunningApi) -> None:
     assert saved.find("1").history[0].by == "terry"
 
 
+def test_archive_routes_keep_data_and_enforce_credentials_and_revisions(api: RunningApi) -> None:
+    code, _ = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=0,
+        body={"id": "focus", "subject": "Focus", "state": "backlog"},
+    )
+    assert code == 200
+    before = api.path.read_bytes()
+    route = api.base + API + "/cards/focus/archive"
+    code, _ = request_json(route, revision=1, body={})
+    assert code == 401
+    assert api.path.read_bytes() == before
+    code, _ = request_json(route, token=api_endpoint.CLI_TOKEN, revision=0, body={})
+    assert code == 412
+    assert api.path.read_bytes() == before
+    code, out = request_json(route, token=api_endpoint.CLI_TOKEN, revision=1, body={})
+    assert code == 200
+    assert out["revision"] == 2
+    saved = board_state.load(api.path)
+    assert saved.find("focus").archived
+    assert saved.archive_history[0].by == "bot"
+    code, payload = request_json(api.base + API + "/board")
+    assert code == 200
+    assert payload["counts"]["backlog"] == 0
+    assert payload["counts"]["open"] == 0
+    hidden = next(item for lane in payload["lanes"] for item in lane["items"])
+    assert hidden["id"] == "focus"
+    assert hidden["archived"] is True
+
+    unchanged = api.path.read_bytes()
+    code, _ = request_json(
+        api.base + API + "/cards/missing/archive",
+        token=api_endpoint.CLI_TOKEN,
+        revision=2,
+        body={},
+    )
+    assert code == 409
+    delete = urllib.request.Request(api.base + API + "/cards/focus", method="DELETE")
+    assert_http_error(delete, 501)
+    assert api.path.read_bytes() == unchanged
+    code, _ = request_json(
+        api.base + API + "/cards/1/unarchive",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=2,
+        body={},
+    )
+    assert code == 200
+    saved = board_state.load(api.path)
+    assert saved.revision == 3
+    assert not saved.find("focus").archived
+    assert saved.find("focus").state == "backlog"
+    assert saved.archive_history[-1].by == "terry"
+    assert saved.verify() == []
+
+
 def test_create_can_atomically_add_relationships(api: RunningApi) -> None:
     first_code, _first = request_json(
         api.base + API + "/cards",
