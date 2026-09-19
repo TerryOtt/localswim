@@ -166,6 +166,31 @@ def lane_commands() -> None:
     """Perform explicit offline lane migrations."""
 
 
+@lane_commands.command("add")
+@click.argument("label")
+@click.option("--create-for", multiple=True, help="Actor ID allowed to create in the new lane.")
+@click.option(
+    "--connect-for", multiple=True, help="Actor ID allowed to move both ways with existing lanes."
+)
+@click.option("--note", default="", help="Description of the new lane.")
+@click.pass_obj
+def lane_add(
+    context: CliContext,
+    label: str,
+    *,
+    create_for: tuple[str, ...],
+    connect_for: tuple[str, ...],
+    note: str,
+) -> None:
+    """Add a lane to a stopped board without changing existing cards."""
+    result = _board_call(
+        lambda: board_state.add_lane(
+            context.board, label, create_for=create_for, connect_for=connect_for, note=note
+        )
+    )
+    click.echo(f"  {result}")
+
+
 @lane_commands.command("migrate")
 @click.argument("old")
 @click.argument("new")

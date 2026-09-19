@@ -106,6 +106,7 @@ def assert_cli(path: pathlib.Path, *arguments: str) -> None:
         ("comments",),
         ("comments", "newest"),
         ("lane",),
+        ("lane", "add"),
         ("lane", "migrate"),
         ("lane", "migrate-id"),
         ("lane", "rename-label"),
@@ -1164,6 +1165,44 @@ def test_cli_renames_label_without_changing_lane_identity(tmp_path: pathlib.Path
     assert board.policy.lane_label["ready_for_work"] == "Selected Work"
     assert "selected_work" not in board.policy.states
     assert board.revision == 1
+
+
+def test_cli_adds_lane_without_changing_existing_card(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    description, permissions = initialization_inputs(tmp_path)
+    assert_cli(path, "board", "init", str(description), str(permissions))
+    board = board_state.load(path)
+    board.create("alpha", "Alpha", "backlog", "terry")
+    board_state.save(board, path)
+    original = board.find("alpha").to_json()
+
+    result = run_cli(
+        path,
+        "lane",
+        "add",
+        "Dev Equipment",
+        "--create-for",
+        "terry",
+        "--create-for",
+        "bot",
+        "--connect-for",
+        "terry",
+        "--connect-for",
+        "bot",
+    )
+
+    assert result.returncode == 0, result.stderr
+    changed = board_state.load(path)
+    assert changed.policy.states[-1] == "dev_equipment"
+    assert changed.policy.lane_label["dev_equipment"] == "Dev Equipment"
+    assert changed.find("alpha").to_json() == original
+    assert changed.policy.may_move("terry", "backlog", "dev_equipment")
+    assert changed.policy.may_move("bot", "dev_equipment", "backlog")
+    assert changed.verify() == []
+    assert changed.revision == board.revision + 1
+    duplicate = run_cli(path, "lane", "add", "Dev Equipment")
+    assert duplicate.returncode != 0
+    assert board_state.load(path).revision == changed.revision
 
 
 def test_cli_migrates_embedded_lane_id_atomically(tmp_path: pathlib.Path) -> None:

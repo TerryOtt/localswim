@@ -216,6 +216,13 @@ uv run --frozen localswim-cli boards/my-project.json lane migrate <old-lane-id> 
 Every structural migration refuses a listening board port, validates and replays the
 complete result before replacing the file, and increments the board revision.
 
+Add a lane to a stopped board with explicit creation and bidirectional move rights.
+Existing cards and their history remain in place:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json lane add "New Lane" --create-for terry --create-for bot --connect-for terry --connect-for bot
+~~~
+
 Display renames and identity migrations are deliberately different operations:
 
 ~~~console

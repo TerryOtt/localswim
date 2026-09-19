@@ -3521,6 +3521,66 @@ def _policy_document(raw: JsonObject, target: pathlib.Path) -> JsonObject:
     return policy
 
 
+def add_lane(
+    path: pathlib.Path,
+    label: str,
+    *,
+    create_for: tuple[str, ...] = (),
+    connect_for: tuple[str, ...] = (),
+    note: str = "",
+) -> str:
+    """Add one lane and explicit creation and bidirectional move permissions offline."""
+    target = path.resolve()
+    label = label.strip()
+    lane_id = lane_slug(label)
+    with locked(target):
+        raw = _read_json(target)
+        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+            raise BoardError(f"{target}: lane add needs a schema-{SCHEMA} board")
+        _require_board_port_stopped(target, raw)
+        policy = _policy_document(raw, target)
+        lanes = policy.get("lanes")
+        edges = policy.get("edges")
+        if not isinstance(lanes, list) or not isinstance(edges, dict):
+            raise BoardError(f"{target}: policy lanes or edges are invalid")
+        existing = [lane for lane in lanes if isinstance(lane, dict)]
+        if any(lane.get("id") == lane_id for lane in existing):
+            raise BoardError(f"{target}: lane id {lane_id!r} already exists")
+        if any(str(lane.get("label", "")).casefold() == label.casefold() for lane in existing):
+            raise BoardError(f"{target}: lane label {label!r} already exists")
+        browser_actor = raw.get("browserUser")
+        cli_actor = raw.get("cliUser")
+        if not isinstance(browser_actor, str) or not isinstance(cli_actor, str):
+            raise BoardError(f"{target}: board actors are invalid")
+        actors = {browser_actor, cli_actor}
+        for actor in (*create_for, *connect_for):
+            if actor not in actors:
+                raise BoardError(f"{target}: unknown lane actor {actor!r}")
+        new_lane: JsonObject = {
+            "id": lane_id,
+            "label": label,
+            "create": list(dict.fromkeys(create_for)),
+        }
+        if note:
+            new_lane["note"] = note
+        lanes.append(new_lane)
+        for actor in dict.fromkeys(connect_for):
+            actor_edges = edges.get(actor)
+            if not isinstance(actor_edges, list):
+                raise BoardError(f"{target}: policy has no edge list for {actor!r}")
+            for existing_lane in existing:
+                other_id = existing_lane["id"]
+                actor_edges.extend(
+                    ({"from": other_id, "to": lane_id}, {"from": lane_id, "to": other_id})
+                )
+        changed = Board.from_json(raw, str(target))
+        if problems := changed.verify():
+            raise BoardError(f"{target}: added lane does not verify: {'; '.join(problems)}")
+        changed.revision += 1
+        save(changed, target)
+    return f"added lane {lane_id} ({label}); revision {changed.revision}"
+
+
 def rename_lane_label(path: pathlib.Path, lane_id: str, label: str) -> str:
     """Rename only a lane's display label, preserving its identity and audit history."""
     target = path.resolve()
