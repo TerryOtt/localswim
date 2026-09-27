@@ -452,6 +452,30 @@ class SubjectChange:
         )
 
 
+@dataclass
+class DetailChange:
+    """One actor-only description edit; private old/new prose stays in Git history."""
+
+    at: str
+    by: str
+    item_id: str
+
+    def to_json(self) -> dict[str, str]:
+        return {"at": self.at, "by": self.by, "item": self.item_id}
+
+    @classmethod
+    def from_json(cls, raw: JsonValue, where: str) -> Self:
+        if not isinstance(raw, dict):
+            raise BoardError(
+                f"{where}: a detail-history entry is {type(raw).__name__}, want object"
+            )
+        values = {key: raw.get(key) for key in ("at", "by", "item")}
+        for key, value in values.items():
+            if not isinstance(value, str) or not value:
+                raise BoardError(f"{where}: detail-history entry has no {key}")
+        return cls(at=str(values["at"]), by=str(values["by"]), item_id=str(values["item"]))
+
+
 @dataclass(frozen=True)
 class ArchiveChange:
     """An append-only visibility change; archiving never changes a card's lane."""
@@ -2088,6 +2112,20 @@ def _subject_history_from_json(raw: JsonValue, known: set[str], where: str) -> l
     return changes
 
 
+def _detail_history_from_json(raw: JsonValue, known: set[str], where: str) -> list[DetailChange]:
+    """Validate sanitized description-edit actors without copying private prose."""
+    if not isinstance(raw, list):
+        raise BoardError(f"{where}: 'detailHistory' is not a list")
+    changes: list[DetailChange] = []
+    for index, change_raw in enumerate(raw):
+        spot = f"{where}: detailHistory[{index}]"
+        change = DetailChange.from_json(change_raw, spot)
+        if change.item_id not in known:
+            raise BoardError(f"{spot} names unknown card {change.item_id!r}")
+        changes.append(change)
+    return changes
+
+
 def _archive_history_from_json(raw: JsonValue, known: set[str], where: str) -> list[ArchiveChange]:
     """Validate archive records and retain references to every archived card."""
     if not isinstance(raw, list):
@@ -2168,6 +2206,9 @@ class Board:
     # A subject-change event needs attribution but not a second copy of private prose.
     # This optional append-only log therefore retains only the card, actor, and time.
     subject_history: list[SubjectChange] = field(default_factory=list[SubjectChange])
+    # Description edits likewise need actor attribution for a Terry-only monitor,
+    # but neither old nor new private prose belongs in an activity record.
+    detail_history: list[DetailChange] = field(default_factory=list[DetailChange])
     # Schema-4 boards without these records start with every card unarchived.
     # Cards, relationships, and all other history remain intact when hidden.
     archive_history: list[ArchiveChange] = field(default_factory=list[ArchiveChange])
@@ -2229,6 +2270,10 @@ class Board:
         if self.subject_history:
             out["subjectHistory"] = [
                 cast("JsonValue", change.to_json()) for change in self.subject_history
+            ]
+        if self.detail_history:
+            out["detailHistory"] = [
+                cast("JsonValue", change.to_json()) for change in self.detail_history
             ]
         if self.archive_history:
             out["archiveHistory"] = [change.to_json() for change in self.archive_history]
@@ -2320,6 +2365,7 @@ class Board:
             ),
             parent_history=_parent_history_from_json(raw.get("parentHistory", []), seen, where),
             subject_history=_subject_history_from_json(raw.get("subjectHistory", []), seen, where),
+            detail_history=_detail_history_from_json(raw.get("detailHistory", []), seen, where),
             archive_history=_archive_history_from_json(raw.get("archiveHistory", []), seen, where),
             users=users,
             browser_user=browser_user,
@@ -2468,6 +2514,11 @@ class Board:
         problems.extend(
             f"subjectHistory[{index}] names unknown actor {change.by!r}"
             for index, change in enumerate(self.subject_history)
+            if change.by not in known_actors
+        )
+        problems.extend(
+            f"detailHistory[{index}] names unknown actor {change.by!r}"
+            for index, change in enumerate(self.detail_history)
             if change.by not in known_actors
         )
         for item in self.items:
@@ -2830,10 +2881,10 @@ class Board:
         readable fashion"*. Nothing could try again. Claude could only apologize in a
         comment under the wall, which leaves the wall.
 
-        **No history entry, for the reason `set_priority` gives.** `verify()` replays
-        LANES and OWNERS, and prose is neither. **The audit trail for the text is git**
-        -- the board file is committed after every write, so the old description is one
-        `git diff` away and never rides in the JSON twice.
+        A privacy-safe `detailHistory` event records only card, actor, and time so
+        board-write monitors can attribute the mutation. **The audit trail for the
+        text itself is Git** -- the old description is one diff away and never rides
+        in the JSON twice.
 
         **An empty description is REFUSED.** Blanking a card is far more likely to be a
         shell that ate the argument than a thing somebody meant, and the old text is
@@ -2847,6 +2898,7 @@ class Board:
         if item.detail == text:
             return f"{item.label} description is already that text"
         item.detail = text
+        self.detail_history.append(DetailChange(at=now(), by=by, item_id=item.id))
         return f"{item.label} description: {was} -> {len(text)} chars (by {by})"
 
     def set_subject(self, item_id: str, subject: str, by: Actor) -> str:
@@ -4771,6 +4823,39 @@ def _subject_activity_events(
     return events
 
 
+def _detail_activity_events(
+    board: Board,
+    start: datetime.datetime,
+    end: datetime.datetime | None,
+) -> list[ActivityEvent]:
+    """Return actor-only description edits inside one inclusive window."""
+    events: list[ActivityEvent] = []
+    for index, change in enumerate(board.detail_history):
+        instant = _event_instant(change.at, f"detailHistory[{index}]")
+        if instant < start or (end is not None and instant > end):
+            continue
+        item = board.find(change.item_id)
+        events.append(
+            ActivityEvent(
+                ticket=item.ticket,
+                item_id=item.id,
+                kind="detail_changed",
+                at=change.at,
+                instant=instant,
+                by=change.by,
+                sequence=(
+                    len(item.history)
+                    + len(item.comments)
+                    + len(board.relationship_history)
+                    + len(board.parent_history)
+                    + len(board.subject_history)
+                    + index
+                ),
+            )
+        )
+    return events
+
+
 def _archive_activity_events(
     board: Board,
     start: datetime.datetime,
@@ -4797,6 +4882,7 @@ def _archive_activity_events(
                     + len(board.relationship_history)
                     + len(board.parent_history)
                     + len(board.subject_history)
+                    + len(board.detail_history)
                     + index
                 ),
             )
@@ -4921,6 +5007,7 @@ def activity_events(
             )
         )
     events.extend(_subject_activity_events(board, start, end))
+    events.extend(_detail_activity_events(board, start, end))
     events.extend(_archive_activity_events(board, start, end))
     return sorted(
         events, key=lambda event: (event.instant, event.ticket, event.sequence, event.kind)

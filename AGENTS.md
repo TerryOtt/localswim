@@ -89,6 +89,11 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   data, tests, and README together when a public route or persisted shape changes.
 - Preserve compatibility routes only where the code intentionally documents them;
   do not invent broad legacy aliases.
+- Description edits append sanitized `detailHistory` attribution (card ID, actor,
+  timestamp only), enabling the shared board-write monitor to suppress proven
+  bot-only description changes. Keep private old/new prose out of activity JSON;
+  Git remains the optional text-diff audit. Older schema-4 boards omit this field
+  until their first new edit. Unknown or unaudited writes still fail open to an alert.
 - Treat `README.md`, `docs/ORIENTATION.md`, `AGENTS.md`, `rules.json` descriptions,
   implementation docstrings, and tests as complementary documentation layers. Update
   every affected layer when a schema, route, invariant, or workflow changes.

@@ -160,7 +160,12 @@ timestamp, actor, and stable card ID. The optional schema-4 field begins with th
 rename made by a supporting build; no earlier events are fabricated. Neither subject
 value is duplicated into the event, so Git history remains the optional source for
 comparing text when the operator has deliberately arranged versioned board storage.
-Description and project edits do not receive their own board-history entries.
+Description changes similarly append optional schema-4 `detailHistory` entries with
+only timestamp, actor, and stable card ID. This lets a board-write monitor attribute
+`set-detail` mutations without reading or logging private prose; Git remains the
+source for comparing old and new text. Older boards have no fabricated detail history.
+Project edits and no-op writes still have no actor-only event, so a fail-closed
+monitor may alert on those even when Bot issued them.
 
 Archiving is independent of lane state. `Item.archived` defaults to false and is omitted
 from persisted cards while false. The optional schema-4 `archiveHistory` array records
@@ -344,7 +349,8 @@ private comment text. Its JSON report names the limit and deterministic ordering
 its command scope prevents combining it with another report or mutation.
 
 `activity since` and `activity between` merge creation, movement, assignment,
-priority, rename, comment, link, unlink, parent, unparent, archive, and unarchive records into an
+priority, rename, description change, comment, link, unlink, parent, unparent,
+archive, and unarchive records into an
 inclusive chronological report. Their RFC 3339 bounds must carry an explicit UTC
 offset.
 Relationship events name the caller-facing kind and opposite ticket endpoint;
@@ -353,6 +359,7 @@ intentionally omits card subjects, details, and comment text; JSON output is the
 composable without turning routine coordination into a prose export. Cross-array
 events recorded at the same instant have a deterministic tie-break order, because the
 snapshot cannot recover their original causal order.
+The `detail_changed` event carries only ticket, stable card ID, timestamp, and actor.
 
 New audit timestamps retain six fractional digits. That precision lets an external
 filesystem monitor use its exact preceding-signature observation as the next inclusive

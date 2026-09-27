@@ -138,6 +138,29 @@ def test_subject_change_records_attribution_without_prose(board: board_state.Boa
     assert len(board.subject_history) == 1
 
 
+def test_detail_change_records_actor_without_private_prose(board: board_state.Board) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot", detail="Private original detail")
+
+    board.set_detail("alpha", "Private replacement detail", "bot")
+
+    assert board.find("alpha").detail == "Private replacement detail"
+    assert board.detail_history == [
+        board_state.DetailChange(
+            at=board.detail_history[0].at,
+            by="bot",
+            item_id="alpha",
+        )
+    ]
+    event = board.detail_history[0].to_json()
+    assert event == {"at": board.detail_history[0].at, "by": "bot", "item": "alpha"}
+    assert "Private original" not in str(event)
+    assert "Private replacement" not in str(event)
+    assert board.verify() == []
+
+    board.set_detail("alpha", "Private replacement detail", "bot")
+    assert len(board.detail_history) == 1
+
+
 def test_comment_refuses_blank_text(board: board_state.Board) -> None:
     board.create("alpha", "Alpha", "backlog", "bot")
     with pytest.raises(board_state.BoardError, match="needs text"):

@@ -200,6 +200,8 @@ def test_every_cli_mutation_uses_service(served_board: pathlib.Path) -> None:
     assert item.comments[0].by == "bot"
     assert board.subject_history[0].by == "bot"
     assert board.subject_history[0].item_id == "a"
+    assert board.detail_history[0].by == "bot"
+    assert board.detail_history[0].item_id == "a"
     assert board.links == []
     assert board.find("b").parent is None
 
@@ -962,6 +964,40 @@ def test_activity_between_includes_only_rename_at_exact_bounds(tmp_path: pathlib
     ]
     assert "Private subject" not in result.stdout
     assert "Private renamed subject" not in result.stdout
+
+
+def test_activity_between_attributes_detail_without_exposing_prose(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    board = board_state.Board(
+        project="Activity", users=USERS, browser_user="terry", cli_user="bot", default_owner="bot"
+    )
+    board.create("alpha", "Alpha", "backlog", "bot", detail="Private original")
+    board.find("alpha").history[-1].at = "2026-08-24T09:00:00Z"
+    board.set_detail("alpha", "Private replacement", "bot")
+    board.detail_history[-1].at = "2026-08-24T10:00:00.123456Z"
+    board_state.save(board, path)
+
+    result = run_cli(
+        path,
+        "activity",
+        "between",
+        "2026-08-24T10:00:00.123456Z",
+        "2026-08-24T10:00:00.123456Z",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        {
+            "ticket": 1,
+            "id": "alpha",
+            "kind": "detail_changed",
+            "at": "2026-08-24T10:00:00.123456Z",
+            "by": "bot",
+        }
+    ]
+    assert "Private original" not in result.stdout
+    assert "Private replacement" not in result.stdout
 
 
 def test_activity_relationship_human_output_names_opposite_endpoint(

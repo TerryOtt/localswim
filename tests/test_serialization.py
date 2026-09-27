@@ -96,6 +96,48 @@ def test_subject_history_round_trips_without_subject_values(tmp_path: pathlib.Pa
     assert history_json == [{"at": "2026-08-24T10:00:00Z", "by": "bot", "item": "alpha"}]
 
 
+def test_detail_history_round_trips_without_description_values(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    board = saved_board(path)
+    board.set_detail("alpha", "Private replacement detail", "bot")
+    board.detail_history[-1].at = "2026-08-24T10:00:00.123456Z"
+    board_state.save(board, path)
+
+    loaded = board_state.load(path)
+
+    assert loaded.detail_history == [
+        board_state.DetailChange(
+            at="2026-08-24T10:00:00.123456Z",
+            by="bot",
+            item_id="alpha",
+        )
+    ]
+    event = cast("list[dict[str, Any]]", loaded.to_json()["detailHistory"])
+    assert event == [{"at": "2026-08-24T10:00:00.123456Z", "by": "bot", "item": "alpha"}]
+    assert "Private replacement detail" not in str(event)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("item", "missing", "unknown card"),
+        ("at", "", "has no at"),
+    ],
+)
+def test_invalid_detail_history_is_refused(
+    tmp_path: pathlib.Path, field: str, value: str, message: str
+) -> None:
+    path = tmp_path / "board.json"
+    board = saved_board(path)
+    board.set_detail("alpha", "Changed", "bot")
+    raw = editable_json(board)
+    raw["detailHistory"][0][field] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(board_state.BoardError, match=message):
+        board_state.load(path)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
