@@ -401,6 +401,8 @@ Important UI mechanics:
 - Hide explicitly archived cards regardless of the completed-card visibility toggle.
   The browser payload retains them for relationship navigation and open drawers, while
   lane/open counts and old-card counts exclude them. Archived drawers identify their status.
+- Render priority labels at 12px bold on cards and in the drawer. Every P0-P5
+  text/background pair exceeds the WCAG enhanced text-contrast requirement of 7:1.
 - Derive draggable edges, creatable lanes, labels, priorities, actors, and colors from
   server data rather than duplicating policy in JavaScript.
 

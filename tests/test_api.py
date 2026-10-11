@@ -3,6 +3,7 @@
 # ruff: noqa: SLF001 -- restart lifecycle tests intentionally inspect private state
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -139,6 +140,50 @@ def test_page_contains_guarded_auto_reload_and_state_restore(api: RunningApi) ->
     assert "document.getElementById('title').textContent = boardTitle;" in page
     assert "/v1/" not in page
     assert response.headers["Cache-Control"] == "no-store, max-age=0"
+
+
+def _contrast_luminance(color: str) -> float:
+    """Apply the WCAG sRGB linearization and relative-luminance weights."""
+    channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [
+        value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+        for value in channels
+    ]
+    return sum(
+        value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True)
+    )
+
+
+def _badge_color(value: str, variables: dict[str, str]) -> str:
+    """Resolve the served badge stylesheet's literal or custom-property color."""
+    variable = re.fullmatch(r"var\(--([a-z0-9-]+)\)", value)
+    color = variables[variable[1]] if variable else value
+    assert re.fullmatch(r"#[0-9A-Fa-f]{6}", color), f"unsupported badge color {color!r}"
+    return color
+
+
+def test_priority_badges_have_enhanced_text_contrast(api: RunningApi) -> None:
+    """Check the actual served palette rather than a separate expected-color table."""
+    with urllib.request.urlopen(api.base + "/", timeout=5) as response:
+        page = response.read().decode("utf-8")
+    variables = dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9A-Fa-f]{6})", page))
+    base = re.search(r"\.pri\s*\{([^}]+)\}", page)
+    assert base is not None
+    base_properties = dict(re.findall(r"([a-z-]+):\s*([^;]+)", base[1]))
+    badges = dict(re.findall(r"\.pri\.(P[0-5])\s*\{([^}]+)\}", page))
+    assert set(badges) == {f"P{index}" for index in range(6)}
+    for priority, declarations in badges.items():
+        properties = dict(re.findall(r"([a-z-]+):\s*([^;]+)", declarations))
+        foreground = _badge_color(properties.get("color", base_properties["color"]), variables)
+        background = _badge_color(properties["background"], variables)
+        luminances = sorted((_contrast_luminance(foreground), _contrast_luminance(background)))
+        ratio = (luminances[1] + 0.05) / (luminances[0] + 0.05)
+        assert ratio >= 7, f"{priority} contrast {ratio:.3f}:1 is below WCAG AAA's 7:1"
+    assert float(base_properties["font-size"].removesuffix("px")) >= 12
+    selector = re.search(r"#p-pri\s*\{([^}]+)\}", page)
+    assert selector is not None
+    selector_properties = dict(re.findall(r"([a-z-]+):\s*([^;]+)", selector[1]))
+    assert float(selector_properties["font-size"].removesuffix("px")) >= 12
 
 
 def test_dirty_build_id_includes_source_fingerprint(

@@ -1254,30 +1254,16 @@ PAGE = """<!doctype html>
      on near-black is nothing at all. A bright green is dim when faded and obvious
      when lit, which is what the heartbeat needs. */
   --livedot: #4BCE97;
-    /* **The comment badge's ground.** Atlassian's dark neutral, chosen so the badge
-     is unmistakably darker than the P3 pill (`#5E6C84`) and cannot be mistaken for
-     a priority. White on it measures about 7.5:1. */
+    /* The comment count uses white on a dark neutral, at about 7.5:1.
+       Its speech-bubble glyph distinguishes it from the priority labels. */
   --mark: #42526E;
-  /* **A LIGHTNESS RAMP, not only a hue ramp. Card #0088.** Terry asked whether these
-     colors were inclusive, after being burned presenting to a red-green colorblind
-     colonel.
-
-     **Two defects turned up and the second one was everybody's.** P1, P2, P4 and P5 all
-     FAILED WCAG AA against their own white text -- 3.30, 3.75, 3.10 and 1.95. That is a
-     readability bug for every reader, not only for a dichromat.
-
-     **Measured under simulated protanopia, deuteranopia and tritanopia**, the old P1 and
-     P2 sat 11 apart out of 255. Indistinguishable. P0 and P2 sat 33 apart.
-
-     **Hue is the channel dichromacy takes away; lightness is the one it leaves.** Each
-     step is now clearly darker or lighter than its neighbor, and the worst ADJACENT
-     separation across all three simulations is 56 rather than 11.
-
-     **The hues barely move**, because Terry reads red-to-amber-to-gray fluently already
-     and nothing here asks him to relearn it. The old red simply slides from P0 down to
-     P1, and P0 takes a deeper one. */
-  --p0: #8C1D12; --p1: #C9372C; --p2: #FFAB00;
-    --p3: #5E6C84; --p4: #8993A4; --p5: #C7CDD6;
+  /* Keep the urgency hues and explicit P0-P5 labels. The August contrast fix
+     cleared AA, but P1, P3 and P4 still read at only 5.16, 5.31 and 4.55:1.
+     Every priority label now exceeds 7.5:1, with white on dark backgrounds and
+     near-black on light ones. Priority ink is separate from the body text color. */
+  --p0: #8C1D12; --p1: #A2221B; --p2: #FFAB00;
+  --p3: #465267; --p4: #A0ACBE; --p5: #C7CDD6;
+  --pri-ink: #101820;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink);
@@ -1519,21 +1505,15 @@ PAGE = """<!doctype html>
   }
   .card.landed { animation: landed 1.1s ease-out; }
   .card:hover { background: #FAFBFC; }
-  .pri { font-size: 10px; font-weight: 700; color: #FFFFFF; border-radius: 3px;
-         padding: 1px 5px; letter-spacing: .02em; flex: 0 0 auto; margin-top: 1px; }
-  /* **The badge PICKS its text color, and that is what unlocked the ramp. Card #0088.**
-     Forcing white on every badge is what made four of the six unreadable, and it also
-     pinned every color into the narrow dark band where white works -- which is exactly
-     the band where red, orange and amber collapse into each other for a dichromat.
-
-     **Letting a light badge carry ink text buys the whole lightness range**, and the
-     ramp that defeats color blindness becomes possible. Measured: the worst badge now
-     reads at 4.55:1 against 1.95:1 before. */
+  .pri { font-size: 12px; font-weight: 700; color: #FFFFFF; border-radius: 3px;
+         padding: 2px 6px; letter-spacing: .02em; flex: 0 0 auto; margin-top: 1px; }
+  /* Twelve-pixel bold labels and enhanced contrast apply to cards and the
+     drawer selector. More than a bare AA pass is needed for these small tags. */
   .pri.P0 { background: var(--p0); } .pri.P1 { background: var(--p1); }
   .pri.P3 { background: var(--p3); }
-  .pri.P2 { background: var(--p2); color: var(--ink); }
-  .pri.P4 { background: var(--p4); color: var(--ink); }
-  .pri.P5 { background: var(--p5); color: var(--ink); }
+  .pri.P2 { background: var(--p2); color: var(--pri-ink); }
+  .pri.P4 { background: var(--p4); color: var(--pri-ink); }
+  .pri.P5 { background: var(--p5); color: var(--pri-ink); }
   /* **Three rows: badge and ticket, subject, then the comment count.** Terry:
      "display card number on same line as P1/P2 with description below it", then
      "drop the # in front of ticket number, move ticket number to top right and
@@ -1698,9 +1678,10 @@ PAGE = """<!doctype html>
      opens the list. */
   #panel .pri-wrap { position: relative; display: inline-flex; align-items: center; }
   #panel .pri-wrap::after { content: '\\25BE'; position: absolute; right: 5px;
-                            color: #FFFFFF; font-size: 9px; line-height: 1;
+                            color: #FFFFFF; font-size: 11px; line-height: 1;
                             pointer-events: none; }
-  #p-pri { appearance: none; -webkit-appearance: none; font: inherit; font-size: 10px;
+  #panel .pri-wrap:has(.P2, .P4, .P5)::after { color: var(--pri-ink); }
+  #p-pri { appearance: none; -webkit-appearance: none; font: inherit; font-size: 12px;
            font-weight: 700; border: 0; cursor: pointer;
            padding: 2px 16px 2px 6px; line-height: 1.35; }
   #p-pri:disabled { opacity: .5; cursor: wait; }
