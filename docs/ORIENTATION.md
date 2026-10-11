@@ -401,6 +401,9 @@ Important UI mechanics:
 - Hide explicitly archived cards regardless of the completed-card visibility toggle.
   The browser payload retains them for relationship navigation and open drawers, while
   lane/open counts and old-card counts exclude them. Archived drawers identify their status.
+- Match lane headings and IN/OUT rows to the tallest rendered row of each kind,
+  recalculating after repaint, resize, and font loading. Align card starts beneath
+  the Completed visibility control, without retaining excess height after widening.
 - Render priority labels at 12px bold on cards and in the drawer. Every P0-P5
   text/background pair exceeds the WCAG enhanced text-contrast requirement of 7:1.
 - Derive draggable edges, creatable lanes, labels, priorities, actors, and colors from

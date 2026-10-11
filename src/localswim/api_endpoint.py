@@ -3092,15 +3092,22 @@ function laneEl(lane) {
   return el;
 }
 
-// **One shared card horizon when the completed-lane control takes a row.** The
-// `Unhide old` control exists only while old cards are available, so permanently
-// reserving its height would waste space on every other board. Measuring the rendered
-// list edges avoids copying a font-dependent pixel height and also absorbs a wrapped
-// lane title. Clearing the previous padding first makes resize realignment idempotent.
+// Match headings and IN/OUT rows to the tallest rendered row of each kind.
+// Clear earlier minimums before measuring so a wider viewport can shrink them again.
+// Then preserve one card horizon beneath any Completed-lane visibility control.
 function alignCardStarts() {
   const board = document.getElementById('board');
+  const rows = ['.lane > h2', '.lane > .owner'].map(selector =>
+    Array.from(board.querySelectorAll(selector)));
   const lists = Array.from(board.querySelectorAll('.cards'));
+  for (const row of rows.flat()) row.style.minHeight = '';
   for (const list of lists) list.style.paddingTop = '';
+
+  for (const group of rows) {
+    if (!group.length) continue;
+    const height = Math.max(...group.map(row => row.getBoundingClientRect().height));
+    for (const row of group) row.style.minHeight = height + 'px';
+  }
   if (!lists.length || !board.querySelector('.unhide')) return;
 
   const target = Math.max(...lists.map(list => list.getBoundingClientRect().top));
@@ -3111,6 +3118,8 @@ function alignCardStarts() {
 }
 
 window.addEventListener('resize', alignCardStarts);
+document.fonts.ready.then(alignCardStarts);
+document.fonts.addEventListener('loadingdone', alignCardStarts);
 
 // **FLIP: First, Last, Invert, Play.** Terry wanted to watch Claude's moves happen
 // rather than see a card teleport: "a motion animation would be fun af for me to
