@@ -1266,7 +1266,10 @@ PAGE = """<!doctype html>
   --pri-ink: #101820;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
+  /* The viewport owns the layout; card lists own vertical scrolling. */
+  html { height: 100%; overflow: hidden; }
+  body { height: 100%; display: flex; flex-direction: column; overflow: hidden;
+         margin: 0; background: var(--bg); color: var(--ink);
          font: 14px/1.5 'Inter', 'Segoe UI', system-ui, sans-serif;
          font-feature-settings: 'cv05' 1, 'tnum' 1; }
 
@@ -1275,6 +1278,7 @@ PAGE = """<!doctype html>
      itself light-on-light against a dark parent unless the scheme is declared. **It
      keeps WORKING, which is exactly why it would have shipped broken.** */
   #bar { position: sticky; top: 0; z-index: 20; display: flex; gap: 14px;
+         flex: 0 0 auto; min-width: 0;
          align-items: center; padding: 9px 14px; background: var(--barbg);
          color: var(--barink); color-scheme: dark;
          border-bottom: 1px solid #000000; font-size: 12px; }
@@ -1284,6 +1288,7 @@ PAGE = """<!doctype html>
      Needs Terry. **The CTAs went white in #0054 and the metadata did not**, so the
      bar currently has two tiers on purpose rather than by omission. */
   #bar #live, #bar #alerts-wrap, #bar .meta { color: var(--bardim); }
+  #bar #live { min-width: 0; max-height: 3em; overflow: hidden; }
   /* The product wordmark and board name share the approved 15px title typography but
      have different emphasis. `localswim` uses the logo's light blue instead of white,
      so the static mark and word read as one product identity. The board name retains
@@ -1292,6 +1297,7 @@ PAGE = """<!doctype html>
                       white-space: nowrap; }
   #wordmark { color: #85B8FF; }
   #title { color: var(--barink); margin-left: 22px; }
+  #brandtitle, #title { flex-shrink: 0; }
   /* **ONLY CALLS TO ACTION LIVE HERE.** Terry: "No other stats up there, just
      calls to action." Open counts and in-progress counts were noise -- the lane
      headers already carry them, and a number that never asks for anything trains
@@ -1425,9 +1431,9 @@ PAGE = """<!doctype html>
      scrolls, which is the honest behavior for a window too small for the board.
      Leave the maximum width unconstrained so the lanes also fill wide viewports. */
   #board { display: flex; gap: 8px; padding: 10px; align-items: stretch;
-           overflow-x: auto; height: calc(100vh - 44px); }
+           overflow-x: auto; overflow-y: hidden; flex: 1 1 0; min-height: 0; min-width: 0; }
   .lane { background: var(--lane); border-radius: 8px;
-          flex: 1 1 0; min-width: 118px;
+          flex: 1 1 0; min-width: 118px; min-height: 0; overflow: hidden;
           display: flex; flex-direction: column;
           border-top: 3px solid var(--dim); }
   /* **Per-user lane accents are GENERATED, card #0072.** See `user_css()`. */
@@ -1479,7 +1485,7 @@ PAGE = """<!doctype html>
 
   .lane[data-css="handoff"] .owner { color: var(--handoff); }
 
-  .cards { padding: 0 8px 10px; overflow-y: auto; flex: 1; }
+  .cards { padding: 0 8px 10px; overflow-y: auto; flex: 1; min-height: 0; }
   .lane.over { outline: 2px solid var(--accent); outline-offset: -2px; }
   .lane.deny { outline: 2px dashed var(--p0); outline-offset: -2px; }
 
@@ -1595,7 +1601,7 @@ PAGE = """<!doctype html>
   #mk header { padding: 16px 20px 12px; border-bottom: 1px solid var(--line); }
   #mk h1 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
   #mk .where { color: var(--dim); font-size: 12px; margin-top: 5px; }
-  #mk .body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+  #mk .body { padding: 16px 20px; overflow-y: auto; flex: 1; min-height: 0; }
   #mk label { display: block; font-size: 11px; text-transform: uppercase;
               letter-spacing: .06em; color: var(--dim); font-weight: 700;
               margin: 0 0 5px; }
@@ -1688,7 +1694,7 @@ PAGE = """<!doctype html>
   /* The list itself is drawn by the OS and cannot inherit a white-on-color chip, so
      the options are given readable defaults rather than left half-styled. */
   #p-pri option { color: var(--ink); background: #FFFFFF; font-weight: 600; }
-  #panel .body { overflow-y: auto; padding: 16px 20px 24px; flex: 1; }
+  #panel .body { overflow-y: auto; padding: 16px 20px 24px; flex: 1; min-height: 0; }
   #panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
               color: var(--dim); margin: 22px 0 8px; }
   #panel h3:first-child { margin-top: 0; }
@@ -1811,6 +1817,8 @@ PAGE = """<!doctype html>
           font-size: 13px; cursor: pointer; }
 
   #banner { display: none; margin: 12px; padding: 14px 16px; background: #FFEBE6;
+            flex: 0 1 auto; min-height: 0; max-height: 40%; overflow: auto;
+            overflow-wrap: anywhere;
             border: 1px solid var(--p0); border-radius: 6px; font-size: 13px; }
   #banner.show { display: block; }
   .hint { color: var(--dim); font-size: 12px; margin-top: 4px; }
@@ -1857,7 +1865,7 @@ PAGE = """<!doctype html>
      means no repaint can reach it. Card #0061. */
   #find { background: #2C3238; color: var(--barink); border: 1px solid #3C444C;
           border-radius: 4px; padding: 3px 9px; font: inherit; font-size: 12px;
-          width: 190px; outline: none; }
+          width: 190px; min-width: 80px; outline: none; }
   #find::placeholder { color: var(--bardim); }
   #find:focus { border-color: #6B7684; background: #333A41; }
   #findn { color: var(--barink); font-size: 12px; font-weight: 700; white-space: nowrap; }

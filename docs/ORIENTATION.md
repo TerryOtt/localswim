@@ -401,6 +401,12 @@ Important UI mechanics:
 - Hide explicitly archived cards regardless of the completed-card visibility toggle.
   The browser payload retains them for relationship navigation and open drawers, while
   lane/open counts and old-card counts exclude them. Archived drawers identify their status.
+- Constrain the document to the viewport. The board fills space left by the actual
+  header and optional error banner; lane card lists scroll independently. A narrow
+  board can scroll horizontally inside its own region, and drawers, dialogs, and
+  long error banners retain their own scrolling without document scrollbars.
+  Keep project titles intact in split-monitor views by shrinking secondary status
+  text and the search field instead of wrapping the header controls.
 - Match lane headings and IN/OUT rows to the tallest rendered row of each kind,
   recalculating after repaint, resize, and font loading. Align card starts beneath
   the Completed visibility control, without retaining excess height after widening.
