@@ -60,6 +60,12 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   service and append to `archiveHistory`; default lists hide archived cards, while
   focused inspection, full snapshot exports, verification, and activity retain them.
 
+- Order every lane by descending longest downstream blocking-chain depth, ascending
+  priority number, then ascending ticket number. Blockers inherit the highest urgency
+  anywhere downstream, with audited promotion in the same transaction. Removing links
+  must not silently downgrade priorities. Only blocking relationships contribute;
+  hierarchy and other links do not. Keep browser and CLI ordering consistent.
+
 ## Code conventions
 
 - Target exactly the Python version in `.python-version` for development and CI

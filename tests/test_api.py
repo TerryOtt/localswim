@@ -843,3 +843,79 @@ def test_retired_mutation_route_returns_404(api: RunningApi) -> None:
         },
     )
     assert_http_error(request, 404)
+
+
+def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningApi) -> None:
+    for revision, (name, priority) in enumerate([("root", "P5"), ("middle", "P4"), ("leaf", "P1")]):
+        code, _ = request_json(
+            api.base + API + "/cards",
+            token=api_endpoint.CLI_TOKEN,
+            revision=revision,
+            body={"id": name, "subject": name, "state": "backlog", "priority": priority},
+        )
+        assert code == 200
+    for revision, (source, target) in enumerate([("middle", "leaf"), ("root", "middle")], start=3):
+        code, _ = request_json(
+            api.base + API + f"/cards/{source}/link",
+            token=api_endpoint.CLI_TOKEN,
+            revision=revision,
+            body={"kind": "blocks", "other": target},
+        )
+        assert code == 200
+    code, out = request_json(
+        api.base + API + "/cards/leaf/priority",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=5,
+        body={"priority": "P0"},
+    )
+    assert code == 200
+    assert out["revision"] == 6
+    saved = board_state.load(api.path)
+    assert all(item.priority == "P0" for item in saved.items)
+    assert all(item.history[-1].by == "terry" for item in saved.items)
+    code, payload = request_json(api.base + API + "/board")
+    assert code == 200
+    lane = next(lane for lane in payload["lanes"] if lane["state"] == "backlog")
+    assert [item["id"] for item in lane["items"]] == ["root", "middle", "leaf"]
+    assert [item["blockingDepth"] for item in lane["items"]] == [2, 1, 0]
+    assert payload["order"] == ["blockingDepthDesc", "priority", "ticket"]
+    events = len(saved.find("root").history)
+    code, out = request_json(
+        api.base + API + "/cards/root/priority",
+        token=api_endpoint.CLI_TOKEN,
+        revision=6,
+        body={"priority": "P5"},
+    )
+    assert code == 200
+    assert "using P0" in out["result"]
+    assert out["priority"] == "P0"
+    assert board_state.load(api.path).find("root").priority == "P0"
+    assert len(board_state.load(api.path).find("root").history) == events
+
+
+def test_failed_create_rolls_back_promoted_existing_blocker(api: RunningApi) -> None:
+    code, _ = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=0,
+        body={"id": "blocker", "subject": "Blocker", "state": "backlog", "priority": "P5"},
+    )
+    assert code == 200
+    before = api.path.read_bytes()
+    code, _ = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=1,
+        body={
+            "id": "urgent",
+            "subject": "Urgent",
+            "state": "backlog",
+            "priority": "P0",
+            "links": [
+                {"kind": "blocked_by", "other": "blocker"},
+                {"kind": "blocks", "other": "missing"},
+            ],
+        },
+    )
+    assert code == 409
+    assert api.path.read_bytes() == before

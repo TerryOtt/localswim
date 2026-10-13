@@ -50,6 +50,7 @@ import argparse
 import contextlib
 import copy
 import datetime
+import graphlib
 import hashlib
 import io
 import itertools
@@ -1469,23 +1470,121 @@ def now() -> str:
 _BEGINNING_OF_TIME = datetime.datetime.min.replace(tzinfo=datetime.UTC)
 
 
+def priority_ranks(policy: TransitionPolicy) -> dict[str, int]:
+    """P-number priorities compare numerically; named scales retain policy order."""
+    if all(re.fullmatch(r"P[0-9]+", priority) for priority in policy.priorities):
+        return {priority: int(priority[1:]) for priority in policy.priorities}
+    return {priority: index for index, priority in enumerate(policy.priorities)}
+
+
+def _blocking_finish_order(graph: Mapping[str, set[str]]) -> list[str]:
+    """Iterative DFS avoids recursion limits on long dependency chains."""
+    seen: set[str] = set()
+    finished: list[str] = []
+    for root in graph:
+        stack = [(root, False)]
+        while stack:
+            node, exiting = stack.pop()
+            if exiting:
+                finished.append(node)
+            elif node not in seen:
+                seen.add(node)
+                stack.append((node, True))
+                stack.extend((child, False) for child in graph[node] if child not in seen)
+    return finished
+
+
+def _blocking_components(graph: Mapping[str, set[str]]) -> list[set[str]]:
+    """Collapse cycles so every member shares one finite blocking rank."""
+    reverse: dict[str, set[str]] = {node: set() for node in graph}
+    for parent, children in graph.items():
+        for child in children:
+            reverse[child].add(parent)
+    assigned: set[str] = set()
+    groups: list[set[str]] = []
+    for root in reversed(_blocking_finish_order(graph)):
+        if root in assigned:
+            continue
+        group: set[str] = set()
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node in assigned:
+                continue
+            assigned.add(node)
+            group.add(node)
+            stack.extend(reverse[node] - assigned)
+        groups.append(group)
+    return groups
+
+
+@dataclass(frozen=True)
+class BlockingOrder:
+    """Derived depths and inherited priorities; no extra persisted graph state."""
+
+    depths: dict[str, int]
+    priorities: dict[str, str]
+
+
+def blocking_order(
+    board: Board,
+    priority_overrides: Mapping[str, str] | None = None,
+) -> BlockingOrder:
+    """Longest downstream blocks-chain and highest urgency anywhere downstream.
+
+    All stored cards participate, across lanes and regardless of archive state. Cyclic
+    groups share a rank and highest inherited urgency; other relationship kinds and
+    parent/child hierarchy do not create blocking edges.
+    """
+    graph: dict[str, set[str]] = {item.id: set() for item in board.items}
+    for link in board.links:
+        if link.kind == "blocks":
+            graph[link.frm].add(link.to)
+    groups = _blocking_components(graph)
+    group_by_id = {node: index for index, group in enumerate(groups) for node in group}
+    dependencies: dict[int, set[int]] = {index: set() for index in range(len(groups))}
+    for parent, children in graph.items():
+        source = group_by_id[parent]
+        dependencies[source].update(
+            group_by_id[child] for child in children if group_by_id[child] != source
+        )
+    ranks = priority_ranks(board.policy)
+    overrides = priority_overrides or {}
+    priorities = {item.id: overrides.get(item.id, item.priority) for item in board.items}
+    depths: dict[int, int] = {}
+    inherited: dict[int, str] = {}
+    sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter(dependencies)
+    for group_id in sorter.static_order():
+        children = dependencies[group_id]
+        depths[group_id] = max((depths[child] + 1 for child in children), default=0)
+        candidates = [priorities[node] for node in groups[group_id]]
+        candidates.extend(inherited[child] for child in children)
+        inherited[group_id] = min(
+            candidates, key=lambda priority: (ranks[priority], len(priority), priority)
+        )
+    return BlockingOrder(
+        depths={node: depths[group_by_id[node]] for node in graph},
+        priorities={
+            node: priorities[node]
+            if ranks[priorities[node]] == ranks[inherited[group_by_id[node]]]
+            else inherited[group_by_id[node]]
+            for node in graph
+        },
+    )
+
+
 def item_order_key(
     item: Item,
     policy: TransitionPolicy,
-) -> tuple[int, int]:
-    """Return the one deterministic card order used by lanes and focused queries.
-
-    The order is policy priority, then ticket number. Tickets are allocated
-    monotonically, so their numeric order is creation order without parsing mutable or
-    legacy audit timestamps. Keeping this comparator shared prevents a CLI triage query
-    from disagreeing with the same cards on the board.
-    """
-    rank = (
-        policy.priorities.index(item.priority)
-        if item.priority in policy.priorities
-        else len(policy.priorities)
+    depths: Mapping[str, int] | None = None,
+) -> tuple[int, int, int]:
+    """Descending blocking depth, ascending priority number, then ascending ticket."""
+    ranks = priority_ranks(policy)
+    return (
+        -(depths or {}).get(item.id, 0),
+        ranks.get(item.priority, max(ranks.values()) + 1),
+        item.ticket,
     )
-    return (rank, item.ticket)
 
 
 def parse_stamp(raw: str | None) -> datetime.datetime:
@@ -1550,10 +1649,11 @@ def total_order_problems(board: Board) -> list[str]:
     """
     problems: list[str] = []
 
+    depths = blocking_order(board).depths
     for lane in board.lanes():
-        keys = [item_order_key(item, board.policy) for item in lane.items]
+        keys = [item_order_key(item, board.policy, depths) for item in lane.items]
         problems.extend(
-            f"{lane.label}: #{before[1]:04d} and #{after[1]:04d} do not order"
+            f"{lane.label}: #{before[2]:04d} and #{after[2]:04d} do not order"
             for before, after in itertools.pairwise(keys)
             if before >= after
         )
@@ -2404,13 +2504,14 @@ class Board:
         raise BoardError(f"no item with id {ref!r}")
 
     def lanes(self, *, include_archived: bool = False) -> list[Lane]:
-        """Return lanes whose cards use the shared priority-then-ticket order.
+        """Return lanes using the shared blocking-depth, priority, and ticket order.
 
-        Policy priority is primary. The monotonically allocated ticket number is both
-        creation order and the unique tie-breaker. This total comparator keeps cards
-        stable across the browser's frequent repaints and is shared with CLI triage.
+        Descending blocking depth is primary, then ascending priority number and
+        monotonically allocated ticket number. Depths include dependencies in other
+        lanes, and the same comparator is shared with CLI triage.
         """
 
+        depths = blocking_order(self).depths
         buckets: dict[str, list[Item]] = {state: [] for state in self.policy.states}
         for item in self.items:
             if item.archived and not include_archived:
@@ -2424,7 +2525,7 @@ class Board:
                 lane_owner_label(state, self.policy),
                 sorted(
                     buckets.get(state, []),
-                    key=lambda item: item_order_key(item, self.policy),
+                    key=lambda item: item_order_key(item, self.policy, depths),
                 ),
             )
             for state, label in self.policy.lanes
@@ -2511,6 +2612,11 @@ class Board:
         ]
         problems.extend(self._parent_history_problems(known_actors))
         problems.extend(self._archive_history_problems())
+        problems.extend(
+            f"{item_id}: blocker priority is below required {priority}; "
+            "start the board service to reconcile dependency priorities"
+            for item_id, priority in self.dependency_priority_promotions().items()
+        )
         problems.extend(
             f"subjectHistory[{index}] names unknown actor {change.by!r}"
             for index, change in enumerate(self.subject_history)
@@ -2648,39 +2754,54 @@ class Board:
         self.items.append(item)
         return f"created {item.label} {item_id} in {state} (by {by})"
 
+    def _apply_priority_targets(self, targets: Mapping[str, str], by: Actor) -> tuple[str, ...]:
+        """Record every actual priority change once, in deterministic ticket order."""
+        changed: list[str] = []
+        at = now()
+        for item in sorted(self.items, key=lambda item: item.ticket):
+            target = targets[item.id]
+            if item.priority == target:
+                continue
+            item.history.append(
+                Change(at=at, to="", by=by, priority_frm=item.priority, priority_to=target)
+            )
+            item.priority = target
+            changed.append(item.id)
+        return tuple(changed)
+
+    def dependency_priority_promotions(self) -> dict[str, str]:
+        """Only higher urgency is inherited; removing a dependency never demotes."""
+        targets = blocking_order(self).priorities
+        return {
+            item.id: targets[item.id] for item in self.items if item.priority != targets[item.id]
+        }
+
+    def enforce_dependency_priorities(self, by: Actor) -> tuple[str, ...]:
+        """Promote all blockers transitively, preserving links and lane state."""
+        return self._apply_priority_targets(blocking_order(self).priorities, by)
+
     def set_priority(self, item_id: str, priority: str, by: Actor) -> str:
-        """Change one card's priority, and RECORD IT. Cards #0060 and #0070.
-
-        **This used to write no history entry, and Terry caught it.** He dropped #0037
-        to P5, saw it move up its lane in the page, opened the card, and found nothing
-        explaining the move: *"no breadcrumbs of it in Audit Log."*
-
-        **The old reasoning was real and it was outweighed.** An entry with neither a
-        lane nor an owner is a third shape for `verify()` to learn -- true, and it valued
-        the checker's simplicity over the one reader the log exists for. **A card that
-        moves for no visible reason is exactly what an audit trail is supposed to
-        prevent.**
-
-        **Write the log first, then the field**, for the same reason `move()` and
-        `assign()` do: a change that never reached the trail is indistinguishable from
-        tampering.
-
-        **A no-op writes NOTHING.** Setting P3 on a P3 card is not an event, and the
-        same rule already governs reassignment.
-
-        **Either actor may set it, and there is no permission check.** Terry decides what
-        matters; Claude files cards and gets the guess wrong sometimes. A permission here
-        would only make a correction need a round trip.
-        """
+        """Apply the requested priority subject to downstream urgency, with audit."""
         if priority not in self.policy.priorities:
-            raise BoardError(f"unknown priority {priority!r}; want one of {', '.join(PRIORITIES)}")
+            raise BoardError(
+                f"unknown priority {priority!r}; want one of {', '.join(self.policy.priorities)}"
+            )
         item = self.find(item_id)
         was = item.priority
-        if was == priority:
-            return f"{item.label} is already {priority}"
-        item.history.append(Change(at=now(), to="", by=by, priority_frm=was, priority_to=priority))
-        item.priority = priority
-        return f"{item.label} priority: {was} -> {priority} (by {by})"
+        targets = blocking_order(self, {item.id: priority}).priorities
+        changed = self._apply_priority_targets(targets, by)
+        effective = item.priority
+        result = (
+            f"{item.label} is already {effective}"
+            if was == effective
+            else f"{item.label} priority: {was} -> {effective} (by {by})"
+        )
+        if effective != priority:
+            result += f"; requested {priority}, using {effective} for blocking dependencies"
+        upstream = len(changed) - int(item.id in changed)
+        if upstream:
+            result += f"; promoted {upstream} blocker(s)"
+        return result
 
     # ---- relationships, card #0028 -------------------------------------------
 
@@ -2781,6 +2902,7 @@ class Board:
                 to=b.id,
             )
         )
+        self.enforce_dependency_priorities(by)
         return f"{a.label} {kind} {b.label} (by {by})"
 
     def replace_link(
@@ -2825,6 +2947,7 @@ class Board:
                 ),
             )
         )
+        self.enforce_dependency_priorities(by)
         return f"{a.label} relationship to {b.label}: {old_kind} -> {new_kind} (by {by})"
 
     def find_link(self, frm: str, kind: str, to: str) -> Link | None:
@@ -3555,6 +3678,7 @@ def embed_policy(path: pathlib.Path, policy_path: pathlib.Path) -> str:
         raw["schema"] = SCHEMA
         raw["policy"] = policy.to_json()
         migrated = Board.from_json(raw, str(target))
+        migrated.enforce_dependency_priorities(migrated.cli_user)
         if problems := migrated.verify():
             raise BoardError(
                 f"{target}: embedded-policy board does not verify: {'; '.join(problems)}"
@@ -3626,6 +3750,7 @@ def add_lane(
                     ({"from": other_id, "to": lane_id}, {"from": lane_id, "to": other_id})
                 )
         changed = Board.from_json(raw, str(target))
+        changed.enforce_dependency_priorities(changed.cli_user)
         if problems := changed.verify():
             raise BoardError(f"{target}: added lane does not verify: {'; '.join(problems)}")
         changed.revision += 1
@@ -3705,6 +3830,7 @@ def migrate_lane_id(path: pathlib.Path, source: str, destination: str) -> str:
         policy_replacements = _rewrite_policy_lane_id(policy, target, source, destination)
         board_replacements = _rewrite_lane_values(target, raw, source, destination)
         migrated = Board.from_json(raw, str(target))
+        migrated.enforce_dependency_priorities(migrated.cli_user)
         if problems := migrated.verify():
             raise BoardError(f"{target}: migrated history does not replay: {'; '.join(problems)}")
         migrated.revision += 1
@@ -3775,6 +3901,7 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
         raw["schema"] = SCHEMA
         raw["policy"] = _POLICY.to_json()
         migrated = Board.from_json(raw, str(target))
+        migrated.enforce_dependency_priorities(migrated.cli_user)
         if problems := migrated.verify():
             raise BoardError(f"{target}: migrated history does not replay: {'; '.join(problems)}")
         migrated.revision += 1
@@ -4660,6 +4787,7 @@ def inspect_next_items(
             f"{', '.join(unknown)}; want one or more of {', '.join(board.policy.states)}"
         )
 
+    depths = blocking_order(board).depths
     selected = frozenset(lanes)
     items = sorted(
         (
@@ -4667,7 +4795,7 @@ def inspect_next_items(
             for item in board.items
             if item.state in selected and (include_archived or not item.archived)
         ),
-        key=lambda item: item_order_key(item, board.policy),
+        key=lambda item: item_order_key(item, board.policy, depths),
     )[:limit]
     return tuple(inspect_item(board, item.id, include_comments=include_comments) for item in items)
 
@@ -4715,6 +4843,7 @@ def inspect_search_items(
     needle = normalized_query.casefold()
     ticket_text = needle.removeprefix("#")
     ticket_query = int(ticket_text) if ticket_text.isdecimal() else None
+    depths = blocking_order(board).depths
     selected = frozenset(selected_lanes)
     items = sorted(
         (
@@ -4729,7 +4858,7 @@ def inspect_search_items(
                 include_comments=include_comments,
             )
         ),
-        key=lambda item: item_order_key(item, board.policy),
+        key=lambda item: item_order_key(item, board.policy, depths),
     )
     return tuple(inspect_item(board, item.id, include_comments=include_comments) for item in items)
 
@@ -5219,7 +5348,7 @@ def _report_next_items(  # noqa: PLR0913 -- explicit selection and output option
         payload: JsonObject = {
             "lanes": list(selected_lanes),
             "limit": limit,
-            "order": ["policyPriority", "ticket"],
+            "order": ["blockingDepthDesc", "priority", "ticket"],
             "items": [cast("JsonValue", _next_item_json(inspection)) for inspection in inspections],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -5230,7 +5359,7 @@ def _report_next_items(  # noqa: PLR0913 -- explicit selection and output option
 
     print(
         f"Next {len(inspections)} card(s) from {', '.join(selected_lanes)} "
-        "(policy priority, then ticket):"
+        "(blocking depth, then priority, then ticket):"
     )
     for inspection in inspections:
         print()
@@ -5270,7 +5399,7 @@ def _report_search_items(  # noqa: PLR0913 -- explicit selection and output opti
             "query": query,
             "lanes": list(selected_lanes),
             "searchedFields": fields,
-            "order": ["policyPriority", "ticket"],
+            "order": ["blockingDepthDesc", "priority", "ticket"],
             "items": [cast("JsonValue", _next_item_json(inspection)) for inspection in inspections],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -5281,7 +5410,7 @@ def _report_search_items(  # noqa: PLR0913 -- explicit selection and output opti
 
     print(
         f"Search matched {len(inspections)} card(s) for {query!r} in "
-        f"{', '.join(selected_lanes)} (policy priority, then ticket):"
+        f"{', '.join(selected_lanes)} (blocking depth, then priority, then ticket):"
     )
     for inspection in inspections:
         print()

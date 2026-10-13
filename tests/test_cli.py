@@ -362,6 +362,7 @@ def activity_board(path: pathlib.Path) -> None:
     board.find("beta").history[-1].at = "2026-08-23T10:06:00Z"
     board.link("alpha", "blocked_by", "beta", "bot")
     board.relationship_history[-1].at = "2026-08-23T10:07:00Z"
+    board.find("beta").history[-1].at = "2026-08-23T10:07:00Z"
     board.unlink("alpha", "blocked_by", "beta", "bot")
     board.relationship_history[-1].at = "2026-08-23T10:08:00Z"
     board.set_parent("alpha", "beta", "bot")
@@ -446,7 +447,7 @@ def test_show_json_resolves_ticket_and_relationships_without_private_text(
                 "ticket": 4,
                 "subject": "Blocker subject",
                 "state": "ready_for_work",
-                "priority": "P2",
+                "priority": "P1",
                 "owner": "bot",
             },
         }
@@ -543,15 +544,16 @@ def test_next_json_uses_shared_total_order_and_returns_focused_details(
     assert report["lanes"] == ["ready_for_work", "backlog"]
     assert report["limit"] == 3
     assert report["order"] == [
-        "policyPriority",
+        "blockingDepthDesc",
+        "priority",
         "ticket",
     ]
     items = cast("list[dict[str, Any]]", report["items"])
-    assert [item["id"] for item in items] == ["focus", "blocker", "parent"]
-    assert items[0]["commentCount"] == 1
-    assert items[0]["childCount"] == 1
+    assert [item["id"] for item in items] == ["blocker", "focus", "parent"]
+    assert items[1]["commentCount"] == 1
+    assert items[1]["childCount"] == 1
     assert "children" not in items[0]
-    assert cast("list[dict[str, Any]]", items[0]["relationships"])[0]["kind"] == "blocked_by"
+    assert cast("list[dict[str, Any]]", items[1]["relationships"])[0]["kind"] == "blocked_by"
     assert "detail" not in items[0]
     assert "comments" not in items[0]
     assert "Private focused detail" not in result.stdout
@@ -568,7 +570,7 @@ def test_next_human_output_exposes_details_and_comments_when_requested(
         path,
         "card",
         "next",
-        "1",
+        "2",
         "--lane",
         "backlog",
         "--lane",
@@ -578,7 +580,7 @@ def test_next_human_output_exposes_details_and_comments_when_requested(
         path,
         "card",
         "next",
-        "1",
+        "2",
         "--lane",
         "backlog",
         "--lane",
@@ -587,7 +589,8 @@ def test_next_human_output_exposes_details_and_comments_when_requested(
     )
 
     assert safe.returncode == 0, safe.stderr
-    assert "policy priority, then ticket" in safe.stdout
+    assert "blocking depth, then priority, then ticket" in safe.stdout
+    assert safe.stdout.index("#0004 blocker") < safe.stdout.index("#0002 focus")
     assert "#0002 focus" in safe.stdout
     assert "children: 1" in safe.stdout
     assert "blocked_by: #0004 blocker" in safe.stdout
@@ -663,9 +666,9 @@ def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
     assert report["query"] == "SUBJECT"
     assert report["lanes"] == ["ready_for_work", "backlog"]
     assert report["searchedFields"] == ["id", "ticket", "subject"]
-    assert report["order"] == ["policyPriority", "ticket"]
+    assert report["order"] == ["blockingDepthDesc", "priority", "ticket"]
     items = cast("list[dict[str, Any]]", report["items"])
-    assert [item["id"] for item in items] == ["focus", "blocker", "parent", "child"]
+    assert [item["id"] for item in items] == ["blocker", "focus", "parent", "child"]
     assert all("detail" not in item for item in items)
     assert all("comments" not in item for item in items)
 
@@ -869,6 +872,7 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
         "commented",
         "created",
         "linked",
+        "prioritized",
         "unlinked",
         "parented",
         "unparented",

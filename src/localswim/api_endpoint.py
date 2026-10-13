@@ -815,6 +815,18 @@ class BoardStore:
         self._mutex = threading.RLock()
         self._board = board_state.load(path, policy)
         self.policy = self._board.policy
+        self._reconcile_dependency_priorities()
+
+    def _reconcile_dependency_priorities(self) -> None:
+        """Adopt the new rule through one audited, revision-checked transaction."""
+        if not self._board.dependency_priority_promotions():
+            return
+
+        def reconcile(board: board_state.Board) -> str:
+            promoted = board.enforce_dependency_priorities(board.cli_user)
+            return f"promoted {len(promoted)} blocker(s)"
+
+        self.execute(self._board.revision, reconcile)
 
     def snapshot(self) -> board_state.Board:
         """Return an isolated current snapshot, refreshing valid external edits."""
@@ -822,7 +834,8 @@ class BoardStore:
             board = board_state.load(self.path, self.policy if self._external_policy else None)
             self.policy = board.policy
             self._board = board
-            return copy.deepcopy(board)
+            self._reconcile_dependency_priorities()
+            return copy.deepcopy(self._board)
 
     def execute(
         self, expected_revision: int, command: Callable[[board_state.Board], str]
@@ -837,6 +850,9 @@ class BoardStore:
                         f"{expected_revision}; refresh and try again"
                     )
                 result = command(candidate)
+                promoted = candidate.enforce_dependency_priorities(candidate.cli_user)
+                if promoted:
+                    result += f"; promoted {len(promoted)} blocker(s)"
                 problems = candidate.verify()
                 if problems:
                     raise board_state.BoardError(
@@ -2783,11 +2799,12 @@ document.getElementById('p-owner').addEventListener('click', async () => {
 // rather than left showing a value the board never accepted.
 document.getElementById('p-pri').addEventListener('change', async (ev) => {
   if (!openId) return;
+  const changingId = openId;
   const pri = ev.target;
   const wanted = pri.value;
   pri.disabled = true;
   try {
-    const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(openId) + '/priority',
+    const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(changingId) + '/priority',
                               {priority: wanted});
     const out = await res.json();
     acceptRevision(out);
@@ -2796,6 +2813,19 @@ document.getElementById('p-pri').addEventListener('change', async (ev) => {
       const it = itemById(openId);
       if (it) pri.value = it.priority;
       return;
+    }
+    if (typeof out.priority === 'string') {
+      const saved = itemById(changingId);
+      const selected = (data.priorities || []).find(p => p.id === out.priority);
+      if (saved) {
+        saved.priority = out.priority;
+        saved.priorityLabel = selected ? selected.label : out.priority;
+      }
+      if (openId === changingId) {
+        pri.value = out.priority;
+        pri.className = 'pri ' + out.priority;
+        pri.title = selected ? selected.label : out.priority;
+      }
     }
     toast(out.result);
     seen = null;
@@ -3828,6 +3858,7 @@ def payload() -> bytes:
     # Retain archived cards for relationship lookups and existing open drawers.
     # Only active cards contribute to lane rendering, counts, and search matches.
     lanes = board.lanes(include_archived=True)
+    depths = board_state.blocking_order(board).depths
     policy = board.policy
     browser_edges = policy.edges_for(board.browser_user)
 
@@ -3864,6 +3895,7 @@ def payload() -> bytes:
         {
             "revision": board.revision,
             "project": board.project,
+            "order": ["blockingDepthDesc", "priority", "ticket"],
             "lanes": [
                 {
                     "state": lane.state,
@@ -3886,6 +3918,7 @@ def payload() -> bytes:
                             "laneLabel": lane.label,
                             "subject": item.subject,
                             "priority": item.priority,
+                            "blockingDepth": depths[item.id],
                             **({"archived": True} if item.archived else {}),
                             "priorityLabel": policy.priority_label.get(item.priority, ""),
                             # **Card #0063.** Computed on the SERVER so one clock decides it, and
@@ -3925,9 +3958,8 @@ def payload() -> bytes:
                                 for c in item.comments
                             ],
                             # **Newest first.** Terry: "needs to be newest at top (most
-                            # relevant) to oldest at bottom." The Completed lane already
-                            # reverses for the same reason -- the interesting end of a
-                            # permanent record is the recent end, and a long trail otherwise
+                            # relevant) to oldest at bottom." The interesting end of the
+                            # audit record is the recent end, and a long trail otherwise
                             # buries the entry you opened the card to read.
                             #
                             # **Reversed HERE rather than in `board_state.py`.** The stored order is
@@ -4336,8 +4368,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"error": "board store is not initialized"}, 409)
                 return
 
+            effective_priority: str | None = None
+
             def mutate(board: board_state.Board) -> str:
-                return _apply_http_command(board, command_parts, body, actor, store.policy)
+                nonlocal effective_priority
+                result = _apply_http_command(board, command_parts, body, actor, store.policy)
+                if is_card_command and command_parts[2] == "priority":
+                    effective_priority = board.find(command_parts[1]).priority
+                return result
 
             try:
                 result, revision = store.execute(expected, mutate)
@@ -4352,7 +4390,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
         print(f"  {result}", flush=True)
-        self._json({"result": result, "revision": revision})
+        self._json(
+            {
+                "result": result,
+                "revision": revision,
+                **({"priority": effective_priority} if effective_priority is not None else {}),
+            }
+        )
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002, ARG002
         # **The parameter names are the base class's and MUST NOT be renamed.** A

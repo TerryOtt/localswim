@@ -128,10 +128,11 @@ uv run --frozen localswim-cli boards/my-project.json card next 5 --lane needs_te
 uv run --frozen localswim-cli boards/my-project.json card next 10 --lane ready_for_work --lane needs_terry_action --json
 ~~~
 
-The ordering contract is deliberately front and center: **embedded-policy priority
-first, then monotonically allocated ticket number**. Ticket number is creation order
-and the unique tie-breaker. Lane order only filters candidates; it never outranks card
-priority. Each result includes focused identity and status, its parent, child count,
+Every lane and focused query uses **descending blocking depth, ascending priority
+number, then ascending ticket number**. Blocking depth is the longest downstream chain
+of `blocks` relationships across the whole board: A blocks B blocks C gives depths
+A=2, B=1, C=0. A card with no downstream blockers has depth 0. Ticket number is the
+unique tie-breaker. Lane order only filters candidates; it never changes the ranking. Each result includes focused identity and status, its parent, child count,
 and directional relationships. Use `card show` when the full child list is useful. Detail
 and comments remain absent unless `--include-comments` is supplied explicitly.
 
@@ -147,7 +148,7 @@ Search is case-insensitive. Stable IDs and subjects use substring matching; a nu
 or `#NNNN` query matches that exact ticket number. All lanes are searched unless a
 repeatable `--lane` option filters them. Default matching and output exclude details and comments;
 `--include-comments` explicitly adds both to the search surface and the results. Matches
-use the same embedded-policy priority then monotonic-ticket ordering as `card next`.
+use the same embedded-policy blocking-depth, priority, and ticket ordering as `card next`.
 
 Catch up on the newest board comments without choosing a time boundary:
 
@@ -266,6 +267,34 @@ Verification and activity reports also retain archived cards; activity records
 Archiving is an optional schema-4 extension: older boards start with no archived cards.
 The snapshot stores a card's `archived` flag only when true and an append-only
 `archiveHistory` array after the first archive operation.
+
+## Dependency priority inheritance
+
+A blocker must have at least the urgency of every card downstream of it. Linking a
+P5 blocker to a P1 card promotes it to P1; if that card later becomes P0, every ancestor
+is promoted to P0 too. Both `blocks` and `blocked_by` use this rule. Other relationship
+kinds and parent/child hierarchy do not affect blocking order or priority inheritance.
+
+Promotions are persisted with ordinary priority-history entries, attributed to the
+actor who made the relationship or priority change, inside the same atomic revision.
+A requested priority below a downstream requirement is clamped to that requirement,
+and the command result explains the effective priority. Removing a link or lowering
+a downstream priority never silently demotes a blocker; a later explicit priority
+change can lower it if its remaining dependencies permit that change.
+
+Depths and priority requirements include all stored cards, including completed and
+archived cards. Existing blocking cycles are kept intact: members share one rank and
+the highest priority required by their group or descendants. The graph is traversed
+iteratively, so long chains do not depend on Python's recursion limit.
+
+The live service reconciles older boards on startup, and reconciles valid externally
+replaced snapshots when reading them, through audited, revision-checked transactions
+attributed to `cliUser`. Offline CLI reads never rewrite the snapshot. If verification
+finds an older blocker below its required priority, start the service to reconcile it.
+Controlled offline lane/policy migrations also reconcile dependency priorities in
+their existing transaction. No new persisted fields or schema migration are required. When priorities use IDs
+such as P0 through P5, their numeric values define urgency; named priority scales use
+their embedded policy order.
 
 ## Transition permissions
 
