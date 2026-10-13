@@ -275,6 +275,13 @@ P5 blocker to a P1 card promotes it to P1; if that card later becomes P0, every 
 is promoted to P0 too. Both `blocks` and `blocked_by` use this rule. Other relationship
 kinds and parent/child hierarchy do not affect blocking order or priority inheritance.
 
+Adding or changing a relationship to `blocked_by` also raises the current card to the
+blocker's priority if the blocker is more urgent. For example, adding a P1 blocker to
+a P5 card accepts the relationship and promotes the current card to P1, along with
+its existing blockers. Priority differences never prevent adding a relationship.
+This promotion happens when adding the relationship; subsequent priority edits keep
+the downstream-to-blocker inheritance rule above.
+
 Promotions are persisted with ordinary priority-history entries, attributed to the
 actor who made the relationship or priority change, inside the same atomic revision.
 A requested priority below a downstream requirement is clamped to that requirement,

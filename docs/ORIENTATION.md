@@ -134,6 +134,10 @@ priority; the condensed DAG is processed without recursive traversal.
 component. Relationship mutations and `set_priority()` apply all promotions with
 ordinary priority audit entries in the actor's transaction. Requested lower urgency is
 clamped before recording changes. Unlinking never demotes cards automatically.
+Adding or replacing with caller-facing `blocked_by` first seeds the current card
+with the blocker's higher urgency, then calculates all upstream targets before
+recording history. Priority differences do not reject a relationship. This is an
+insertion-time promotion, not ongoing inheritance from blockers to blocked cards.
 `verify()` reports an unsatisfied dependency requirement. `BoardStore` reconciles old
 boards at startup and replaced snapshots on read through its normal locked transaction,
 using `cliUser` for these rule-adoption events. It advances revision only when a

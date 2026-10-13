@@ -103,6 +103,48 @@ def test_blocked_by_and_relationship_replacement_propagate(board: board_state.Bo
     assert board.find("blocker").priority == "P0"
 
 
+@pytest.mark.parametrize("replace", [False, True])
+@pytest.mark.parametrize(
+    ("current_priority", "blocker_priority", "expected"),
+    [("P5", "P1", "P1"), ("P0", "P5", "P0"), ("P2", "P2", "P2")],
+)
+def test_blocked_by_accepts_and_promotes_current_card_or_blocker(
+    board: board_state.Board,
+    *,
+    replace: bool,
+    current_priority: str,
+    blocker_priority: str,
+    expected: str,
+) -> None:
+    board.create("current", "Current", "backlog", "bot", priority=current_priority)
+    board.create("blocker", "Blocker", "backlog", "bot", priority=blocker_priority)
+    board.create("ancestor", "Ancestor", "backlog", "bot", priority="P5")
+    board.link("ancestor", "blocks", "current", "bot")
+    before = {item.id: (item.priority, len(item.history)) for item in board.items}
+    if replace:
+        board.link("current", "references", "blocker", "bot")
+        board.replace_link("current", "references", "blocked_by", "blocker", "terry")
+    else:
+        board.link("current", "blocked_by", "blocker", "terry")
+    assert board.find_link("blocker", "blocks", "current") is not None
+    assert board.find_link("current", "references", "blocker") is None
+    assert all(item.priority == expected for item in board.items)
+    for item in board.items:
+        old_priority, events = before[item.id]
+        changed = old_priority != expected
+        assert len(item.history) == events + int(changed)
+        if changed:
+            assert item.history[-1].by == "terry"
+            assert item.history[-1].priority_frm == old_priority
+            assert item.history[-1].priority_to == expected
+    before_repeat = board.to_json()
+    board.link("current", "blocked_by", "blocker", "terry")
+    assert board.to_json() == before_repeat
+    board.unlink("current", "blocked_by", "blocker", "terry")
+    assert all(item.priority == expected for item in board.items)
+    assert board.verify() == []
+
+
 def test_cycles_share_depth_and_priority_without_hanging(board: board_state.Board) -> None:
     for name, priority in [("a", "P5"), ("b", "P2"), ("leaf", "P0"), ("root", "P4")]:
         board.create(name, name, "backlog", "bot", priority=priority)
@@ -264,6 +306,10 @@ def test_named_priority_scales_keep_policy_order(board: board_state.Board) -> No
     board.link("root", "blocks", "leaf", "bot")
     assert board.find("root").priority == "urgent"
     assert board_state.priority_ranks(board.policy) == {"urgent": 0, "routine": 1}
+    board.create("current", "Current", "backlog", "bot", priority="routine")
+    board.link("current", "blocked_by", "root", "terry")
+    assert board.find("current").priority == "urgent"
+    assert board.find("current").history[-1].by == "terry"
     assert board.verify() == []
 
 

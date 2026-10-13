@@ -65,6 +65,9 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   anywhere downstream, with audited promotion in the same transaction. Removing links
   must not silently downgrade priorities. Only blocking relationships contribute;
   hierarchy and other links do not. Keep browser and CLI ordering consistent.
+  Adding or replacing with `blocked_by` also promotes the current card to its
+  blocker's higher urgency in that transaction. Priority differences must not prevent
+  adding relationships; later edits retain downstream-to-blocker inheritance.
 
 ## Code conventions
 

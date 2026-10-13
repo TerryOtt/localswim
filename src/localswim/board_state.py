@@ -2877,6 +2877,16 @@ class Board:
             frm, to, stored = b, a, LINK_INVERSE[kind]
         return a, b, frm, to, stored
 
+    def _enforce_relationship_priorities(self, a: Item, b: Item, kind: str, by: Actor) -> None:
+        """Accept blocked-by links by raising the current card, then its ancestors."""
+        ranks = priority_ranks(self.policy)
+        overrides = (
+            {a.id: b.priority}
+            if kind == "blocked_by" and ranks[b.priority] < ranks[a.priority]
+            else {}
+        )
+        self._apply_priority_targets(blocking_order(self, overrides).priorities, by)
+
     def link(self, a_ref: str, kind: str, b_ref: str, by: Actor) -> str:
         """Relate two cards. **There is no way to write one half.** Card #0028.
 
@@ -2902,7 +2912,7 @@ class Board:
                 to=b.id,
             )
         )
-        self.enforce_dependency_priorities(by)
+        self._enforce_relationship_priorities(a, b, kind, by)
         return f"{a.label} {kind} {b.label} (by {by})"
 
     def replace_link(
@@ -2947,7 +2957,7 @@ class Board:
                 ),
             )
         )
-        self.enforce_dependency_priorities(by)
+        self._enforce_relationship_priorities(a, b, new_kind, by)
         return f"{a.label} relationship to {b.label}: {old_kind} -> {new_kind} (by {by})"
 
     def find_link(self, frm: str, kind: str, to: str) -> Link | None:

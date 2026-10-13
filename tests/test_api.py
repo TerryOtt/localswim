@@ -893,12 +893,88 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert len(board_state.load(api.path).find("root").history) == events
 
 
-def test_failed_create_rolls_back_promoted_existing_blocker(api: RunningApi) -> None:
+@pytest.mark.parametrize("operation", ["add", "replace", "create"])
+def test_browser_blocked_by_accepts_and_promotes_current_card_atomically(
+    api: RunningApi, operation: str
+) -> None:
     code, _ = request_json(
         api.base + API + "/cards",
         token=api_endpoint.CLI_TOKEN,
         revision=0,
-        body={"id": "blocker", "subject": "Blocker", "state": "backlog", "priority": "P5"},
+        body={"id": "blocker", "subject": "Blocker", "state": "backlog", "priority": "P1"},
+    )
+    assert code == 200
+    revision = 1
+    body: dict[str, object]
+    if operation == "create":
+        path = "/cards"
+        body = {
+            "id": "current",
+            "subject": "Current",
+            "state": "backlog",
+            "priority": "P5",
+            "links": [{"kind": "blocked_by", "other": "blocker"}],
+        }
+    else:
+        code, _ = request_json(
+            api.base + API + "/cards",
+            token=api_endpoint.CLI_TOKEN,
+            revision=revision,
+            body={"id": "current", "subject": "Current", "state": "backlog", "priority": "P5"},
+        )
+        assert code == 200
+        revision += 1
+        path = "/cards/current/link"
+        body = {"kind": "blocked_by", "other": "blocker"}
+        if operation == "replace":
+            code, _ = request_json(
+                api.base + API + path,
+                token=api_endpoint.BROWSER_TOKEN,
+                revision=revision,
+                body={"kind": "references", "other": "blocker"},
+            )
+            assert code == 200
+            revision += 1
+            body["replaces"] = "references"
+    code, out = request_json(
+        api.base + API + path,
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=revision,
+        body=body,
+    )
+    assert code == 200
+    assert out["revision"] == revision + 1
+    saved = board_state.load(api.path)
+    assert saved.revision == revision + 1
+    assert saved.find_link("blocker", "blocks", "current") is not None
+    current = saved.find("current")
+    assert current.priority == "P1"
+    assert len(current.history) == 2
+    assert current.history[-1].by == "terry"
+    assert current.history[-1].priority_frm == "P5"
+    assert current.history[-1].priority_to == "P1"
+    assert len(saved.find("blocker").history) == 1
+    assert saved.verify() == []
+    code, payload = request_json(api.base + API + "/board")
+    assert code == 200
+    cards = [item for lane in payload["lanes"] for item in lane["items"]]
+    assert next(item for item in cards if item["id"] == "current")["priority"] == "P1"
+
+
+@pytest.mark.parametrize(("blocker_priority", "current_priority"), [("P5", "P0"), ("P1", "P5")])
+def test_failed_create_rolls_back_promoted_existing_blocker(
+    api: RunningApi, blocker_priority: str, current_priority: str
+) -> None:
+    code, _ = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=0,
+        body={
+            "id": "blocker",
+            "subject": "Blocker",
+            "state": "backlog",
+            "priority": blocker_priority,
+        },
     )
     assert code == 200
     before = api.path.read_bytes()
@@ -910,7 +986,7 @@ def test_failed_create_rolls_back_promoted_existing_blocker(api: RunningApi) -> 
             "id": "urgent",
             "subject": "Urgent",
             "state": "backlog",
-            "priority": "P0",
+            "priority": current_priority,
             "links": [
                 {"kind": "blocked_by", "other": "blocker"},
                 {"kind": "blocks", "other": "missing"},
