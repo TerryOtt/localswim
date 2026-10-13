@@ -846,7 +846,7 @@ def test_retired_mutation_route_returns_404(api: RunningApi) -> None:
 
 
 def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningApi) -> None:
-    for revision, (name, priority) in enumerate([("root", "P5"), ("middle", "P4"), ("leaf", "P1")]):
+    for revision, (name, priority) in enumerate([("root", "P1"), ("middle", "P4"), ("leaf", "P5")]):
         code, _ = request_json(
             api.base + API + "/cards",
             token=api_endpoint.CLI_TOKEN,
@@ -863,7 +863,7 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
         )
         assert code == 200
     code, out = request_json(
-        api.base + API + "/cards/leaf/priority",
+        api.base + API + "/cards/root/priority",
         token=api_endpoint.BROWSER_TOKEN,
         revision=5,
         body={"priority": "P0"},
@@ -879,9 +879,9 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert [item["id"] for item in lane["items"]] == ["root", "middle", "leaf"]
     assert [item["blockingDepth"] for item in lane["items"]] == [2, 1, 0]
     assert payload["order"] == ["blockingDepthDesc", "priority", "ticket"]
-    events = len(saved.find("root").history)
+    events = len(saved.find("leaf").history)
     code, out = request_json(
-        api.base + API + "/cards/root/priority",
+        api.base + API + "/cards/leaf/priority",
         token=api_endpoint.CLI_TOKEN,
         revision=6,
         body={"priority": "P5"},
@@ -889,8 +889,8 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert code == 200
     assert "using P0" in out["result"]
     assert out["priority"] == "P0"
-    assert board_state.load(api.path).find("root").priority == "P0"
-    assert len(board_state.load(api.path).find("root").history) == events
+    assert board_state.load(api.path).find("leaf").priority == "P0"
+    assert len(board_state.load(api.path).find("leaf").history) == events
 
 
 @pytest.mark.parametrize("operation", ["add", "replace", "create"])
@@ -961,8 +961,8 @@ def test_browser_blocked_by_accepts_and_promotes_current_card_atomically(
     assert next(item for item in cards if item["id"] == "current")["priority"] == "P1"
 
 
-@pytest.mark.parametrize(("blocker_priority", "current_priority"), [("P5", "P0"), ("P1", "P5")])
-def test_failed_create_rolls_back_promoted_existing_blocker(
+@pytest.mark.parametrize(("blocker_priority", "current_priority"), [("P0", "P5"), ("P1", "P5")])
+def test_failed_create_rolls_back_blocked_card_promotion(
     api: RunningApi, blocker_priority: str, current_priority: str
 ) -> None:
     code, _ = request_json(
@@ -995,3 +995,39 @@ def test_failed_create_rolls_back_promoted_existing_blocker(
     )
     assert code == 409
     assert api.path.read_bytes() == before
+
+
+def test_browser_root_priority_is_free_and_descendant_floor_is_ongoing(api: RunningApi) -> None:
+    for revision, (name, priority) in enumerate([("root", "P5"), ("leaf", "P0")]):
+        code, _ = request_json(
+            api.base + API + "/cards",
+            token=api_endpoint.BROWSER_TOKEN,
+            revision=revision,
+            body={"id": name, "subject": name, "state": "backlog", "priority": priority},
+        )
+        assert code == 200
+    code, _ = request_json(
+        api.base + API + "/cards/root/link",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=2,
+        body={"kind": "blocks", "other": "leaf"},
+    )
+    assert code == 200
+    assert board_state.load(api.path).find("root").priority == "P5"
+    for revision, (ref, requested, expected) in enumerate(
+        [("root", "P3", "P3"), ("leaf", "P5", "P3"), ("root", "P1", "P1"), ("leaf", "P5", "P1")],
+        start=3,
+    ):
+        code, out = request_json(
+            api.base + API + f"/cards/{ref}/priority",
+            token=api_endpoint.BROWSER_TOKEN,
+            revision=revision,
+            body={"priority": requested},
+        )
+        assert code == 200
+        assert out["priority"] == expected
+    saved = board_state.load(api.path)
+    assert saved.find("root").priority == "P1"
+    assert saved.find("leaf").priority == "P1"
+    assert saved.revision == 7
+    assert saved.verify() == []

@@ -61,13 +61,13 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   focused inspection, full snapshot exports, verification, and activity retain them.
 
 - Order every lane by descending longest downstream blocking-chain depth, ascending
-  priority number, then ascending ticket number. Blockers inherit the highest urgency
-  anywhere downstream, with audited promotion in the same transaction. Removing links
-  must not silently downgrade priorities. Only blocking relationships contribute;
-  hierarchy and other links do not. Keep browser and CLI ordering consistent.
-  Adding or replacing with `blocked_by` also promotes the current card to its
-  blocker's higher urgency in that transaction. Priority differences must not prevent
-  adding relationships; later edits retain downstream-to-blocker inheritance.
+  priority number, then ascending ticket number. Blocked cards inherit the highest
+  urgency among upstream blockers, with audited promotion in the same transaction.
+  A card with no blockers may have any priority, regardless of its descendants.
+  Both `blocks` and `blocked_by` enforce this ongoing floor without rejecting different
+  priorities. Removing links must not silently downgrade priorities. Only blocking
+  relationships contribute; hierarchy and other links do not. Keep browser and CLI
+  ordering consistent.
 
 ## Code conventions
 

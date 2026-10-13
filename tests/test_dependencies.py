@@ -1,4 +1,4 @@
-"""Critical-path ordering and audited, transitive blocker priority inheritance."""
+"""Critical-path ordering and audited, transitive blocked-card priority inheritance."""
 
 import json
 import socket
@@ -24,8 +24,9 @@ def test_critical_depth_precedes_priority_and_ticket(board: board_state.Board) -
         "root": 2,
     }
     assert [item.id for item in board.lanes()[0].items] == ["root", "middle", "isolated", "leaf"]
-    assert board.find("root").priority == "P2"
-    assert board.find("middle").priority == "P2"
+    assert board.find("root").priority == "P5"
+    assert board.find("middle").priority == "P5"
+    assert board.find("leaf").priority == "P2"
     assert board.verify() == []
     assert board_state.total_order_problems(board) == []
 
@@ -43,9 +44,9 @@ def test_branch_depth_uses_longest_path_not_number_of_children(board: board_stat
 
 
 def test_paths_cross_lanes_and_include_archived_cards(board: board_state.Board) -> None:
-    board.create("root", "Root", "backlog", "bot", priority="P5")
+    board.create("root", "Root", "backlog", "bot", priority="P1")
     board.create("middle", "Middle work", "ready_for_work", "bot", priority="P5")
-    board.create("leaf", "Leaf", "backlog", "bot", priority="P1")
+    board.create("leaf", "Leaf", "backlog", "bot", priority="P5")
     board.link("root", "blocks", "middle", "bot")
     board.link("middle", "blocks", "leaf", "bot")
     board.set_archived("leaf", archived=True, by="bot")
@@ -65,14 +66,14 @@ def test_paths_cross_lanes_and_include_archived_cards(board: board_state.Board) 
     ]
 
 
-def test_priority_changes_promote_all_ancestors_with_actor_and_single_event(
+def test_priority_changes_promote_all_descendants_with_actor_and_single_event(
     board: board_state.Board,
 ) -> None:
     for name in ["root", "middle", "leaf"]:
         board.create(name, name, "backlog", "bot", priority="P5")
     board.link("root", "blocks", "middle", "bot")
     board.link("middle", "blocks", "leaf", "bot")
-    board.set_priority("leaf", "P0", "terry")
+    board.set_priority("root", "P0", "terry")
     assert [item.priority for item in board.items] == ["P0", "P0", "P0"]
     for item in board.items:
         assert len(item.history) == 2
@@ -80,27 +81,31 @@ def test_priority_changes_promote_all_ancestors_with_actor_and_single_event(
         assert item.history[-1].priority_frm == "P5"
         assert item.history[-1].priority_to == "P0"
     before = board.to_json()
-    result = board.set_priority("root", "P5", "bot")
+    result = board.set_priority("leaf", "P5", "bot")
     assert "using P0" in result
     assert board.to_json() == before
-    board.set_priority("leaf", "P3", "bot")
-    assert board.find("root").priority == "P0"
-    assert board.find("leaf").priority == "P3"
+    board.set_priority("root", "P3", "bot")
+    assert board.find("root").priority == "P3"
+    assert board.find("leaf").priority == "P0"
+    board.set_priority("root", "P5", "bot")
+    assert board.find("root").priority == "P5"
+    assert board.find("leaf").priority == "P0"
     assert board.verify() == []
 
 
 def test_blocked_by_and_relationship_replacement_propagate(board: board_state.Board) -> None:
-    board.create("blocker", "Blocker", "backlog", "bot", priority="P5")
-    board.create("urgent", "Urgent", "backlog", "bot", priority="P0")
+    board.create("blocker", "Blocker", "backlog", "bot", priority="P1")
+    board.create("urgent", "Urgent", "backlog", "bot", priority="P5")
     board.link("urgent", "references", "blocker", "bot")
-    assert board.find("blocker").priority == "P5"
+    assert board.find("blocker").priority == "P1"
     board.replace_link("urgent", "references", "blocked_by", "blocker", "terry")
-    assert board.find("blocker").priority == "P0"
-    assert board.find("blocker").history[-1].by == "terry"
+    assert board.find("blocker").priority == "P1"
+    assert board.find("urgent").priority == "P1"
+    assert board.find("urgent").history[-1].by == "terry"
     assert board_state.blocking_order(board).depths["blocker"] == 1
     board.unlink("urgent", "blocked_by", "blocker", "bot")
     assert board_state.blocking_order(board).depths["blocker"] == 0
-    assert board.find("blocker").priority == "P0"
+    assert board.find("blocker").priority == "P1"
 
 
 @pytest.mark.parametrize("replace", [False, True])
@@ -108,7 +113,7 @@ def test_blocked_by_and_relationship_replacement_propagate(board: board_state.Bo
     ("current_priority", "blocker_priority", "expected"),
     [("P5", "P1", "P1"), ("P0", "P5", "P0"), ("P2", "P2", "P2")],
 )
-def test_blocked_by_accepts_and_promotes_current_card_or_blocker(
+def test_blocked_by_accepts_without_promoting_blockers(
     board: board_state.Board,
     *,
     replace: bool,
@@ -128,10 +133,12 @@ def test_blocked_by_accepts_and_promotes_current_card_or_blocker(
         board.link("current", "blocked_by", "blocker", "terry")
     assert board.find_link("blocker", "blocks", "current") is not None
     assert board.find_link("current", "references", "blocker") is None
-    assert all(item.priority == expected for item in board.items)
+    assert board.find("current").priority == expected
+    assert board.find("blocker").priority == blocker_priority
+    assert board.find("ancestor").priority == "P5"
     for item in board.items:
         old_priority, events = before[item.id]
-        changed = old_priority != expected
+        changed = item.id == "current" and old_priority != expected
         assert len(item.history) == events + int(changed)
         if changed:
             assert item.history[-1].by == "terry"
@@ -141,7 +148,9 @@ def test_blocked_by_accepts_and_promotes_current_card_or_blocker(
     board.link("current", "blocked_by", "blocker", "terry")
     assert board.to_json() == before_repeat
     board.unlink("current", "blocked_by", "blocker", "terry")
-    assert all(item.priority == expected for item in board.items)
+    assert board.find("current").priority == expected
+    assert board.find("blocker").priority == blocker_priority
+    assert board.find("ancestor").priority == "P5"
     assert board.verify() == []
 
 
@@ -154,7 +163,12 @@ def test_cycles_share_depth_and_priority_without_hanging(board: board_state.Boar
     board.link("root", "blocks", "a", "bot")
     assert board_state.blocking_order(board).depths == {"a": 1, "b": 1, "leaf": 0, "root": 2}
     assert [item.id for item in board.lanes()[0].items] == ["root", "a", "b", "leaf"]
-    assert all(item.priority == "P0" for item in board.items)
+    assert [board.find(name).priority for name in ("root", "a", "b", "leaf")] == [
+        "P4",
+        "P2",
+        "P2",
+        "P0",
+    ]
     assert len(board.links) == 4
     assert board.verify() == []
 
@@ -184,7 +198,7 @@ def test_numeric_priority_order_is_independent_of_policy_row_order(
     board.create("low", "Low", "backlog", "bot", priority="P5")
     board.create("high", "High", "backlog", "bot", priority="P0")
     assert [item.id for item in board.lanes()[0].items] == ["high", "low"]
-    board.link("low", "blocks", "high", "bot")
+    board.link("high", "blocks", "low", "bot")
     assert board.find("low").priority == "P0"
 
 
@@ -196,7 +210,7 @@ def test_long_chain_avoids_recursion_limits(board: board_state.Board) -> None:
             "Chain",
             "backlog",
             "bot",
-            priority="P0" if index == count - 1 else "P5",
+            priority="P0" if index == 0 else "P5",
         )
     board.links = [
         board_state.Link(f"item-{index}", "blocks", f"item-{index + 1}")
@@ -214,8 +228,8 @@ def test_existing_board_is_reconciled_atomically_once(
     board: board_state.Board,
     tmp_path: pathlib.Path,
 ) -> None:
-    board.create("blocker", "Blocker", "backlog", "bot", priority="P5")
-    board.create("urgent", "Urgent", "backlog", "bot", priority="P0")
+    board.create("blocker", "Blocker", "backlog", "bot", priority="P0")
+    board.create("urgent", "Urgent", "backlog", "bot", priority="P5")
     board.links.append(board_state.Link("blocker", "blocks", "urgent"))
     board.revision = 7
     path = tmp_path / "old-board.json"
@@ -224,8 +238,8 @@ def test_existing_board_is_reconciled_atomically_once(
     store = api_endpoint.BoardStore(path)
     normalized = store.snapshot()
     assert normalized.revision == 8
-    assert normalized.find("blocker").priority == "P0"
-    assert normalized.find("blocker").history[-1].by == "bot"
+    assert normalized.find("urgent").priority == "P0"
+    assert normalized.find("urgent").history[-1].by == "bot"
     assert normalized.links == board.links
     assert normalized.verify() == []
     assert store.snapshot().revision == 8
@@ -236,8 +250,8 @@ def test_dependency_promotion_rolls_back_when_transaction_fails(
     board: board_state.Board,
     tmp_path: pathlib.Path,
 ) -> None:
-    board.create("blocker", "Blocker", "backlog", "bot", priority="P5")
-    board.create("urgent", "Urgent", "backlog", "bot", priority="P0")
+    board.create("blocker", "Blocker", "backlog", "bot", priority="P0")
+    board.create("urgent", "Urgent", "backlog", "bot", priority="P5")
     path = tmp_path / "board.json"
     board_state.save(board, path)
     store = api_endpoint.BoardStore(path)
@@ -250,7 +264,7 @@ def test_dependency_promotion_rolls_back_when_transaction_fails(
     with pytest.raises(board_state.BoardError, match="injected refusal"):
         store.execute(0, refuse)
     assert path.read_bytes() == before
-    assert store.snapshot().find("blocker").priority == "P5"
+    assert store.snapshot().find("urgent").priority == "P5"
 
 
 def test_completed_lane_uses_same_order(board: board_state.Board) -> None:
@@ -274,17 +288,17 @@ def test_replaced_snapshot_is_reconciled_once(
     board_state.save(board, path)
     store = api_endpoint.BoardStore(path)
     replacement = store.snapshot()
-    leaf = replacement.find("leaf")
-    leaf.priority = "P0"
-    leaf.history.append(
+    blocker = replacement.find("root")
+    blocker.priority = "P0"
+    blocker.history.append(
         board_state.Change(board_state.now(), "", "terry", priority_frm="P3", priority_to="P0")
     )
     replacement.revision += 1
     board_state.save(replacement, path)
     repaired = store.snapshot()
     assert repaired.revision == 2
-    assert repaired.find("root").priority == "P0"
-    assert repaired.find("root").history[-1].by == "bot"
+    assert repaired.find("leaf").priority == "P0"
+    assert repaired.find("leaf").history[-1].by == "bot"
     assert repaired.verify() == []
     before = path.read_bytes()
     assert store.snapshot().revision == 2
@@ -301,10 +315,10 @@ def test_named_priority_scales_keep_policy_order(board: board_state.Board) -> No
     ]
     policy["defaultPriority"] = "routine"
     board = board_state.Board.from_json(raw, "named priority scale")
-    board.create("root", "Root", "backlog", "bot", priority="routine")
-    board.create("leaf", "Leaf", "backlog", "bot", priority="urgent")
+    board.create("root", "Root", "backlog", "bot", priority="urgent")
+    board.create("leaf", "Leaf", "backlog", "bot", priority="routine")
     board.link("root", "blocks", "leaf", "bot")
-    assert board.find("root").priority == "urgent"
+    assert board.find("leaf").priority == "urgent"
     assert board_state.priority_ranks(board.policy) == {"urgent": 0, "routine": 1}
     board.create("current", "Current", "backlog", "bot", priority="routine")
     board.link("current", "blocked_by", "root", "terry")
@@ -314,10 +328,12 @@ def test_named_priority_scales_keep_policy_order(board: board_state.Board) -> No
 
 
 def test_inherited_priority_is_checked_by_verification(board: board_state.Board) -> None:
-    board.create("root", "Root", "backlog", "bot", priority="P5")
-    board.create("leaf", "Leaf", "backlog", "bot", priority="P0")
+    board.create("root", "Root", "backlog", "bot", priority="P0")
+    board.create("leaf", "Leaf", "backlog", "bot", priority="P5")
     board.links.append(board_state.Link("root", "blocks", "leaf"))
-    assert any("blocker priority is below required P0" in problem for problem in board.verify())
+    assert any(
+        "blocked card priority is below required P0" in problem for problem in board.verify()
+    )
     board.enforce_dependency_priorities("bot")
     assert board.verify() == []
 
@@ -326,8 +342,8 @@ def test_offline_policy_migration_reconciles_old_blocker_priorities(
     board: board_state.Board,
     tmp_path: pathlib.Path,
 ) -> None:
-    board.create("root", "Root", "backlog", "bot", priority="P5")
-    board.create("leaf", "Leaf", "backlog", "bot", priority="P0")
+    board.create("root", "Root", "backlog", "bot", priority="P0")
+    board.create("leaf", "Leaf", "backlog", "bot", priority="P5")
     board.links.append(board_state.Link("root", "blocks", "leaf"))
     with socket.socket() as candidate:
         candidate.bind(("127.0.0.1", 0))
@@ -341,8 +357,47 @@ def test_offline_policy_migration_reconciles_old_blocker_priorities(
     path.write_text(json.dumps(raw), encoding="utf-8")
     board_state.embed_policy(path, policy)
     migrated = board_state.load(path)
-    assert migrated.find("root").priority == "P0"
-    assert migrated.find("root").history[-1].by == "bot"
+    assert migrated.find("leaf").priority == "P0"
+    assert migrated.find("leaf").history[-1].by == "bot"
     assert migrated.links == board.links
     assert migrated.revision == 1
     assert migrated.verify() == []
+
+
+@pytest.mark.parametrize("priority", ["P0", "P1", "P2", "P3", "P4", "P5"])
+def test_cards_without_blockers_can_have_any_priority(
+    board: board_state.Board, priority: str
+) -> None:
+    board.create("root", "Root", "backlog", "bot", priority="P5")
+    board.create("leaf", "Leaf", "backlog", "bot", priority="P0")
+    board.link("root", "blocks", "leaf", "bot")
+    board.set_priority("root", priority, "terry")
+    assert board.find("root").priority == priority
+    assert board.find("leaf").priority == "P0"
+    assert board.verify() == []
+
+
+def test_multiple_blockers_define_floor_and_dependents_never_promote_ancestors(
+    board: board_state.Board,
+) -> None:
+    for name, priority in [("a", "P1"), ("b", "P0"), ("child", "P5"), ("leaf", "P5")]:
+        board.create(name, name, "backlog", "bot", priority=priority)
+    board.link("child", "blocks", "leaf", "bot")
+    board.link("a", "blocks", "child", "bot")
+    board.link("child", "blocked_by", "b", "bot")
+    assert [board.find(name).priority for name in ("a", "b", "child", "leaf")] == [
+        "P1",
+        "P0",
+        "P0",
+        "P0",
+    ]
+    board.set_priority("b", "P5", "terry")
+    board.set_priority("child", "P5", "terry")
+    assert board.find("child").priority == "P1"
+    assert board.find("a").priority == "P1"
+    assert board.find("b").priority == "P5"
+    board.unlink("child", "blocked_by", "a", "terry")
+    board.set_priority("child", "P5", "terry")
+    assert board.find("child").priority == "P5"
+    assert board.find("leaf").priority == "P0"
+    assert board.verify() == []

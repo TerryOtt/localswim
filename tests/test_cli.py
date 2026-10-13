@@ -362,7 +362,6 @@ def activity_board(path: pathlib.Path) -> None:
     board.find("beta").history[-1].at = "2026-08-23T10:06:00Z"
     board.link("alpha", "blocked_by", "beta", "bot")
     board.relationship_history[-1].at = "2026-08-23T10:07:00Z"
-    board.find("beta").history[-1].at = "2026-08-23T10:07:00Z"
     board.unlink("alpha", "blocked_by", "beta", "bot")
     board.relationship_history[-1].at = "2026-08-23T10:08:00Z"
     board.set_parent("alpha", "beta", "bot")
@@ -447,7 +446,7 @@ def test_show_json_resolves_ticket_and_relationships_without_private_text(
                 "ticket": 4,
                 "subject": "Blocker subject",
                 "state": "ready_for_work",
-                "priority": "P1",
+                "priority": "P2",
                 "owner": "bot",
             },
         }
@@ -872,7 +871,6 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
         "commented",
         "created",
         "linked",
-        "prioritized",
         "unlinked",
         "parented",
         "unparented",

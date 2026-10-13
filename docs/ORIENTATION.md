@@ -130,14 +130,14 @@ policy order. Only canonical `blocks` edges contribute, across every lane and al
 cards. Strongly connected groups preserve cycles with one shared depth and inherited
 priority; the condensed DAG is processed without recursive traversal.
 
-`blocking_order()` derives depths and the highest required priority in every downstream
-component. Relationship mutations and `set_priority()` apply all promotions with
-ordinary priority audit entries in the actor's transaction. Requested lower urgency is
-clamped before recording changes. Unlinking never demotes cards automatically.
-Adding or replacing with caller-facing `blocked_by` first seeds the current card
-with the blocker's higher urgency, then calculates all upstream targets before
-recording history. Priority differences do not reject a relationship. This is an
-insertion-time promotion, not ongoing inheritance from blockers to blocked cards.
+`blocking_order()` derives longest downstream depths for sorting, then traverses
+in the opposite direction to inherit the highest urgency from upstream blockers.
+Relationship mutations and `set_priority()` promote blocked descendants with ordinary
+priority audit entries in the actor's transaction. Requested lower urgency is clamped
+to the upstream requirement before recording changes. A card with no blockers can have
+any priority, even if its descendants are more urgent. Unlinking never demotes cards
+automatically. Both caller-facing `blocks` and `blocked_by` accept different priorities
+and apply the same ongoing blocker-to-blocked rule without rejecting a relationship.
 `verify()` reports an unsatisfied dependency requirement. `BoardStore` reconciles old
 boards at startup and replaced snapshots on read through its normal locked transaction,
 using `cliUser` for these rule-adoption events. It advances revision only when a

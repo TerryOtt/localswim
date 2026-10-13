@@ -270,34 +270,33 @@ The snapshot stores a card's `archived` flag only when true and an append-only
 
 ## Dependency priority inheritance
 
-A blocker must have at least the urgency of every card downstream of it. Linking a
-P5 blocker to a P1 card promotes it to P1; if that card later becomes P0, every ancestor
-is promoted to P0 too. Both `blocks` and `blocked_by` use this rule. Other relationship
-kinds and parent/child hierarchy do not affect blocking order or priority inheritance.
+A blocked card must have at least the urgency of every blocker upstream of it.
+A card with no blockers can have any priority, regardless of the cards it blocks.
+For example, a P5 blocker may block a P0 card and stay P5. A P1 blocker linked to a
+P5 card promotes the blocked card to P1. If the blocker later becomes P0, all blocked
+descendants are promoted to P0 too.
 
-Adding or changing a relationship to `blocked_by` also raises the current card to the
-blocker's priority if the blocker is more urgent. For example, adding a P1 blocker to
-a P5 card accepts the relationship and promotes the current card to P1, along with
-its existing blockers. Priority differences never prevent adding a relationship.
-This promotion happens when adding the relationship; subsequent priority edits keep
-the downstream-to-blocker inheritance rule above.
+Both `blocks` and `blocked_by` enforce the same ongoing rule. Adding or changing a
+relationship accepts different priorities and promotes blocked cards as needed;
+priority differences never prevent adding a relationship. Other relationship kinds
+and parent/child hierarchy do not affect blocking order or priority inheritance.
 
 Promotions are persisted with ordinary priority-history entries, attributed to the
 actor who made the relationship or priority change, inside the same atomic revision.
-A requested priority below a downstream requirement is clamped to that requirement,
+A requested priority below an upstream blocker's urgency is clamped to that requirement,
 and the command result explains the effective priority. Removing a link or lowering
-a downstream priority never silently demotes a blocker; a later explicit priority
-change can lower it if its remaining dependencies permit that change.
+a blocker's priority never silently demotes its descendants; a later explicit priority
+change can lower a card if its remaining blockers permit that change.
 
 Depths and priority requirements include all stored cards, including completed and
 archived cards. Existing blocking cycles are kept intact: members share one rank and
-the highest priority required by their group or descendants. The graph is traversed
+the highest priority required by their group or upstream blockers. The graph is traversed
 iteratively, so long chains do not depend on Python's recursion limit.
 
 The live service reconciles older boards on startup, and reconciles valid externally
 replaced snapshots when reading them, through audited, revision-checked transactions
 attributed to `cliUser`. Offline CLI reads never rewrite the snapshot. If verification
-finds an older blocker below its required priority, start the service to reconcile it.
+finds an older blocked card below its required priority, start the service to reconcile it.
 Controlled offline lane/policy migrations also reconcile dependency priorities in
 their existing transaction. No new persisted fields or schema migration are required. When priorities use IDs
 such as P0 through P5, their numeric values define urgency; named priority scales use

@@ -1530,7 +1530,7 @@ def blocking_order(
     board: Board,
     priority_overrides: Mapping[str, str] | None = None,
 ) -> BlockingOrder:
-    """Longest downstream blocks-chain and highest urgency anywhere downstream.
+    """Longest downstream blocks-chain and highest urgency among upstream blockers.
 
     All stored cards participate, across lanes and regardless of archive state. Cyclic
     groups share a rank and highest inherited urgency; other relationship kinds and
@@ -1552,13 +1552,19 @@ def blocking_order(
     overrides = priority_overrides or {}
     priorities = {item.id: overrides.get(item.id, item.priority) for item in board.items}
     depths: dict[int, int] = {}
+    blockers: dict[int, set[int]] = {index: set() for index in range(len(groups))}
+    for source, children in dependencies.items():
+        for child in children:
+            blockers[child].add(source)
     inherited: dict[int, str] = {}
     sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter(dependencies)
-    for group_id in sorter.static_order():
+    downstream_first = list(sorter.static_order())
+    for group_id in downstream_first:
         children = dependencies[group_id]
         depths[group_id] = max((depths[child] + 1 for child in children), default=0)
+    for group_id in reversed(downstream_first):
         candidates = [priorities[node] for node in groups[group_id]]
-        candidates.extend(inherited[child] for child in children)
+        candidates.extend(inherited[parent] for parent in blockers[group_id])
         inherited[group_id] = min(
             candidates, key=lambda priority: (ranks[priority], len(priority), priority)
         )
@@ -2613,7 +2619,7 @@ class Board:
         problems.extend(self._parent_history_problems(known_actors))
         problems.extend(self._archive_history_problems())
         problems.extend(
-            f"{item_id}: blocker priority is below required {priority}; "
+            f"{item_id}: blocked card priority is below required {priority}; "
             "start the board service to reconcile dependency priorities"
             for item_id, priority in self.dependency_priority_promotions().items()
         )
@@ -2777,11 +2783,11 @@ class Board:
         }
 
     def enforce_dependency_priorities(self, by: Actor) -> tuple[str, ...]:
-        """Promote all blockers transitively, preserving links and lane state."""
+        """Promote blocked cards transitively, preserving links and lane state."""
         return self._apply_priority_targets(blocking_order(self).priorities, by)
 
     def set_priority(self, item_id: str, priority: str, by: Actor) -> str:
-        """Apply the requested priority subject to downstream urgency, with audit."""
+        """Apply the requested priority subject to upstream blocker urgency, with audit."""
         if priority not in self.policy.priorities:
             raise BoardError(
                 f"unknown priority {priority!r}; want one of {', '.join(self.policy.priorities)}"
@@ -2798,9 +2804,9 @@ class Board:
         )
         if effective != priority:
             result += f"; requested {priority}, using {effective} for blocking dependencies"
-        upstream = len(changed) - int(item.id in changed)
-        if upstream:
-            result += f"; promoted {upstream} blocker(s)"
+        downstream = len(changed) - int(item.id in changed)
+        if downstream:
+            result += f"; promoted {downstream} blocked card(s)"
         return result
 
     # ---- relationships, card #0028 -------------------------------------------
@@ -2877,16 +2883,6 @@ class Board:
             frm, to, stored = b, a, LINK_INVERSE[kind]
         return a, b, frm, to, stored
 
-    def _enforce_relationship_priorities(self, a: Item, b: Item, kind: str, by: Actor) -> None:
-        """Accept blocked-by links by raising the current card, then its ancestors."""
-        ranks = priority_ranks(self.policy)
-        overrides = (
-            {a.id: b.priority}
-            if kind == "blocked_by" and ranks[b.priority] < ranks[a.priority]
-            else {}
-        )
-        self._apply_priority_targets(blocking_order(self, overrides).priorities, by)
-
     def link(self, a_ref: str, kind: str, b_ref: str, by: Actor) -> str:
         """Relate two cards. **There is no way to write one half.** Card #0028.
 
@@ -2912,7 +2908,7 @@ class Board:
                 to=b.id,
             )
         )
-        self._enforce_relationship_priorities(a, b, kind, by)
+        self.enforce_dependency_priorities(by)
         return f"{a.label} {kind} {b.label} (by {by})"
 
     def replace_link(
@@ -2957,7 +2953,7 @@ class Board:
                 ),
             )
         )
-        self._enforce_relationship_priorities(a, b, new_kind, by)
+        self.enforce_dependency_priorities(by)
         return f"{a.label} relationship to {b.label}: {old_kind} -> {new_kind} (by {by})"
 
     def find_link(self, frm: str, kind: str, to: str) -> Link | None:
