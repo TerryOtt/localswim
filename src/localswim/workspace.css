@@ -11,7 +11,7 @@
 .ws-board {width:100%; border:0; border-radius:6px; padding:7px 6px; background:transparent; text-align:left; font:inherit; color:#172537; cursor:pointer;}
 .ws-board:hover {background:#e4e8f0;}
 .ws-board[aria-current="page"] {background:#dce6f6; box-shadow:inset 3px 0 #244d88;}
-.ws-name {display:block; padding-right:24px; font-size:13px; font-weight:600; overflow-wrap:anywhere; line-height:1.35;}
+.ws-name {display:block; font-size:13px; font-weight:600; overflow-wrap:anywhere; line-height:1.35;}
 .ws-count-grid {display:grid; grid-template-columns:repeat(3, 56px); width:168px; margin-top:5px;}
 .ws-labels {margin:8px 6px 2px; font-size:10px; text-align:center; font-weight:600;}
 .ws-slot {display:flex; height:28px; align-items:center; justify-content:center;}
@@ -19,7 +19,6 @@
 .ws-slot.blocked .ws-circle {background:#8f261e; color:white;}
 .ws-slot.needsHuman .ws-circle {background:#f9cc45; color:#172537;}
 .ws-slot.review .ws-circle {background:#244d88; color:white;}
-.ws-pin {position:absolute; top:5px; right:4px; width:23px; height:23px; background:transparent; border:0; color:#244d88; cursor:pointer; font-size:15px;}
 #ws-status {font-size:11px; margin:5px 0; overflow-wrap:anywhere;}
 #ws-window {font-size:11px; color:#244d88; margin-top:5px; text-decoration:underline;}
 #workspace-nav.collapsed {width:44px; flex-basis:44px;}

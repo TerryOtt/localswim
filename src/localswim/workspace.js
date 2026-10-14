@@ -1,7 +1,7 @@
 /* Workspace navigation shares the board page's existing controls and writer boundary. */
 (() => {
   const categories = [['blocked', 'Blocked'], ['needsHuman', 'Needs Terry'], ['review', 'Ready for Review']];
-  let catalog = [], current = null, storageKey = '', state = {records: {}, pins: [], collapsed: false};
+  let catalog = [], current = null, storageKey = '', state = {records: {}, collapsed: false};
   let pending = null, initialized = false, refreshing = false;
   window.workspaceEpoch = 0;
   const link = document.createElement('link');
@@ -115,9 +115,31 @@
     window.workspaceReady = true;
     tick(); persist();
   }
+  const boardNames = new Intl.Collator('en', {sensitivity: 'accent'});
+  function minutesSinceEdit(entry, now) {
+    return Number.isFinite(entry.lastCardEditMs)
+      ? Math.floor(Math.max(0, now - entry.lastCardEditMs) / 60000) : Infinity;
+  }
+  function attentionTotal(entry) {
+    if (entry.error) return 0;
+    return categories.reduce((total, [kind]) => {
+      const count = entry.counts && entry.counts[kind];
+      return total + (Number.isInteger(count) && count > 0 ? count : 0);
+    }, 0);
+  }
+  function compareBoards(a, b, now) {
+    const ageA = minutesSinceEdit(a, now), ageB = minutesSinceEdit(b, now);
+    if (ageA !== ageB) return ageA < ageB ? -1 : 1;
+    return attentionTotal(b) - attentionTotal(a)
+      || boardNames.compare(a.project, b.project)
+      || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  }
   function renderRows() {
     const list = document.getElementById('ws-list'), filter = document.getElementById('ws-find').value.toLowerCase();
-    const ordered = [...state.pins, ...catalog.map(entry => entry.key).filter(key => !state.pins.includes(key))];
+    const now = Date.now();
+    const ordered = [...catalog].sort((a, b) => compareBoards(a, b, now)).map(entry => entry.key);
+    const focused = list.contains(document.activeElement) ? document.activeElement : null;
+    const scrollTop = list.scrollTop;
     for (const key of ordered) {
       const entry = catalog.find(entry => entry.key === key); if (!entry) continue;
       let row = rows.get(key);
@@ -128,14 +150,14 @@
         const grid = document.createElement('span'); grid.className = 'ws-count-grid';
         for (const [kind] of categories) { const slot = document.createElement('span'); slot.className = 'ws-slot ' + kind; slot.setAttribute('role', 'img'); grid.append(slot); }
         button.append(name, grid); button.onclick = () => select(key);
-        const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'ws-pin';
-        pin.onclick = () => { state.pins = state.pins.includes(key) ? state.pins.filter(item => item !== key) : [...state.pins, key]; persist(); renderRows(); };
-        row.append(button, pin); rows.set(key, row);
+        row.append(button); rows.set(key, row);
       }
       row.hidden = !entry.project.toLowerCase().includes(filter) && !key.toLowerCase().includes(filter);
       row.querySelector('.ws-name').textContent = entry.project;
       row.querySelector('.ws-board').setAttribute('aria-current', key === current ? 'page' : 'false');
-      row.querySelector('.ws-board').title = entry.error || entry.project + ' · ' + key;
+      const age = minutesSinceEdit(entry, now);
+      row.querySelector('.ws-board').title = entry.error || entry.project + ' · ' + key
+        + ' · Last card edit: ' + (Number.isFinite(age) ? age + ' minutes ago' : 'unknown');
       categories.forEach(([kind, label], index) => {
         const slot = row.querySelector('.ws-count-grid').children[index];
         const count = entry.counts && entry.counts[kind];
@@ -144,12 +166,13 @@
         slot.setAttribute('aria-label', label + ': ' + (!entry.error && Number.isInteger(count) ? count : 'unavailable'));
         slot.title = slot.getAttribute('aria-label');
       });
-      const pin = row.querySelector('.ws-pin'), pinned = state.pins.includes(key);
-      pin.textContent = pinned ? '●' : '○'; pin.setAttribute('aria-label', (pinned ? 'Unpin ' : 'Pin ') + entry.project); pin.setAttribute('aria-pressed', String(pinned)); pin.title = pin.getAttribute('aria-label');
       const position = ordered.filter(item => catalog.some(entry => entry.key === item)).indexOf(key);
       if (list.children[position] !== row) list.insertBefore(row, list.children[position] || null);
     }
     for (const [key, row] of rows) if (!catalog.some(entry => entry.key === key)) { row.remove(); rows.delete(key); }
+    if (focused && focused.isConnected && !focused.closest('.ws-row').hidden
+        && document.activeElement !== focused) focused.focus({preventScroll: true});
+    list.scrollTop = scrollTop;
     nav.classList.toggle('collapsed', state.collapsed);
     document.getElementById('ws-toggle').setAttribute('aria-label', state.collapsed ? 'Expand boards' : 'Collapse boards');
     document.getElementById('ws-toggle').setAttribute('aria-expanded', String(!state.collapsed));
@@ -164,9 +187,9 @@
       nav.title = value.root;
       if (!initialized) {
         initialized = true; storageKey = 'localswim.workspace.' + value.identity;
-        try { const saved = JSON.parse(sessionStorage.getItem(storageKey)); if (saved && saved.records && Array.isArray(saved.pins)) state = saved; } catch (_) {}
+        try { const saved = JSON.parse(sessionStorage.getItem(storageKey)); if (saved && saved.records) { state = saved; delete state.pins; } } catch (_) {}
         const key = urlKey() || state.lastBoard || (catalog[0] && catalog[0].key);
-        if (key) { if (!state.pins.length) state.pins = [key]; select(key, urlKey() ? 'none' : 'replace'); }
+        if (key) select(key, urlKey() ? 'none' : 'replace');
         else error('No supported boards were found. Add a board to the workspace folder, then retry.');
       } else if (retry || (!window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none');
       if (current && !catalog.some(entry => entry.key === current && !entry.error) && window.workspaceReady) { persist(); window.workspaceEpoch++; error('This board is missing or cannot be read. Choose another board or retry.'); }

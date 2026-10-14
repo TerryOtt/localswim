@@ -97,6 +97,13 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   three fixed columns across all project rows. Zero counts leave blank reserved slots;
   they never shift another circle into the empty column. Preserve category labels and
   accessible true counts alongside color and any capped visible count.
+- Sort all workspace sidebar boards together by ascending whole elapsed minutes since
+  the latest audited card edit, descending total of the three attention counts, then
+  ascending case-insensitive project name; stable keys resolve identical-name ties.
+  Pinning must not override this order. Include archived cards in recency, exclude them
+  from counts, and never use snapshot file times or project renames as card edits.
+  Unknown recency sorts last and future stamps have zero elapsed minutes. Preserve
+  active selection, keyboard focus, drafts, search, and scrolling when rows reorder.
 - Workspace discovery excludes hidden/Git/attachment directories and symbolic-link
   escapes. Serve assets locally. Source watching includes workspace assets, but Python
   syntax preflight must never treat JavaScript or CSS as Python input.

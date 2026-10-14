@@ -38,6 +38,36 @@ def path_identity(path: pathlib.Path) -> str:
     return hashlib.sha256(str(path.resolve()).casefold().encode("utf-8")).hexdigest()
 
 
+def _card_edit_stamps(board: board_state.Board) -> Generator[str]:
+    """Read audited card events, including edits to cards currently archived."""
+    for item in board.items:
+        for history in (item.history, item.comments, item.attachment_history):
+            for event in history:
+                yield event.at
+    for history in (
+        board.relationship_history,
+        board.parent_history,
+        board.subject_history,
+        board.detail_history,
+        board.archive_history,
+    ):
+        for event in history:
+            yield event.at
+
+
+def last_card_edit_ms(board: board_state.Board) -> int | None:
+    """Return the latest readable card-event instant, never the snapshot file time.
+
+    Legacy unreadable stamps use the shared parser's sentinel and do not hide other
+    readable events. Empty or entirely unreadable audit history has no known recency.
+    """
+    fallback = board_state.parse_stamp(None)
+    latest = max(
+        (board_state.parse_stamp(stamp) for stamp in _card_edit_stamps(board)), default=fallback
+    )
+    return None if latest == fallback else int(latest.timestamp() * 1000)
+
+
 class ServiceUpgradePendingError(OSError):
     """An existing service must finish its browser-session protocol upgrade."""
 
@@ -117,10 +147,12 @@ class Workspace:
                 "key": key,
                 "project": path.stem,
                 "counts": counts,
+                "lastCardEditMs": None,
             }
             try:
                 board = board_state.load(path)
                 entry["project"] = board.project or path.stem
+                entry["lastCardEditMs"] = last_card_edit_ms(board)
                 counts.update(
                     {
                         "blocked": sum(

@@ -58,6 +58,18 @@ accessible names, and full counts convey their meaning alongside color; large co
 may display as `99+`. Archived cards are excluded. Collapse the sidebar when lane width
 matters; its state is remembered in that browser window.
 
+All boards share one automatic sidebar order: ascending whole elapsed minutes since
+the latest card edit, then descending sum of the three attention counts, then ascending
+board name without case sensitivity. Stable keys break ties between identical names.
+Pin controls no longer override this ranking. Counts and activity refresh the order
+without changing the active board, keyboard focus, or sidebar search and scroll.
+
+Card activity includes creation, moves, assignments, priorities, comments, relationships,
+hierarchy, title/description edits, archives, and attachments, including edits to archived
+cards. File touches and project-label changes do not count. Empty boards or boards with
+no readable card timestamps sort after boards with known activity; future timestamps
+have zero elapsed minutes. The board-button tooltip reports its whole-minute age.
+
 Board links are bookmarkable. A snapshot at `state-store/localswim/localswim.json` has a
 workspace URL such as **http://127.0.0.1:8810/board/localswim/localswim**. The key is its
 relative path without `.json`, so changing the displayed project name preserves the
@@ -482,7 +494,7 @@ POST /api/v001/workspace/boards/<encoded-key>/cards/...
 ~~~
 
 The catalog includes each board's stable key, project name, the three attention counts,
-and any availability error. Proxy routes append the individual board API path after a
+`lastCardEditMs` (epoch milliseconds or `null` when unknown), and any availability error. Proxy routes append the individual board API path after a
 key encoded as one URL segment, for example `localswim%2Flocalswim`. The gateway forwards
 requests to that board's sole writer, preserving revision checks and browser actor
 attribution. Attachment links use the same origin and selected board.

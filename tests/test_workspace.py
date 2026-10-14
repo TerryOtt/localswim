@@ -2,7 +2,9 @@
 
 import base64
 import contextlib
+import datetime
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -10,11 +12,12 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from localswim import api_endpoint, board_state, workspace
+from localswim import api_endpoint, attachments, board_state, workspace
 from tests.support import USERS
 from tests.test_api import request_json
 from tests.test_attachments import PNG
@@ -22,7 +25,7 @@ from tests.test_cli import run_cli
 
 if TYPE_CHECKING:
     import pathlib
-    from collections.abc import Generator, Iterator
+    from collections.abc import Callable, Generator, Iterator
 
 API = board_state.API_PREFIX
 
@@ -167,6 +170,172 @@ def test_attention_counts_include_only_nonarchived_cards(tmp_path: pathlib.Path)
         }
     finally:
         instance.close()
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        "created",
+        "moved",
+        "assigned",
+        "prioritized",
+        "commented",
+        "linked",
+        "unlinked",
+        "parented",
+        "unparented",
+        "subject",
+        "detail",
+        "archived",
+        "unarchived",
+        "attached",
+        "attachment_removed",
+        "cover_set",
+        "cover_cleared",
+    ],
+)
+def test_catalog_recency_uses_every_card_edit_audit(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+) -> None:
+    old = "2026-10-14T08:00:00-04:00"
+    recent = "2026-10-14T10:15:00.125-04:00"
+    monkeypatch.setattr(board_state, "now", lambda: old)
+    path = tmp_path / "board.json"
+    make_board(path, "Recent edits")
+    board = board_state.load(path)
+    board.create("card", "Card", "backlog", "terry")
+    board.create("other", "Other", "backlog", "terry")
+    file = attachments.Attachment(
+        "11111111-1111-4111-8111-111111111111",
+        "picture.png",
+        1,
+        "image/png",
+        "a" * 64,
+        old,
+        "terry",
+    )
+    board.add_attachment("card", file)
+    board.set_cover("card", file.id, "terry")
+    if event == "cover_set":
+        board.set_cover("card", None, "terry")
+    if event == "unlinked":
+        board.link("card", "references", "other", "terry")
+    if event == "unparented":
+        board.set_parent("card", "other", "terry")
+    if event == "unarchived":
+        board.set_archived("card", archived=True, by="terry")
+    monkeypatch.setattr(board_state, "now", lambda: recent)
+    new_file = attachments.Attachment(
+        "22222222-2222-4222-8222-222222222222",
+        "second.png",
+        1,
+        "image/png",
+        "b" * 64,
+        recent,
+        "terry",
+    )
+    actions: dict[str, Callable[[], str]] = {
+        "created": partial(board.create, "new", "New card", "backlog", "terry"),
+        "moved": partial(board.move, "card", "in_progress", "terry"),
+        "assigned": partial(board.assign, "card", "terry", "terry"),
+        "prioritized": partial(board.set_priority, "card", "P1", "terry"),
+        "commented": partial(board.comment, "card", "Recent comment", "terry"),
+        "linked": partial(board.link, "card", "references", "other", "terry"),
+        "unlinked": partial(board.unlink, "card", "references", "other", "terry"),
+        "parented": partial(board.set_parent, "card", "other", "terry"),
+        "unparented": partial(board.set_parent, "card", None, "terry"),
+        "subject": partial(board.set_subject, "card", "New subject", "terry"),
+        "detail": partial(board.set_detail, "card", "New detail", "terry"),
+        "archived": partial(board.set_archived, "card", archived=True, by="terry"),
+        "unarchived": partial(board.set_archived, "card", archived=False, by="terry"),
+        "attached": partial(board.add_attachment, "card", new_file),
+        "attachment_removed": partial(board.remove_attachment, "card", file.id, "terry"),
+        "cover_set": partial(board.set_cover, "card", file.id, "terry"),
+        "cover_cleared": partial(board.set_cover, "card", None, "terry"),
+    }
+    actions[event]()
+    board_state.save(board, path)
+    instance = workspace.Workspace(tmp_path)
+    assert catalog_boards(instance)[0]["lastCardEditMs"] == int(
+        datetime.datetime.fromisoformat(recent).timestamp() * 1000
+    )
+
+
+def test_catalog_recency_includes_comments_on_archived_cards(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(board_state, "now", lambda: "2026-10-14T08:00:00-04:00")
+    path = tmp_path / "board.json"
+    make_board(path, "Archived edits")
+    board = board_state.load(path)
+    board.create("card", "Card", "backlog", "terry")
+    board.set_archived("card", archived=True, by="terry")
+    recent = "2026-10-14T09:00:00-04:00"
+    monkeypatch.setattr(board_state, "now", lambda: recent)
+    board.comment("card", "Still relevant activity", "terry")
+    board_state.save(board, path)
+    row = catalog_boards(workspace.Workspace(tmp_path))[0]
+    assert row["lastCardEditMs"] == int(datetime.datetime.fromisoformat(recent).timestamp() * 1000)
+    assert row["counts"] == {"blocked": 0, "needsHuman": 0, "review": 0}
+
+
+def test_catalog_recency_normalizes_offsets_and_ignores_unreadable_stamps(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Legacy activity")
+    board = board_state.load(path)
+    board.create("card", "Card", "backlog", "terry")
+    item = board.find("card")
+    item.history[0].at = "unreadable legacy stamp"
+    item.comments = [
+        board_state.Comment("2026-10-14T15:00:00+02:00", "terry", "Earlier instant"),
+        board_state.Comment("2026-10-14T10:00:00-04:00", "terry", "Latest instant"),
+        board_state.Comment("not a timestamp", "terry", "Legacy malformed stamp"),
+    ]
+    board_state.save(board, path)
+    row = catalog_boards(workspace.Workspace(tmp_path))[0]
+    assert "error" not in row
+    assert row["lastCardEditMs"] == int(
+        datetime.datetime.fromisoformat("2026-10-14T14:00:00Z").timestamp() * 1000
+    )
+
+
+@pytest.mark.parametrize("stamp", [None, "no readable timestamp", "2026-10-14 09:30:00 EDT"])
+def test_catalog_recency_has_no_file_or_project_name_fallback(
+    tmp_path: pathlib.Path,
+    stamp: str | None,
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before rename")
+    board = board_state.load(path)
+    if stamp is not None:
+        board.create("card", "Card", "backlog", "terry")
+        board.find("card").history[0].at = stamp
+    board_state.save(board, path)
+    instance = workspace.Workspace(tmp_path)
+    before = catalog_boards(instance)[0]["lastCardEditMs"]
+    parsed = board_state.parse_stamp(stamp)
+    expected = None if parsed == board_state.parse_stamp(None) else int(parsed.timestamp() * 1000)
+    assert before == expected
+    board.project = "After rename"
+    board_state.save(board, path)
+    os.utime(path, (1900000000, 1900000000))
+    assert catalog_boards(instance)[0]["lastCardEditMs"] == before
+
+
+def test_catalog_recency_is_unknown_for_malformed_board(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Malformed")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["items"] = "invalid cards"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    row = catalog_boards(workspace.Workspace(tmp_path))[0]
+    assert row["lastCardEditMs"] is None
+    assert "error" in row
 
 
 def test_cold_deep_link_serves_app_without_loading_wrong_board(gateway: RunningWorkspace) -> None:

@@ -83,7 +83,8 @@ A board key is its relative POSIX path without `.json`. For example,
 Unknown or unavailable deep links show an explicit error, never a fallback board.
 
 `GET /api/v001/workspace` returns workspace identity and a catalog of entries containing
-`key`, `project`, `counts` (`blocked`, `needsHuman`, `review`), and optional `error`.
+`key`, `project`, `counts` (`blocked`, `needsHuman`, `review`), `lastCardEditMs` (epoch
+milliseconds or `null`), and optional `error`.
 The gateway proxies `/api/v001/workspace/boards/<encoded-key>/<board-api-path>` to the
 selected board's existing `/api/v001/<board-api-path>`. Encode the key as one segment
 (`localswim%2Flocalswim`), even though the browser deep link uses readable slashes.
@@ -107,6 +108,17 @@ with two blocked cards and one review card retains an empty middle slot and shar
 same column coordinates as every other row. Labels and accessible full-count names
 supplement red, amber, and blue circles; visible `99+` does not replace the true count.
 Counts exclude archived cards.
+
+All sidebar boards sort by ascending whole elapsed minutes since the latest audited
+card edit, descending combined attention count, then ascending case-insensitive project
+name. Stable keys resolve identical-name ties. There is no pinned-group override.
+`last_card_edit_ms()` scans all item history/comments/attachment audit and the board's
+relationship, parent, subject, detail, and archive audit arrays. Edits to archived cards
+contribute recency; touching a snapshot or renaming the project does not. The shared
+stamp parser tolerates unreadable legacy values. Missing activity sorts last; future
+activity has zero elapsed minutes. Catalog polls refresh order while reusing existing
+row elements and preserving keyboard focus, search, list scrolling, and active selection.
+Legacy session pins are ignored without dropping saved per-board drafts or collapse state.
 
 Workspace navigation uses History API URLs and updates the active board in place.
 Cold deep links and Back/Forward follow the same selection path. Per-board selected
