@@ -111,6 +111,16 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   escapes. Serve assets locally. Source watching includes workspace assets, but Python
   syntax preflight must never treat JavaScript or CSS as Python input.
 
+## Subagents on authorized tickets
+
+Terry authorized up to five direct subagents (width 5), one level below the
+primary agent (depth 1), on all tickets authorized to work, 2026-10-14.
+Use parallel delegation where useful without requesting per-ticket permission.
+Subagents must not spawn subagents. This does not authorize starting other tickets
+or unrelated work. The primary retains responsibility for integration, required
+verification, commits/pushes and handoff. Respect a lower current-session limit;
+persisted configuration applies when loaded.
+
 ## Code conventions
 
 - Target exactly the Python version in `.python-version` for development and CI
