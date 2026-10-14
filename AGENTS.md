@@ -97,11 +97,14 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   three fixed columns across all project rows. Zero counts leave blank reserved slots;
   they never shift another circle into the empty column. Preserve category labels and
   accessible true counts alongside color and any capped visible count.
-- Sort all workspace sidebar boards together by ascending whole elapsed minutes since
-  the latest audited card edit, descending total of the three attention counts, then
-  ascending case-insensitive project name; stable keys resolve identical-name ties.
-  Pinning must not override this order. Include archived cards in recency, exclude them
-  from counts, and never use snapshot file times or project renames as card edits.
+- Show manually ordered Pinned boards above automatically sorted Other boards. Grip
+  dragging and keyboard reordering affect only pinned stable keys; pin/unpin controls
+  move boards between groups. Preserve manual order across activity updates and reloads
+  in the same independent window. Group labels/dividers must not indent count columns.
+  Sort Other boards by ascending whole elapsed minutes since the latest audited card
+  edit, descending total attention count, then ascending case-insensitive project name;
+  stable keys resolve identical-name ties. Include archived cards in recency, exclude
+  them from counts, and never use snapshot file times or project renames as card edits.
   Unknown recency sorts last and future stamps have zero elapsed minutes. Preserve
   active selection, keyboard focus, drafts, search, and scrolling when rows reorder.
 - Workspace discovery excludes hidden/Git/attachment directories and symbolic-link

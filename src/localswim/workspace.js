@@ -1,7 +1,7 @@
 /* Workspace navigation shares the board page's existing controls and writer boundary. */
 (() => {
   const categories = [['blocked', 'Blocked'], ['needsHuman', 'Needs Terry'], ['review', 'Ready for Review']];
-  let catalog = [], current = null, storageKey = '', state = {records: {}, collapsed: false};
+  let catalog = [], current = null, storageKey = '', state = {records: {}, collapsed: false, pins: []};
   let pending = null, initialized = false, refreshing = false;
   window.workspaceEpoch = 0;
   const link = document.createElement('link');
@@ -12,7 +12,7 @@
   nav.innerHTML = '<div class="ws-heading"><strong>Boards</strong><button type="button" id="ws-toggle" aria-label="Collapse boards">☰</button></div>' +
     '<div class="ws-expanded"><input id="ws-find" type="search" placeholder="Find a board" aria-label="Find a board">' +
     '<div class="ws-count-grid ws-labels"><span title="Blocked">Blocked</span><span title="Needs Terry">Terry</span><span title="Ready for Review">Review</span></div>' +
-    '<div id="ws-list"></div><p id="ws-status" role="status"></p><a id="ws-window" target="_blank" rel="noopener">Open board in new window ↗</a></div>';
+    '<div id="ws-list"></div><p id="ws-announcement" class="ws-sr-only" aria-live="polite" aria-atomic="true"></p><p id="ws-status" role="status"></p><a id="ws-window" target="_blank" rel="noopener">Open board in new window ↗</a></div>';
   content.append(nav, board);
   new ResizeObserver(alignCardStarts).observe(board);
   document.getElementById('mk').setAttribute('aria-modal', 'false');
@@ -134,12 +134,92 @@
       || boardNames.compare(a.project, b.project)
       || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
   }
+  const pinnedHeading = document.createElement('h2');
+  pinnedHeading.id = 'ws-pinned-heading'; pinnedHeading.className = 'ws-group-heading';
+  pinnedHeading.textContent = 'Pinned';
+  const otherHeading = document.createElement('h2');
+  otherHeading.id = 'ws-other-heading'; otherHeading.className = 'ws-group-heading';
+  otherHeading.textContent = 'Other boards';
+  let dragKey = null;
+  function normalizePins() {
+    const known = new Set(catalog.map(entry => entry.key));
+    state.pins = [...new Set((Array.isArray(state.pins) ? state.pins : [])
+      .filter(key => typeof key === 'string' && known.has(key)))];
+  }
+  function announce(message) { document.getElementById('ws-announcement').textContent = message; }
+  function clearDropFeedback() {
+    for (const row of rows.values()) row.classList.remove('ws-drop-before', 'ws-drop-after');
+  }
+  function reorderPin(key, target, after = false) {
+    normalizePins();
+    if (key === target || !state.pins.includes(key) || !state.pins.includes(target)) return;
+    const order = state.pins.filter(item => item !== key);
+    const position = order.indexOf(target) + (after ? 1 : 0);
+    order.splice(position, 0, key); state.pins = order;
+    persist(); renderRows();
+    const entry = catalog.find(entry => entry.key === key);
+    announce(entry.project + ' moved to pinned position ' + (position + 1) + ' of ' + order.length + '.');
+  }
+  function togglePin(key) {
+    normalizePins();
+    const entry = catalog.find(entry => entry.key === key); if (!entry) return;
+    const pinned = state.pins.includes(key);
+    state.pins = pinned ? state.pins.filter(item => item !== key) : [...state.pins, key];
+    persist(); renderRows();
+    announce(entry.project + (pinned ? ' unpinned. It now follows the automatic board order.' : ' pinned at position ' + state.pins.length + '.'));
+  }
+  function makePinControls(row, key) {
+    const grip = document.createElement('button'); grip.type = 'button'; grip.className = 'ws-grip';
+    grip.draggable = true;
+    grip.innerHTML = '<svg viewBox="0 0 16 20" aria-hidden="true" focusable="false"><g fill="currentColor"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="10" r="1.5"/><circle cx="11" cy="10" r="1.5"/><circle cx="5" cy="16" r="1.5"/><circle cx="11" cy="16" r="1.5"/></g></svg>';
+    grip.onclick = event => event.stopPropagation();
+    grip.onkeydown = event => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const index = state.pins.indexOf(key);
+      if (index < 0 || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? state.pins.length - 1
+        : Math.max(0, Math.min(state.pins.length - 1, index + (event.key === 'ArrowUp' ? -1 : 1)));
+      if (next !== index) reorderPin(key, state.pins[next], next > index);
+      else announce('Already at pinned position ' + (index + 1) + '.');
+    };
+    grip.ondragstart = event => {
+      if (!state.pins.includes(key) || !event.dataTransfer) { event.preventDefault(); return; }
+      dragKey = key; event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('application/x-localswim-pinned-board', key);
+      event.dataTransfer.setDragImage(row, Math.min(30, row.clientWidth), 15);
+      row.classList.add('ws-dragging');
+    };
+    grip.ondragend = () => { dragKey = null; row.classList.remove('ws-dragging'); clearDropFeedback(); };
+    row.ondragover = event => {
+      if (!dragKey || dragKey === key || !state.pins.includes(dragKey) || !state.pins.includes(key)) return;
+      event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      const after = event.clientY >= row.getBoundingClientRect().top + row.clientHeight / 2;
+      clearDropFeedback(); row.classList.add(after ? 'ws-drop-after' : 'ws-drop-before');
+    };
+    row.ondragleave = event => { if (!row.contains(event.relatedTarget)) row.classList.remove('ws-drop-before', 'ws-drop-after'); };
+    row.ondrop = event => {
+      if (!dragKey || !state.pins.includes(dragKey) || !state.pins.includes(key)) return;
+      event.preventDefault();
+      const after = event.clientY >= row.getBoundingClientRect().top + row.clientHeight / 2;
+      const source = dragKey; dragKey = null; clearDropFeedback();
+      rows.get(source).classList.remove('ws-dragging');
+      reorderPin(source, key, after);
+    };
+    const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'ws-pin';
+    pin.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M7 2h6l-1 5 3 3v2h-4v5l-1 1-1-1v-5H5v-2l3-3z"/></svg>';
+    pin.onclick = () => togglePin(key);
+    row.append(grip, pin);
+  }
   function renderRows() {
+    normalizePins();
     const list = document.getElementById('ws-list'), filter = document.getElementById('ws-find').value.toLowerCase();
-    const now = Date.now();
-    const ordered = [...catalog].sort((a, b) => compareBoards(a, b, now)).map(entry => entry.key);
+    const now = Date.now(), pinned = new Set(state.pins);
+    const others = catalog.filter(entry => !pinned.has(entry.key)).sort((a, b) => compareBoards(a, b, now));
+    const ordered = [...state.pins, ...others.map(entry => entry.key)];
     const focused = list.contains(document.activeElement) ? document.activeElement : null;
     const scrollTop = list.scrollTop;
+    let visiblePinned = 0, visibleOthers = 0;
     for (const key of ordered) {
       const entry = catalog.find(entry => entry.key === key); if (!entry) continue;
       let row = rows.get(key);
@@ -150,9 +230,18 @@
         const grid = document.createElement('span'); grid.className = 'ws-count-grid';
         for (const [kind] of categories) { const slot = document.createElement('span'); slot.className = 'ws-slot ' + kind; slot.setAttribute('role', 'img'); grid.append(slot); }
         button.append(name, grid); button.onclick = () => select(key);
-        row.append(button); rows.set(key, row);
+        row.append(button); makePinControls(row, key); rows.set(key, row);
       }
+      const isPinned = pinned.has(key);
+      row.classList.toggle('ws-pinned', isPinned);
       row.hidden = !entry.project.toLowerCase().includes(filter) && !key.toLowerCase().includes(filter);
+      if (!row.hidden) { if (isPinned) visiblePinned++; else visibleOthers++; }
+      const grip = row.querySelector('.ws-grip'); grip.hidden = !isPinned; grip.draggable = isPinned;
+      grip.setAttribute('aria-label', 'Reorder ' + entry.project + '. Use Up and Down arrows, Home or End.');
+      grip.title = 'Drag to reorder · Up/Down, Home/End';
+      const pin = row.querySelector('.ws-pin'); pin.setAttribute('aria-pressed', String(isPinned));
+      pin.setAttribute('aria-label', (isPinned ? 'Unpin ' : 'Pin ') + entry.project);
+      pin.title = (isPinned ? 'Unpin ' : 'Pin ') + entry.project;
       row.querySelector('.ws-name').textContent = entry.project;
       row.querySelector('.ws-board').setAttribute('aria-current', key === current ? 'page' : 'false');
       const age = minutesSinceEdit(entry, now);
@@ -166,12 +255,17 @@
         slot.setAttribute('aria-label', label + ': ' + (!entry.error && Number.isInteger(count) ? count : 'unavailable'));
         slot.title = slot.getAttribute('aria-label');
       });
-      const position = ordered.filter(item => catalog.some(entry => entry.key === item)).indexOf(key);
-      if (list.children[position] !== row) list.insertBefore(row, list.children[position] || null);
     }
     for (const [key, row] of rows) if (!catalog.some(entry => entry.key === key)) { row.remove(); rows.delete(key); }
-    if (focused && focused.isConnected && !focused.closest('.ws-row').hidden
-        && document.activeElement !== focused) focused.focus({preventScroll: true});
+    pinnedHeading.hidden = visiblePinned === 0;
+    otherHeading.hidden = state.pins.length === 0 || visibleOthers === 0;
+    otherHeading.classList.toggle('ws-divider', visiblePinned > 0 && visibleOthers > 0);
+    const desired = [pinnedHeading, ...state.pins.map(key => rows.get(key)), otherHeading, ...others.map(entry => rows.get(entry.key))];
+    desired.forEach((element, index) => { if (list.children[index] !== element) list.insertBefore(element, list.children[index] || null); });
+    if (focused && focused.isConnected && !focused.closest('.ws-row').hidden) {
+      const target = focused.hidden ? focused.closest('.ws-row').querySelector('.ws-pin') : focused;
+      if (document.activeElement !== target) target.focus({preventScroll: true});
+    }
     list.scrollTop = scrollTop;
     nav.classList.toggle('collapsed', state.collapsed);
     document.getElementById('ws-toggle').setAttribute('aria-label', state.collapsed ? 'Expand boards' : 'Collapse boards');
@@ -187,7 +281,7 @@
       nav.title = value.root;
       if (!initialized) {
         initialized = true; storageKey = 'localswim.workspace.' + value.identity;
-        try { const saved = JSON.parse(sessionStorage.getItem(storageKey)); if (saved && saved.records) { state = saved; delete state.pins; } } catch (_) {}
+        try { const saved = JSON.parse(sessionStorage.getItem(storageKey)); if (saved && saved.records) { state = saved; } } catch (_) {}
         const key = urlKey() || state.lastBoard || (catalog[0] && catalog[0].key);
         if (key) select(key, urlKey() ? 'none' : 'replace');
         else error('No supported boards were found. Add a board to the workspace folder, then retry.');

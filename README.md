@@ -58,11 +58,19 @@ accessible names, and full counts convey their meaning alongside color; large co
 may display as `99+`. Archived cards are excluded. Collapse the sidebar when lane width
 matters; its state is remembered in that browser window.
 
-All boards share one automatic sidebar order: ascending whole elapsed minutes since
-the latest card edit, then descending sum of the three attention counts, then ascending
-board name without case sensitivity. Stable keys break ties between identical names.
-Pin controls no longer override this ranking. Counts and activity refresh the order
-without changing the active board, keyboard focus, or sidebar search and scroll.
+Pin frequently used boards to keep them in a **Pinned** group above **Other boards**.
+Pinned boards keep your manual order. Drag a pinned board's grip relative to another
+pinned board, or focus the grip and use Arrow Up/Down or Home/End to reorder it. Pin and
+unpin controls move boards between groups; dragging only reorders the pinned group.
+Compact group labels and a subtle divider distinguish the groups while the attention
+count columns stay aligned. Pin choices and order survive reloads in the same window;
+independent windows keep their own sidebar preferences.
+
+Other boards sort by ascending whole elapsed minutes since the latest card edit, then
+descending sum of the three attention counts, then ascending board name without case
+sensitivity. Stable keys break ties between identical names. Counts and activity refresh
+this order without changing your pinned order, active board, keyboard focus, or sidebar
+search and scroll.
 
 Card activity includes creation, moves, assignments, priorities, comments, relationships,
 hierarchy, title/description edits, archives, and attachments, including edits to archived

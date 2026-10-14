@@ -109,16 +109,25 @@ same column coordinates as every other row. Labels and accessible full-count nam
 supplement red, amber, and blue circles; visible `99+` does not replace the true count.
 Counts exclude archived cards.
 
-All sidebar boards sort by ascending whole elapsed minutes since the latest audited
-card edit, descending combined attention count, then ascending case-insensitive project
-name. Stable keys resolve identical-name ties. There is no pinned-group override.
+The Pinned group precedes Other boards. `state.pins` records the window's manually
+ordered stable keys. Grip dragging and Arrow Up/Down/Home/End reorder only those keys;
+pin/unpin controls move boards between groups. Native drag state accepts only known
+pinned keys from the same window. Group headings and a subtle divider appear only for
+matching nonempty groups; they never indent the fixed count grid. Keyboard moves
+announce the resulting position through a polite live region.
+
+Other boards sort by ascending whole elapsed minutes since the latest audited card
+edit, descending combined attention count, then ascending case-insensitive project name.
+Stable keys resolve identical-name ties; activity never changes the manual pinned order.
 `last_card_edit_ms()` scans all item history/comments/attachment audit and the board's
 relationship, parent, subject, detail, and archive audit arrays. Edits to archived cards
 contribute recency; touching a snapshot or renaming the project does not. The shared
 stamp parser tolerates unreadable legacy values. Missing activity sorts last; future
 activity has zero elapsed minutes. Catalog polls refresh order while reusing existing
 row elements and preserving keyboard focus, search, list scrolling, and active selection.
-Legacy session pins are ignored without dropping saved per-board drafts or collapse state.
+Legacy session pin order is retained, with duplicates and absent keys discarded.
+Pin order is saved beside per-board drafts and collapse state in window-local session
+storage, so it survives same-window reloads without controlling another window.
 
 Workspace navigation uses History API URLs and updates the active board in place.
 Cold deep links and Back/Forward follow the same selection path. Per-board selected
