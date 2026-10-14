@@ -8,9 +8,10 @@ reading nearly 7,000 lines in an arbitrary order.
 
 ## The system in one page
 
-localswim is one Python process serving one local board from one JSON snapshot. It has
-one runtime dependency, Click, for the command-line tree and makes no browser network
-request beyond loopback.
+An individual localswim service is one Python process serving one local board from one
+JSON snapshot. A workspace adds a loopback gateway and Attention sidebar over those
+independent services. It has one runtime dependency, Click, for the command-line tree
+and makes no browser network request beyond loopback.
 
 ```text
 browser UI ── bearer token + If-Match ─┐
@@ -44,6 +45,8 @@ saved, and only then published as the current in-memory snapshot.
 | `src/localswim/cli.py` | Click command tree, contextual help, and command-to-service dispatch. |
 | `src/localswim/attachments.py` | Bounded attachment metadata, audit replay, raster detection, safe paths, flushed file writes, and content integrity. |
 | `src/localswim/api_endpoint.py` | Loopback HTTP server, transactional store, REST boundary, embedded HTML/CSS/JavaScript, live reload, and optional Git publishing. |
+| `src/localswim/workspace.py` | Directory discovery, workspace catalog and loopback gateway, board-service reuse and startup, and SPA deep-link serving. |
+| `src/localswim/workspace.js` / `workspace.css` | Attention sidebar, SPA navigation, fixed count columns, and per-board browser state. |
 | `src/localswim/rules.json` | Checked legacy/default policy used by controlled migrations. |
 | `pyproject.toml` | uv build metadata, Python contract, dependencies, Ruff/formatter policy, and strict Pyright policy. |
 | `.python-version` / `uv.lock` | Exact development interpreter and cross-platform dependency lock. |
@@ -65,6 +68,52 @@ runtime dependency and supplies the nested command parser and help system. Pytho
 packaging uses uv's native build backend and a `src` layout; run the console entry
 points and development tools through `uv run --frozen` so the checked lock and
 interpreter pin are honored.
+
+## Workspace boundary
+
+Passing a directory to `localswim` selects workspace mode; passing a JSON snapshot keeps
+individual-board mode. The workspace default port is 8810. It discovers validated
+schema-4 snapshots recursively, excluding hidden directories, Git metadata, attachment
+storage, and symbolic-link escapes. Nonboard JSON is ignored; malformed schema-4 boards
+remain visible as unavailable entries with an error instead of being partially loaded.
+
+A board key is its relative POSIX path without `.json`. For example,
+`localswim/localswim.json` becomes `localswim/localswim`, with a readable
+`/board/localswim/localswim` deep link. Project-label edits do not change that key.
+Unknown or unavailable deep links show an explicit error, never a fallback board.
+
+`GET /api/v001/workspace` returns workspace identity and a catalog of entries containing
+`key`, `project`, `counts` (`blocked`, `needsHuman`, `review`), and optional `error`.
+The gateway proxies `/api/v001/workspace/boards/<encoded-key>/<board-api-path>` to the
+selected board's existing `/api/v001/<board-api-path>`. Encode the key as one segment
+(`localswim%2Flocalswim`), even though the browser deep link uses readable slashes.
+Attachment URLs are rebased through that gateway as well.
+
+The gateway reuses a healthy descriptor only when it identifies the correct board.
+Otherwise it starts a child individual-board service on an ephemeral loopback port;
+that child publishes its actual port in the usual descriptor, so existing CLI mutations
+still reach the same sole writer. The gateway never writes board JSON or attachment
+files. Browser mutations use the board's browser credential and remain attributed to
+`browserUser`; they never borrow the CLI identity. `If-Match` and the board service's
+validation, audit, and atomic save remain authoritative.
+
+Workspace `--autopush` is opt-in and applies only to newly started children. Reusing a
+service does not change its publishing configuration. Discovery and workspace browsing
+must not enable private-board publishing implicitly.
+
+The sidebar uses fixed grid columns for Blocked, Needs Terry, and Ready for Review.
+Every project reserves all three slots, including blank zero-count slots. Thus a row
+with two blocked cards and one review card retains an empty middle slot and shares the
+same column coordinates as every other row. Labels and accessible full-count names
+supplement red, amber, and blue circles; visible `99+` does not replace the true count.
+Counts exclude archived cards.
+
+Workspace navigation uses History API URLs and updates the active board in place.
+Cold deep links and Back/Forward follow the same selection path. Per-board selected
+card, filter, lane scroll, comment/editor drafts, and new-card drafts are stored in
+session storage scoped to the window; one window's selection does not force another
+window to change. Sidebar collapse is remembered per window. Source upgrades retain
+the separate guarded reload mechanism; ordinary board selection must never use it.
 
 ## Configuration and schema ownership
 
@@ -438,8 +487,9 @@ changes the premise of the safety check. The Codex test command therefore uses
 
 ## Browser UI behavior
 
-The browser application is a single embedded `PAGE` string in `api_endpoint.py`. There
-is no separate asset build. Inter's Latin and Latin Extended subsets are served locally
+The individual-board UI is an embedded `PAGE` string in `api_endpoint.py`. Workspace
+mode adds locally served `workspace.js` and `workspace.css`; there is no separate asset
+build or browser dependency download. Inter's Latin and Latin Extended subsets are served locally
 with immutable caching; all board/page responses are no-store.
 
 Important UI mechanics:
@@ -450,8 +500,10 @@ Important UI mechanics:
   and view state.
 - Use session storage to survive one guarded reload when the page build differs from
   the server build.
-- Preflight changed Python in a child process; valid source triggers graceful server
-  re-exec, while invalid source leaves the healthy process running and reports why.
+- Watch Python modules and workspace assets. Preflight changed Python in a child
+  process, including workspace imports; JavaScript/CSS are not Python syntax inputs.
+  Valid source triggers graceful server re-exec, while invalid Python leaves the healthy
+  process running and reports why.
 - Reload a complete externally replaced board snapshot, including its embedded policy;
   invalid state or policy is reported rather than partially applied.
 - Search titles, descriptions, comments, and tickets entirely in the browser.
@@ -473,8 +525,8 @@ Important UI mechanics:
 - Derive draggable edges, creatable lanes, labels, priorities, actors, and colors from
   server data rather than duplicating policy in JavaScript.
 
-The build ID is the short Git commit. A dirty checkout appends a fingerprint of the two
-loaded Python sources and `-dirty`; consequently, uncommitted source edits produce
+The build ID is the short Git commit. A dirty checkout appends a fingerprint of the
+loaded source files and `-dirty`; consequently, uncommitted source edits produce
 distinct builds instead of sharing one generic dirty ID. If that checkout later becomes
 clean without changing the loaded source bytes, status polling replaces the stale dirty
 identity with the clean commit after two matching Git reads and a fresh source-digest

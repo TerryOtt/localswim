@@ -128,10 +128,10 @@ def test_page_contains_guarded_auto_reload_and_state_restore(api: RunningApi) ->
     assert "saved.editing === 'detail'" in page
     assert "if (saved.make)" in page
     assert "AUTO-RELOAD FAILED" in page
-    assert "const API_PREFIX = '/api/v001';" in page
+    assert "let API_PREFIX = '/api/v001';" in page
     assert "display: flex; gap: 8px; align-items: flex-start; line-height: 1.15;" in page
     assert "function alignCardStarts()" in page
-    assert "alignCardStarts();\n  playFlip(before);" in page
+    assert "if (laneScroll) window.WorkspaceUI.restoreScroll(laneScroll);" in page
     assert '<span id="wordmark">localswim</span>' in page
     assert '<span id="title">API</span>' in page
     assert "#wordmark { color: #85B8FF; }" in page

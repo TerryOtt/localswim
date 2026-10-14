@@ -12,6 +12,10 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
   browser UI. It is the sole writer while a board is live.
+- `src/localswim/workspace.py` owns directory discovery, the workspace catalog,
+  loopback gateway, board-service reuse/startup, and bookmarkable SPA entry routes.
+- `src/localswim/workspace.js` and `workspace.css` own the Attention sidebar,
+  History API navigation, fixed count columns, and per-board browser state.
 - `src/localswim/rules.json` is the checked legacy/default policy used for controlled
   schema migrations. New boards persist their resolved policy inside the board.
 - `pyproject.toml` is the single build, dependency, Ruff, formatter, and Pyright
@@ -79,6 +83,23 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   priorities. Removing links must not silently downgrade priorities. Only blocking
   relationships contribute; hierarchy and other links do not. Keep browser and CLI
   ordering consistent.
+
+- Workspace mode must proxy each mutation to the board's existing sole writer with
+  that board's browser actor credential and `If-Match`. Never write snapshots directly,
+  impersonate `cliUser` for browser edits, or accept arbitrary upstream URLs. Reuse a
+  healthy correct-board service; start absent services on available loopback ports.
+  Automatic board publishing remains opt-in and cannot change an existing service.
+- Stable board keys derive from relative snapshot paths, never mutable project labels.
+  Support cold deep links and Back/Forward. Switch boards through SPA navigation without
+  document reload, with explicit errors for missing or malformed boards. Keep drafts,
+  filters, selected cards, lane scrolling, and sidebar state independent per window.
+- The Attention sidebar's Blocked, Needs Terry, and Ready for Review counts MUST use
+  three fixed columns across all project rows. Zero counts leave blank reserved slots;
+  they never shift another circle into the empty column. Preserve category labels and
+  accessible true counts alongside color and any capped visible count.
+- Workspace discovery excludes hidden/Git/attachment directories and symbolic-link
+  escapes. Serve assets locally. Source watching includes workspace assets, but Python
+  syntax preflight must never treat JavaScript or CSS as Python input.
 
 ## Code conventions
 

@@ -1,8 +1,9 @@
 # localswim
 
-A small, local swimlane board for one human and one automation agent. It serves a
-draggable browser UI over a single JSON file, binds only to loopback, and has no runtime
-dependency beyond Click, the mature command-line parser used for its nested CLI.
+A small, local swimlane application for one human and one automation agent. Each board
+lives in one JSON snapshot. Open an individual board or a workspace that switches among
+boards with an Attention sidebar. It binds only to loopback and has no runtime dependency
+beyond Click, the mature command-line parser used for its nested CLI.
 
 ## Quick start
 
@@ -34,6 +35,46 @@ a temporary override.
 The boards/ directory is ignored by Git and is the only permitted location for board
 files kept inside this public checkout. A board may instead live in a separate
 repository or directory.
+
+## Multiple boards in one workspace
+
+Start localswim with the directory containing your private boards:
+
+~~~console
+uv run --frozen localswim path/to/state-store --port 8810
+~~~
+
+A directory starts the workspace; a JSON file still starts an individual board. The
+workspace defaults to **http://127.0.0.1:8810/**. It discovers schema-4 boards below the
+directory and presents one active board at a time. Existing healthy board services are
+reused; absent services start on available loopback ports. The CLI continues to use each
+board's JSON path and its own service descriptor.
+
+The Attention sidebar gives every project three fixed count columns: **Blocked** (red),
+**Needs Terry** (amber), and **Ready for Review** (blue). A zero count leaves its column
+blank, so a project with two blocked cards and one ready for review has an empty middle
+column. The circles remain vertically aligned across every project row. Column labels,
+accessible names, and full counts convey their meaning alongside color; large counts
+may display as `99+`. Archived cards are excluded. Collapse the sidebar when lane width
+matters; its state is remembered in that browser window.
+
+Board links are bookmarkable. A snapshot at `state-store/localswim/localswim.json` has a
+workspace URL such as **http://127.0.0.1:8810/board/localswim/localswim**. The key is its
+relative path without `.json`, so changing the displayed project name preserves the
+bookmark. Switching boards updates the URL and contents without reloading the page.
+Direct bookmarks, browser Back/Forward, and opening a link in another window work too.
+Each window keeps its own per-board search, selected card, lane scrolling, and unsent
+comment, editor, and new-card drafts in session storage.
+
+Unavailable or malformed boards display an error; an unknown bookmark never silently
+opens another board. Discovery excludes hidden directories, Git metadata, attachment
+storage, and paths that escape the selected directory through symbolic links. Ordinary
+JSON files that are not board snapshots are ignored. Board data stays in its original
+location, including attachment files beside each snapshot.
+
+Workspace children start with automatic board publishing disabled unless `--autopush`
+is explicitly supplied. That option applies only to newly started services and does
+not change the publishing policy of services already running.
 
 ## Board configuration
 
@@ -431,6 +472,21 @@ Attachment uploads POST `{name, data}` with base64 file bytes; removal POSTs
 metadata; oversized bodies/files return HTTP 413. Attachment read routes accept
 `?download=1` to download an image instead of opening its inline preview.
 
+A workspace also exposes:
+
+~~~text
+GET  /api/v001/workspace
+GET  /api/v001/workspace/boards/<encoded-key>/status
+GET  /api/v001/workspace/boards/<encoded-key>/board
+POST /api/v001/workspace/boards/<encoded-key>/cards/...
+~~~
+
+The catalog includes each board's stable key, project name, the three attention counts,
+and any availability error. Proxy routes append the individual board API path after a
+key encoded as one URL segment, for example `localswim%2Flocalswim`. The gateway forwards
+requests to that board's sole writer, preserving revision checks and browser actor
+attribution. Attachment links use the same origin and selected board.
+
 Only the `/api/v001` routes are API endpoints. For seamless upgrades of already-open
 tabs, `/v1/status` and `/mtime` issue no-cache redirects to
 `/api/v001/status`. Earlier board and mutation routes are not retained.
@@ -442,7 +498,7 @@ the CLI credential and does not change the board revision.
 
 ## Live code updates
 
-The server watches its installed `api_endpoint`, `board_state`, and `attachments` modules. A valid
+The server watches its installed Python modules and workspace JavaScript/CSS assets. A valid
 change is debounced, preflighted in a child Python process and applied by gracefully
 re-executing the server. An invalid change leaves the healthy process running and
 reports the preflight error.
@@ -453,7 +509,8 @@ seconds and adopts the clean commit only after two Git reads agree and both load
 Python source digests still match disk. Changed source continues through the guarded
 re-exec path; the metadata refresh never hides or overrides real code drift.
 
-Open tabs detect the new build and reload once. Comment drafts, active editors, a
+Open tabs detect a source upgrade and reload once. Normal workspace board switching
+uses SPA navigation and does not reload the browser document. Comment drafts, active editors, a
 partially written card, search text and view state survive in per-tab session storage.
 
 ## Development

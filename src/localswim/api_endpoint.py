@@ -141,6 +141,9 @@ def build_id() -> str:
                 pathlib.Path(__file__).resolve(),
                 pathlib.Path(board_state.__file__ or __file__).resolve(),
                 pathlib.Path(attachments.__file__ or __file__).resolve(),
+                pathlib.Path(__file__).with_name("workspace.py"),
+                pathlib.Path(__file__).with_name("workspace.js"),
+                pathlib.Path(__file__).with_name("workspace.css"),
             )
             digest = hashlib.sha256()
             for source in sources:
@@ -194,6 +197,9 @@ CODE_FILES = (
     pathlib.Path(__file__).resolve(),
     pathlib.Path(board_state.__file__ or __file__).resolve(),
     pathlib.Path(attachments.__file__ or __file__).resolve(),
+    pathlib.Path(__file__).with_name("workspace.py"),
+    pathlib.Path(__file__).with_name("workspace.js"),
+    pathlib.Path(__file__).with_name("workspace.css"),
 )
 
 
@@ -294,6 +300,8 @@ _restart_problem: str | None = None
 def _source_syntax_problem() -> str | None:
     """Explain why the changed Python cannot safely replace this running process."""
     for path in CODE_FILES:
+        if path.suffix != ".py":
+            continue
         try:
             source = path.read_text(encoding="utf-8")
             compile(source, str(path), "exec")
@@ -312,7 +320,7 @@ def _source_startup_problem() -> str | None:
     here = pathlib.Path(__file__).resolve().parent
     try:
         checked = subprocess.run(
-            [sys.executable, "-c", "from localswim import api_endpoint, board_state"],
+            [sys.executable, "-c", "from localswim import api_endpoint, board_state, workspace"],
             cwd=here,
             capture_output=True,
             encoding="utf-8",
@@ -412,7 +420,7 @@ def request_service_shutdown(server: socketserver.BaseServer) -> tuple[bool, str
     return True, detail
 
 
-def _reexec_if_requested() -> None:
+def reexec_if_requested() -> None:
     """Replace this process after its listening socket and request threads close."""
     if not _restart_requested.is_set():
         return
@@ -424,6 +432,11 @@ def _reexec_if_requested() -> None:
         sys.executable,
         [sys.executable, "-m", "localswim.api_endpoint", *sys.argv[1:]],
     )
+
+
+def _reexec_if_requested() -> None:
+    """Compatibility seam for existing source lifecycle tests."""
+    reexec_if_requested()
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +520,7 @@ def _git(args: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess[str]
         return subprocess.CompletedProcess(args, 1, "", str(exc))
 
 
-def _try_repository_lock(fd: int) -> bool:
+def try_process_lock(fd: int) -> bool:
     """Try one non-blocking, process-scoped operating-system file lock."""
     os.lseek(fd, 0, os.SEEK_SET)
     if os.name == "nt":
@@ -530,7 +543,7 @@ def _try_repository_lock(fd: int) -> bool:
     return True
 
 
-def _release_repository_lock(fd: int) -> None:
+def release_process_lock(fd: int) -> None:
     """Release the platform lock; closing the descriptor remains the crash fallback."""
     os.lseek(fd, 0, os.SEEK_SET)
     if os.name == "nt":
@@ -560,7 +573,7 @@ def _repository_push_locked(cwd: pathlib.Path) -> Generator[None]:
         if os.fstat(fd).st_size == 0:
             os.write(fd, b"\0")
         deadline = time.monotonic() + _PUSH_LOCK_WAIT_S
-        while not _try_repository_lock(fd):
+        while not try_process_lock(fd):
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out waiting for repository autopush lock {lock_path}")
             time.sleep(_PUSH_LOCK_POLL_S)
@@ -569,7 +582,7 @@ def _repository_push_locked(cwd: pathlib.Path) -> Generator[None]:
     finally:
         try:
             if acquired:
-                _release_repository_lock(fd)
+                release_process_lock(fd)
         finally:
             os.close(fd)
 
@@ -983,6 +996,11 @@ def publish_service(path: pathlib.Path, port: int) -> None:
         "port": port,
         "token": CLI_TOKEN,
         "board": str(path.resolve()),
+        **(
+            {"workspaceLaunch": launch}
+            if (launch := os.environ.get("LOCALSWIM_WORKSPACE_LAUNCH"))
+            else {}
+        ),
     }
     try:
         with tmp.open("w", encoding="utf-8", newline="\n") as fh:
@@ -2150,12 +2168,15 @@ move any card whoever owns it. Click to hand it over."></button>
   <p id="attachment-refusal-reason"></p>
   <form method="dialog"><button type="submit">OK</button></form>
 </dialog>
+%WORKSPACE%
 <script>
 const API_TOKEN = '%TOKEN%';
-const API_PREFIX = '%API_PREFIX%';
+let API_PREFIX = '%API_PREFIX%';
 
 async function apiPost(path, body) {
-  return fetch(path, {
+  const epoch = window.workspaceEpoch;
+  const prefix = API_PREFIX;
+  const response = await fetch(path, {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + API_TOKEN,
@@ -2164,6 +2185,16 @@ async function apiPost(path, body) {
     },
     body: JSON.stringify(body),
   });
+  const read = response.json.bind(response);
+  response.json = async () => {
+    const out = await read();
+    if (epoch !== window.workspaceEpoch) {
+      if (response.ok && window.WorkspaceUI) window.WorkspaceUI.reconcile(prefix, path, body);
+      out.workspaceBoardChanged = true;
+    }
+    return out;
+  };
+  return response;
 }
 
 function acceptRevision(out) {
@@ -2268,6 +2299,7 @@ async function saveSubject() {
     const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(openId) + '/subject',
                               {subject: wanted});
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) { toast(out.error || 'Rename refused', true); return; }
     toast(out.result);
@@ -2303,6 +2335,7 @@ async function saveDetail() {
     const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(openId) + '/detail',
                               {detail: wanted});
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) { toast(out.error || 'Edit refused', true); return; }
     toast(out.result);
@@ -2497,6 +2530,7 @@ async function mutateRelationship(source, body, controls) {
     const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/link';
     const res = await apiPost(path, body);
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) { toast(out.error || 'Relationship change refused', true); return false; }
     toast(out.result);
@@ -2629,6 +2663,7 @@ async function attachmentCommand(source, action, body) {
     const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/' + action;
     const res = await apiPost(path, body);
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) {
       attachmentRefusal(out.error || 'The attachment change could not be saved.');
@@ -2707,6 +2742,7 @@ document.getElementById('p-upload').addEventListener('click', () => {
 });
 document.getElementById('p-upload-file').addEventListener('change', async (ev) => {
   const source = openId;
+  const epoch = window.workspaceEpoch;
   const file = ev.target.files[0];
   const upload = document.getElementById('p-upload');
   if (!source || !file) return;
@@ -2717,7 +2753,9 @@ document.getElementById('p-upload-file').addEventListener('change', async (ev) =
   }
   upload.disabled = true;
   try {
-    await attachmentCommand(source, 'attachment', {name: file.name, data: await fileBase64(file)});
+    const bytes = await fileBase64(file);
+    if (epoch !== window.workspaceEpoch) return;
+    await attachmentCommand(source, 'attachment', {name: file.name, data: bytes});
   } catch (err) { attachmentRefusal(String(err)); }
   finally { upload.disabled = false; ev.target.value = ''; }
 });
@@ -2935,6 +2973,7 @@ async function postComment() {
   const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(openId) + '/comment',
                             {text: text});
   const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
   acceptRevision(out);
   if (!res.ok) { toast(out.error || 'Comment refused', true); return; }
   document.getElementById('say').value = '';
@@ -2991,6 +3030,7 @@ document.getElementById('p-owner').addEventListener('click', async () => {
     const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(openId) + '/assign',
                               {owner: nextOwner(it.owner)});
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) { toast(out.error || 'Reassign refused', true); return; }
     toast(out.result);
@@ -3023,6 +3063,7 @@ document.getElementById('p-pri').addEventListener('change', async (ev) => {
     const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(changingId) + '/priority',
                               {priority: wanted});
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) {
       toast(out.error || 'Priority change refused', true);
@@ -3184,6 +3225,7 @@ async function submitMake() {
         links: relationshipSpecs(document.getElementById('mk-relations')),
     });
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) { toast(out.error || 'Card refused', true); return; }
     // **Only cleared once the server has it.** Clearing on click would throw the
@@ -3352,6 +3394,7 @@ function laneEl(lane) {
     const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(payload.id) + '/move',
                               {to: lane.state});
     const out = await res.json();
+    if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) { toast(out.error || 'Move refused', true); return; }
     toast(out.result);
@@ -3596,6 +3639,7 @@ function applyFilter() {
 }
 
 function paint() {
+  const laneScroll = window.WorkspaceUI ? window.WorkspaceUI.scrolls() : null;
   // The project name is board data, not page-build data. Update both title surfaces on
   // every changed-board paint so `--set-project` reaches an already-open tab without a
   // reload. An error payload has no project and must not erase the last known name.
@@ -3615,6 +3659,7 @@ function paint() {
   board.replaceChildren();
   for (const lane of data.lanes) board.appendChild(laneEl(lane));
   alignCardStarts();
+  if (laneScroll) window.WorkspaceUI.restoreScroll(laneScroll);
   playFlip(before);
   // **REAPPLIED AFTER EVERY REPAINT, and forgetting this is the obvious bug.** `paint()`
   // rebuilds every card, so a filtered board would silently un-filter itself the next
@@ -3761,6 +3806,7 @@ function agoOf(ms) {
 let staleReloadStarted = false;
 
 function saveStaleReloadState() {
+  if (window.WorkspaceUI) window.WorkspaceUI.capture();
   if (openId) drafts[openId] = document.getElementById('say').value;
   const saved = {
     drafts: drafts,
@@ -3995,8 +4041,13 @@ function renderLive() {
 // 400ms is realtime as far as an eye is concerned, and the cost is one `stat`
 // plus a 12 KB JSON parse against a local file.
 async function tick() {
+  if (window.localswimWorkspace && !window.workspaceReady) return;
+  const epoch = window.workspaceEpoch;
+  const prefix = API_PREFIX;
   try {
-    const meta = await (await fetch(API_PREFIX + '/status', {cache: 'no-store'})).json();
+    const meta = await (await fetch(prefix + '/status', {cache: 'no-store'})).json();
+    if (epoch !== window.workspaceEpoch) return;
+    if (meta.error && window.WorkspaceUI) { window.WorkspaceUI.error(meta.error); return; }
     // **Captured before the ok check**, because a stale tab and an unreadable board
     // are independent failures and either can be true while the other is.
     if (meta.build) serverBuild = meta.build;
@@ -4015,7 +4066,9 @@ async function tick() {
     if (meta.ok === false) { renderLive(); return; }
     fileMs = meta.mtime * 1000;
     if (meta.mtime !== seen) {
-      data = await (await fetch(API_PREFIX + '/board', {cache: 'no-store'})).json();
+      const snapshot = await (await fetch(prefix + '/board', {cache: 'no-store'})).json();
+      if (epoch !== window.workspaceEpoch) return;
+      data = snapshot;
       // **The search cache MUST die with the data that filled it.** Card #0061. A card
       // that gains a comment keeps its id, so a cache keyed on the id alone would go on
       // answering from the text that card had a minute ago -- and a search for a
@@ -4024,6 +4077,7 @@ async function tick() {
       seen = meta.mtime;
       paint();
       restoreStaleReloadState();
+      if (window.WorkspaceUI) window.WorkspaceUI.loaded();
     }
     // Only a real answer moves this. It is the whole signal.
     lastOk = Date.now();
@@ -4605,6 +4659,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._redirect(API_PREFIX + "/status")
         elif route == API_PREFIX + "/status":
             self._status_get()
+        elif route == API_PREFIX + "/browser-session":
+            if STORE is not None:
+                STORE.snapshot()
+            self._json(
+                {
+                    "token": BROWSER_TOKEN,
+                    "userCSS": user_css(),
+                    "boardIdentity": hashlib.sha256(
+                        str(BOARD_PATH.resolve()).casefold().encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
         elif route == API_PREFIX + "/board":
             self._send(payload(), "application/json")
         elif route == "/favicon.svg":
@@ -4648,6 +4714,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("%BUILD%", html.escape(BUILD))
                 .replace("%TOKEN%", BROWSER_TOKEN)
                 .replace("%API_PREFIX%", API_PREFIX)
+                .replace("%WORKSPACE%", "")
                 # **The bar's mark comes from the same `FAVICON` the tab icon
                 # uses.** Card #0095. One definition, so a recolor cannot land in
                 # one place and miss the other.
@@ -4749,7 +4816,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the service command line, including opt-in external side effects."""
     ap = argparse.ArgumentParser(description="Serve a localswim board.")
-    ap.add_argument("board", type=pathlib.Path, help="path to the board JSON")
+    ap.add_argument("board", type=pathlib.Path, help="path to a board JSON or workspace directory")
     ap.add_argument("--port", type=int, default=None, help="override the port in the board file")
     ap.add_argument(
         "--autopush",
@@ -4759,16 +4826,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def main() -> None:
+def _serve_board(args: argparse.Namespace) -> None:
     global BOARD_PATH, STORE  # noqa: PLW0603 -- one process serves one board
-    args = parse_args()
     _shutdown_requested.clear()
     BOARD_PATH = args.board.resolve()
 
     if problem := source_checkout_board_problem(BOARD_PATH):
         raise SystemExit(f"ERROR: {problem}")
 
-    port = args.port or board_state.DEFAULT_PORT
+    port = board_state.DEFAULT_PORT if args.port is None else args.port
     print(f"Serving {BOARD_PATH}")
     board: board_state.Board | None = None
     try:
@@ -4815,6 +4881,7 @@ def main() -> None:
     start_autopush(BOARD_PATH, enabled=args.autopush)
 
     server = BoardHttpServer((HOST, port), Handler)
+    port = server.server_address[1]
     publish_service(BOARD_PATH, port)
     print(f"Listening on {HOST}:{port}. Press Ctrl+C to stop.", flush=True)
     try:
@@ -4823,6 +4890,21 @@ def main() -> None:
         server.server_close()
         remove_service(BOARD_PATH)
     _reexec_if_requested()
+
+
+def main() -> None:
+    """Dispatch the board file or directory workspace entry point."""
+    args = parse_args()
+    if args.board.is_dir():
+        from . import workspace  # noqa: PLC0415 -- workspace entry point is optional
+
+        workspace.serve(
+            args.board,
+            workspace.DEFAULT_PORT if args.port is None else args.port,
+            autopush=args.autopush,
+        )
+    else:
+        _serve_board(args)
 
 
 if __name__ == "__main__":
