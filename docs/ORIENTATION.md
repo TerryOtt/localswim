@@ -116,14 +116,17 @@ pinned keys from the same window. Group headings and a subtle divider appear onl
 matching nonempty groups; they never indent the fixed count grid. Keyboard moves
 announce the resulting position through a polite live region.
 
-Other boards sort by ascending whole elapsed minutes since the latest audited card
-edit, descending combined attention count, then ascending case-insensitive project name.
-Stable keys resolve identical-name ties; activity never changes the manual pinned order.
+Other boards sort by the latest audited card edit's exact epoch timestamp, descending,
+then descending combined attention count and ascending case-insensitive project name.
+Attention counts break ties only for identical timestamps. The comparator never reads
+the current time, so an unchanged catalog cannot reorder as time passes. Stable keys resolve
+identical-name ties; activity never changes the manual pinned order.
 `last_card_edit_ms()` scans all item history/comments/attachment audit and the board's
 relationship, parent, subject, detail, and archive audit arrays. Edits to archived cards
 contribute recency; touching a snapshot or renaming the project does not. The shared
 stamp parser tolerates unreadable legacy values. Missing activity sorts last; future
-activity has zero elapsed minutes. Catalog polls refresh order while reusing existing
+activity retains its exact recorded timestamp. Tooltips independently show elapsed whole
+minutes, clamped to zero for future activity. Catalog polls refresh order while reusing existing
 row elements and preserving keyboard focus, search, list scrolling, and active selection.
 Legacy session pin order is retained, with duplicates and absent keys discarded.
 Pin order is saved beside per-board drafts and collapse state in window-local session
@@ -135,6 +138,21 @@ card, filter, lane scroll, comment/editor drafts, and new-card drafts are stored
 session storage scoped to the window; one window's selection does not force another
 window to change. Sidebar collapse is remembered per window. Source upgrades retain
 the separate guarded reload mechanism; ordinary board selection must never use it.
+
+Workspace JSON reads use a 20-second abort deadline and one active poll per navigation
+epoch. Late errors from another epoch cannot replace the current board. The snapshot
+marker advances only after painting and saved-state restoration succeed. Transport,
+HTTP, and render failures show a stable recovery surface; catalog polling does not
+restart a failed selection repeatedly. Explicit Retry is queued if a catalog refresh
+is already running. Saved state remains protected until restoration succeeds, so
+closing the error view cannot overwrite drawer/editor/create drafts.
+
+Each successful catalog refresh also obtains the workspace browser session and checks
+its identity before replacing the page's browser credential. This recovers credentials
+rotated by a gateway restart without retrying mutations that might have already applied.
+The gateway/board/monitor processes launched under Codex may stop when Codex exits;
+restore the service and use Retry rather than treating cached monitor files as proof
+that a listener or monitor process is still alive.
 
 ## Configuration and schema ownership
 

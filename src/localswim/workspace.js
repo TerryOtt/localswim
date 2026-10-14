@@ -2,7 +2,7 @@
 (() => {
   const categories = [['blocked', 'Blocked'], ['needsHuman', 'Needs Terry'], ['review', 'Ready for Review']];
   let catalog = [], current = null, storageKey = '', state = {records: {}, collapsed: false, pins: []};
-  let pending = null, initialized = false, refreshing = false;
+  let pending = null, initialized = false, refreshing = false, recoverOnCatalog = false, retryRequested = false;
   window.workspaceEpoch = 0;
   const link = document.createElement('link');
   link.rel = 'stylesheet'; link.href = '/workspace.css'; document.head.append(link);
@@ -58,7 +58,7 @@
       style.textContent = data.userCSS;
     }
     if (!pending) return;
-    const saved = pending; pending = null;
+    const saved = pending;
     if (saved.openId && itemById(saved.openId)) {
       openCard(saved.openId);
       if (saved.editing === 'subject') startSubjectEdit();
@@ -78,16 +78,22 @@
     }
     restoreScroll(saved.scroll || {});
     const drawer = document.querySelector('#panel .body'); if (drawer) drawer.scrollTop = saved.drawerScroll || 0;
+    pending = null;
   }
-  function error(message) {
-    persist(); closeCard(); closeMake(true); closeEditors();
+  function error(message, recover = false) {
+    recoverOnCatalog = recover;
+    persist();
+    if (pending === null) pending = state.records[current] || {};
+    window.workspaceEpoch++; lastOk = 0;
+    closeCard(); closeMake(true); closeEditors();
     window.workspaceReady = false; board.replaceChildren();
     const surface = document.createElement('div'); surface.className = 'ws-error';
     const title = document.createElement('h2'); title.textContent = 'Board unavailable';
     const detail = document.createElement('p'); detail.textContent = message;
-    const retry = document.createElement('button'); retry.textContent = 'Retry'; retry.onclick = () => refresh(true);
+    const retry = document.createElement('button'); retry.textContent = 'Retry'; retry.onclick = () => { retry.disabled = true; retry.textContent = 'Retrying…'; refresh(true); };
     surface.append(title, detail, retry); board.append(surface);
-    document.getElementById('title').textContent = current || 'Workspace';
+    const entry = catalog.find(item => item.key === current);
+    document.getElementById('title').textContent = entry ? entry.project : current || 'Workspace';
     document.title = 'Board unavailable · localswim';
   }
   function select(key, history = 'push') {
@@ -108,9 +114,11 @@
     document.getElementById('banner').classList.remove('show');
     document.getElementById('ws-window').href = route(key);
     renderRows();
-    if (!entry || entry.error) { error(entry ? entry.error : 'This bookmark does not identify a board in this workspace. Choose a board from the sidebar.'); return; }
+    if (!entry || entry.error) { error(entry ? entry.error : 'This bookmark does not identify a board in this workspace. Choose a board from the sidebar.', true); return; }
     API_PREFIX = '/api/v001/workspace/boards/' + encodeURIComponent(key);
     document.getElementById('title').textContent = entry.project;
+    boardTitle = entry.project; document.title = entry.project + ' · Loading';
+    recoverOnCatalog = false;
     board.textContent = 'Loading ' + entry.project + '…';
     window.workspaceReady = true;
     tick(); persist();
@@ -120,6 +128,9 @@
     return Number.isFinite(entry.lastCardEditMs)
       ? Math.floor(Math.max(0, now - entry.lastCardEditMs) / 60000) : Infinity;
   }
+  function editTimestamp(entry) {
+    return Number.isFinite(entry.lastCardEditMs) ? entry.lastCardEditMs : -Infinity;
+  }
   function attentionTotal(entry) {
     if (entry.error) return 0;
     return categories.reduce((total, [kind]) => {
@@ -127,9 +138,9 @@
       return total + (Number.isInteger(count) && count > 0 ? count : 0);
     }, 0);
   }
-  function compareBoards(a, b, now) {
-    const ageA = minutesSinceEdit(a, now), ageB = minutesSinceEdit(b, now);
-    if (ageA !== ageB) return ageA < ageB ? -1 : 1;
+  function compareBoards(a, b) {
+    const stampA = editTimestamp(a), stampB = editTimestamp(b);
+    if (stampA !== stampB) return stampA > stampB ? -1 : 1;
     return attentionTotal(b) - attentionTotal(a)
       || boardNames.compare(a.project, b.project)
       || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
@@ -215,7 +226,7 @@
     normalizePins();
     const list = document.getElementById('ws-list'), filter = document.getElementById('ws-find').value.toLowerCase();
     const now = Date.now(), pinned = new Set(state.pins);
-    const others = catalog.filter(entry => !pinned.has(entry.key)).sort((a, b) => compareBoards(a, b, now));
+    const others = catalog.filter(entry => !pinned.has(entry.key)).sort(compareBoards);
     const ordered = [...state.pins, ...others.map(entry => entry.key)];
     const focused = list.contains(document.activeElement) ? document.activeElement : null;
     const scrollTop = list.scrollTop;
@@ -272,11 +283,17 @@
     document.getElementById('ws-toggle').setAttribute('aria-expanded', String(!state.collapsed));
   }
   async function refresh(retry = false) {
+    retryRequested = retryRequested || retry;
     if (refreshing) return; refreshing = true;
+    const retryNow = retryRequested; retryRequested = false;
     try {
-      const res = await fetch('/api/v001/workspace', {cache: 'no-store'});
-      if (!res.ok) throw new Error('Workspace catalog could not be read.');
-      const value = await res.json(); catalog = value.boards;
+      const value = await apiGet('/api/v001/workspace');
+      const session = await apiGet('/api/v001/browser-session');
+      if (session.workspaceIdentity !== value.identity || typeof session.token !== 'string' || !session.token)
+        throw new Error('The workspace session could not be recovered.');
+      // A restarted gateway has a new browser credential even when its build is unchanged.
+      API_TOKEN = session.token;
+      catalog = value.boards;
       document.getElementById('ws-status').textContent = catalog.length ? '' : 'No boards found in this folder.';
       nav.title = value.root;
       if (!initialized) {
@@ -285,11 +302,11 @@
         const key = urlKey() || state.lastBoard || (catalog[0] && catalog[0].key);
         if (key) select(key, urlKey() ? 'none' : 'replace');
         else error('No supported boards were found. Add a board to the workspace folder, then retry.');
-      } else if (retry || (!window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none');
-      if (current && !catalog.some(entry => entry.key === current && !entry.error) && window.workspaceReady) { persist(); window.workspaceEpoch++; error('This board is missing or cannot be read. Choose another board or retry.'); }
+      } else if (retryNow || (recoverOnCatalog && !window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none');
+      if (current && !catalog.some(entry => entry.key === current && !entry.error) && window.workspaceReady) { persist(); window.workspaceEpoch++; error('This board is missing or cannot be read. Choose another board or retry.', true); }
       renderRows();
-    } catch (err) { document.getElementById('ws-status').textContent = String(err); if (!initialized) error(String(err)); }
-    finally { refreshing = false; }
+    } catch (err) { document.getElementById('ws-status').textContent = String(err); if (!initialized || retryNow) error('Could not reach the workspace. Restart localswim, then Retry.'); }
+    finally { refreshing = false; if (retryRequested) refresh(); }
   }
   function reconcile(prefix, path, body) {
     const key = decodeURIComponent(prefix.split('/').pop());

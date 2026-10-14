@@ -66,17 +66,20 @@ Compact group labels and a subtle divider distinguish the groups while the atten
 count columns stay aligned. Pin choices and order survive reloads in the same window;
 independent windows keep their own sidebar preferences.
 
-Other boards sort by ascending whole elapsed minutes since the latest card edit, then
+Other boards sort by the latest card edit's exact timestamp, most recent first, then
 descending sum of the three attention counts, then ascending board name without case
-sensitivity. Stable keys break ties between identical names. Counts and activity refresh
+sensitivity. Attention counts break ties only when edit timestamps are identical;
+stable keys break ties between identical names. Time passing alone cannot change the
+order. Counts and activity refresh
 this order without changing your pinned order, active board, keyboard focus, or sidebar
 search and scroll.
 
 Card activity includes creation, moves, assignments, priorities, comments, relationships,
 hierarchy, title/description edits, archives, and attachments, including edits to archived
 cards. File touches and project-label changes do not count. Empty boards or boards with
-no readable card timestamps sort after boards with known activity; future timestamps
-have zero elapsed minutes. The board-button tooltip reports its whole-minute age.
+no readable card timestamps sort after boards with known activity. Future timestamps
+retain their exact recorded timestamp for sorting. The board-button tooltip reports elapsed
+whole minutes since the edit, clamped to zero for future timestamps.
 
 Board links are bookmarkable. A snapshot at `state-store/localswim/localswim.json` has a
 workspace URL such as **http://127.0.0.1:8810/board/localswim/localswim**. The key is its
@@ -87,7 +90,14 @@ Each window keeps its own per-board search, selected card, lane scrolling, and u
 comment, editor, and new-card drafts in session storage.
 
 Unavailable or malformed boards display an error; an unknown bookmark never silently
-opens another board. Discovery excludes hidden directories, Git metadata, attachment
+opens another board. Reads time out after 20 seconds, with one poll in flight for each
+board selection. If the workspace or board service stops, the page shows a recovery
+message and **Retry**, preserving saved drafts and sidebar preferences. Restart the
+workspace with the launch command above, then select Retry. A restarted gateway's
+browser session is refreshed before further commands; an unavailable service must
+not leave the interface on an endless Loading message.
+
+Discovery excludes hidden directories, Git metadata, attachment
 storage, and paths that escape the selected directory through symbolic links. Ordinary
 JSON files that are not board snapshots are ignored. Board data stays in its original
 location, including attachment files beside each snapshot.
@@ -562,7 +572,10 @@ pytest, actionlint with ShellCheck, and the project's US English vocabulary chec
 vocabulary table comes from the public FlickrGroupAddr/backend-api repository; pass its
 path with **--word-table path/to/claude-dirty-words.py** if it is not in a neighboring
 checkout. actionlint 1.7.12 and ShellCheck 0.11.0 must be on `PATH`; installation details
-are in [docs/TOOLING.md](docs/TOOLING.md).
+are in [docs/TOOLING.md](docs/TOOLING.md). Sidebar ordering regression tests execute
+the production JavaScript helpers with Node.js when it is available on `PATH`; those
+tests skip when Node.js is absent. Node.js is optional test tooling, not a runtime
+dependency.
 
 Build reproducible source and wheel distributions with the declared backend, ignoring
 any local uv dependency-source overrides:

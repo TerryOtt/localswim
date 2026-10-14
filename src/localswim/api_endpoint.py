@@ -2170,8 +2170,16 @@ move any card whoever owns it. Click to hand it over."></button>
 </dialog>
 %WORKSPACE%
 <script>
-const API_TOKEN = '%TOKEN%';
+let API_TOKEN = '%TOKEN%';
 let API_PREFIX = '%API_PREFIX%';
+
+async function apiGet(path) {
+  const response = await fetch(path, {cache: 'no-store', signal: AbortSignal.timeout(20000)});
+  const value = await response.json();
+  if (!response.ok)
+    throw new Error(value.error || 'The service could not be reached (' + response.status + ').');
+  return value;
+}
 
 async function apiPost(path, body) {
   const epoch = window.workspaceEpoch;
@@ -4040,14 +4048,17 @@ function renderLive() {
 //
 // 400ms is realtime as far as an eye is concerned, and the cost is one `stat`
 // plus a 12 KB JSON parse against a local file.
+let pollingEpoch = null;
 async function tick() {
   if (window.localswimWorkspace && !window.workspaceReady) return;
   const epoch = window.workspaceEpoch;
+  if (pollingEpoch === epoch) return;
+  pollingEpoch = epoch;
   const prefix = API_PREFIX;
   try {
-    const meta = await (await fetch(prefix + '/status', {cache: 'no-store'})).json();
+    const meta = await apiGet(prefix + '/status');
     if (epoch !== window.workspaceEpoch) return;
-    if (meta.error && window.WorkspaceUI) { window.WorkspaceUI.error(meta.error); return; }
+    if (meta.error && window.WorkspaceUI) throw new Error(meta.error);
     // **Captured before the ok check**, because a stale tab and an unreadable board
     // are independent failures and either can be true while the other is.
     if (meta.build) serverBuild = meta.build;
@@ -4063,29 +4074,45 @@ async function tick() {
     // **`ok: false` does NOT refresh `lastOk`.** The server answered, but it
     // could not read the board -- and a reachable server serving an unreadable
     // file is exactly the state that must not look healthy.
-    if (meta.ok === false) { renderLive(); return; }
+    if (meta.ok === false) {
+      if (window.WorkspaceUI)
+        throw new Error(meta.error || 'The board service could not read this board.');
+      renderLive(); return;
+    }
     fileMs = meta.mtime * 1000;
     if (meta.mtime !== seen) {
-      const snapshot = await (await fetch(prefix + '/board', {cache: 'no-store'})).json();
+      const snapshot = await apiGet(prefix + '/board');
       if (epoch !== window.workspaceEpoch) return;
+      if (snapshot.error && !(snapshot.lanes || []).length) throw new Error(snapshot.error);
       data = snapshot;
       // **The search cache MUST die with the data that filled it.** Card #0061. A card
       // that gains a comment keeps its id, so a cache keyed on the id alone would go on
       // answering from the text that card had a minute ago -- and a search for a
       // sentence Terry just wrote would report "no match".
       HAY.clear();
-      seen = meta.mtime;
       paint();
       restoreStaleReloadState();
       if (window.WorkspaceUI) window.WorkspaceUI.loaded();
+      // Commit the snapshot marker only after the UI successfully renders it.
+      seen = meta.mtime;
     }
     // Only a real answer moves this. It is the whole signal.
     lastOk = Date.now();
   } catch (e) {
-    // Deliberately does NOT touch lastOk. The age keeps climbing, and that is
-    // what turns the bar red on its own.
+    // Superseded requests cannot replace another board's content or recovery state.
+    if (epoch === window.workspaceEpoch && window.WorkspaceUI) {
+      const message = e.name === 'TimeoutError' || e.name === 'AbortError'
+        ? 'The board service did not respond in time. Retry when it is available.'
+        : e instanceof TypeError
+          ? 'The board service could not be reached. Restart localswim, then Retry.'
+        : 'Could not load this board: ' + e.message;
+      window.WorkspaceUI.error(message);
+    }
+    // Failed requests do not advance lastOk or the successfully rendered snapshot marker.
+  } finally {
+    if (pollingEpoch === epoch) pollingEpoch = null;
   }
-  renderLive();
+  if (epoch === window.workspaceEpoch) renderLive();
 }
 tick();
 setInterval(tick, %POLL%);

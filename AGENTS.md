@@ -101,15 +101,24 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   dragging and keyboard reordering affect only pinned stable keys; pin/unpin controls
   move boards between groups. Preserve manual order across activity updates and reloads
   in the same independent window. Group labels/dividers must not indent count columns.
-  Sort Other boards by ascending whole elapsed minutes since the latest audited card
-  edit, descending total attention count, then ascending case-insensitive project name;
-  stable keys resolve identical-name ties. Include archived cards in recency, exclude
-  them from counts, and never use snapshot file times or project renames as card edits.
-  Unknown recency sorts last and future stamps have zero elapsed minutes. Preserve
-  active selection, keyboard focus, drafts, search, and scrolling when rows reorder.
+  Sort Other boards by the latest audited card edit's exact epoch timestamp, descending,
+  then descending total attention count and ascending case-insensitive project name;
+  stable keys resolve identical-name ties. Only identical timestamps tie on recency.
+  The comparator must not depend on current time:
+  an unchanged catalog keeps the same order as time passes. Include archived cards in
+  recency, exclude them from counts, and never use snapshot file times or project renames
+  as card edits. Unknown recency sorts last; future stamps retain their exact recorded timestamps.
+  Tooltips show elapsed whole minutes, clamped to zero for future stamps. Preserve active
+  selection, keyboard focus, drafts, search, and scrolling when rows reorder.
 - Workspace discovery excludes hidden/Git/attachment directories and symbolic-link
   escapes. Serve assets locally. Source watching includes workspace assets, but Python
   syntax preflight must never treat JavaScript or CSS as Python input.
+- Bound workspace reads and keep one poll in flight per navigation epoch. Show clear
+  recovery and Retry for failed loads; never leave Loading indefinitely or lose queued
+  retries. Advance the snapshot marker only after rendering/restoration succeeds.
+  Preserve pending drafts throughout errors and refresh browser credentials after a
+  gateway restart. Confirm actual listener/process health; saved monitor status can be
+  stale after its launching process exits.
 
 ## Subagents on authorized tickets
 
