@@ -75,9 +75,10 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from typing import TYPE_CHECKING, cast
 
-from . import board_state
+from . import attachments, board_state
 
 if TYPE_CHECKING:
     import socketserver
@@ -87,6 +88,7 @@ HOST = "127.0.0.1"
 API_PREFIX = board_state.API_PREFIX
 API_PARTS = API_PREFIX.strip("/").split("/")
 CARD_COMMAND_PARTS = 3
+ATTACHMENT_READ_PARTS = 4
 LOCAL_BOARD_DIR = "boards"
 
 
@@ -138,6 +140,7 @@ def build_id() -> str:
             sources = (
                 pathlib.Path(__file__).resolve(),
                 pathlib.Path(board_state.__file__ or __file__).resolve(),
+                pathlib.Path(attachments.__file__ or __file__).resolve(),
             )
             digest = hashlib.sha256()
             for source in sources:
@@ -190,6 +193,7 @@ BUILD = build_id()
 CODE_FILES = (
     pathlib.Path(__file__).resolve(),
     pathlib.Path(board_state.__file__ or __file__).resolve(),
+    pathlib.Path(attachments.__file__ or __file__).resolve(),
 )
 
 
@@ -393,16 +397,19 @@ def request_service_shutdown(server: socketserver.BaseServer) -> tuple[bool, str
     with _command_gate:
         if _shutdown_requested.is_set():
             return True, "shutdown is already in progress"
-        ok, detail = flush_autopush_for_shutdown(BOARD_PATH)
-        if not ok:
-            return False, detail
         _shutdown_requested.set()
-        threading.Thread(
-            target=server.shutdown,
-            name="service-shutdown",
-            daemon=True,
-        ).start()
-        return True, detail
+    # Pause writers using the flag, releasing the gate before Git's snapshot step
+    # acquires it. This also avoids inversion with the background push worker.
+    ok, detail = flush_autopush_for_shutdown(BOARD_PATH)
+    if not ok:
+        _shutdown_requested.clear()
+        return False, detail
+    threading.Thread(
+        target=server.shutdown,
+        name="service-shutdown",
+        daemon=True,
+    ).start()
+    return True, detail
 
 
 def _reexec_if_requested() -> None:
@@ -588,7 +595,7 @@ def push_unavailable(board_path: pathlib.Path) -> str:
 def push_board(board_path: pathlib.Path) -> tuple[bool, str]:
     """Commit the board file and push it. Returns (ok, one-line detail).
 
-    **It stages and commits only the exact board path**, which is the safety property
+    **It stages the board and its audited attachment paths only**, which is the safety property
     rather than a style choice. A stray file in the working tree cannot ride along.
 
     `git diff` does not report untracked files. The original change check therefore
@@ -600,14 +607,37 @@ def push_board(board_path: pathlib.Path) -> tuple[bool, str]:
     try:
         with _repository_push_locked(cwd):
             return _push_board_locked(board_path)
-    except (OSError, TimeoutError) as exc:
-        return False, f"repository autopush lock failed: {exc!s:.200}"
+    except (OSError, ValueError) as exc:
+        return False, f"repository autopush failed: {exc!s:.200}"
 
 
-def _push_board_locked(board_path: pathlib.Path) -> tuple[bool, str]:
-    """Commit one exact board path and synchronize all already-committed history."""
+def _snapshot_paths(board_path: pathlib.Path) -> list[str]:
+    """Bound Git staging to the snapshot and filenames in its attachment audit."""
+    board = board_state.load(board_path)
+    for item in board.items:
+        for file in item.attachments:
+            attachments.read_blob(board_path, item.ticket, file)
+    return [
+        str(board_path),
+        *sorted(
+            {
+                str(
+                    attachments.blob_path(
+                        board_path, item.ticket, event.attachment_id, event.extension
+                    )
+                )
+                for item in board.items
+                for event in item.attachment_history
+            }
+        ),
+    ]
+
+
+def _commit_board_snapshot(board_path: pathlib.Path) -> tuple[bool, str]:
+    """Commit one consistent snapshot while HTTP writers are paused."""
     cwd = board_path.parent
-    status = _git(["status", "--porcelain=v1", "--untracked-files=all", "--", str(board_path)], cwd)
+    paths = _snapshot_paths(board_path)
+    status = _git(["status", "--porcelain=v1", "--untracked-files=all", "--", *paths], cwd)
     if status.returncode != 0:
         return False, f"git status failed: {status.stderr.strip()[:200]}"
     committed = bool(status.stdout.strip())
@@ -621,12 +651,22 @@ def _push_board_locked(board_path: pathlib.Path) -> tuple[bool, str]:
             "history array carries the per-move audit, so this commit exists for\n"
             "durability rather than for granularity.\n"
         )
-        add = _git(["add", "--", str(board_path)], cwd)
+        add = _git(["add", "--", *paths], cwd)
         if add.returncode != 0:
             return False, f"git add failed: {add.stderr.strip()[:200]}"
-        commit = _git(["commit", "-m", message, "--", str(board_path)], cwd)
+        commit = _git(["commit", "-m", message, "--", *paths], cwd)
         if commit.returncode != 0:
             return False, f"git commit failed: {commit.stderr.strip()[:200]}"
+    return committed, ""
+
+
+def _push_board_locked(board_path: pathlib.Path) -> tuple[bool, str]:
+    """Keep the board and attachment references consistent without blocking writers on push."""
+    cwd = board_path.parent
+    with _command_gate:
+        committed, problem = _commit_board_snapshot(board_path)
+    if problem:
+        return False, problem
     push = _git(["push"], cwd)
     if push.returncode != 0:
         # **The commit STANDS when the push fails, deliberately.** The change is safe on
@@ -863,6 +903,46 @@ class BoardStore:
             # `board_state.edit` saves on exit. Publish in memory only after that succeeds.
             self._board = copy.deepcopy(committed)
             return result, committed.revision
+
+    def upload(
+        self, expected_revision: int, ref: str, name: object, encoded: object, actor: str
+    ) -> tuple[str, int, attachments.Attachment]:
+        """Commit bytes before metadata and roll back a new file if the snapshot fails."""
+        try:
+            filename = attachments.valid_name(name)
+            blob = attachments.decode_upload(encoded)
+        except attachments.AttachmentTooLargeError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise board_state.BoardError(str(exc)) from exc
+        file = attachments.Attachment(
+            str(uuid.uuid4()),
+            filename,
+            len(blob),
+            attachments.media_type(blob),
+            hashlib.sha256(blob).hexdigest(),
+            board_state.now(),
+            actor,
+        )
+        created_path: pathlib.Path | None = None
+
+        def attach(board: board_state.Board) -> str:
+            nonlocal created_path
+            item = board.find(ref)
+            if attachments.write_blob(self.path, item.ticket, file, blob):
+                created_path = attachments.blob_path(
+                    self.path, item.ticket, file.id, attachments.extension(file.name)
+                )
+            return board.add_attachment(ref, file)
+
+        with self._mutex:
+            try:
+                result, revision = self.execute(expected_revision, attach)
+            except BaseException:
+                if created_path is not None:
+                    created_path.unlink(missing_ok=True)
+                raise
+        return result, revision, file
 
     def reload_policy_if_changed(self) -> str | None:
         """Adopt a complete embedded policy edit without changing other stores."""
@@ -1893,6 +1973,18 @@ PAGE = """<!doctype html>
      over the generic ones above, and it is built by `user_css()` rather than written
      here because the number of people is configuration rather than code. */
 %USERCSS%
+  .card-preview { display: block; width: 100%; height: 120px; object-fit: contain;
+    background: #F4F5F8; border-radius: 5px; margin-bottom: 8px; }
+  .attachment-count { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .attachment { border: 1px solid #CCD1DA; border-radius: 6px; padding: 10px; margin: 8px 0; }
+  .attachment img { display: block; max-width: 100%; max-height: 200px; object-fit: contain; }
+  .attachment a { display: block; color: var(--ink); overflow-wrap: anywhere; }
+  .attachment-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .attachment-actions button, #p-upload { font: inherit; cursor: pointer; padding: 4px 8px; }
+  #attachment-refusal { max-width: min(440px, 85vw); border: 1px solid #CCD1DA;
+    border-radius: 8px; color: var(--ink); padding: 20px; }
+  #attachment-refusal::backdrop { background: rgb(0 0 0 / 45%); }
+  #attachment-refusal button { font: inherit; padding: 6px 16px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -1974,6 +2066,11 @@ move any card whoever owns it. Click to hand it over."></button>
           <button class="linky" id="p-detail-cancel" type="button">Cancel</button>
         </div>
       </div>
+      <h3>Attachments</h3>
+      <button id="p-upload" type="button">Upload attachment</button>
+      <input id="p-upload-file" type="file" hidden aria-label="Attachment file">
+      <div class="keyhint">Maximum 10 MiB per file.</div>
+      <div id="p-attachments"></div>
       <h3 id="p-rel-h">Relationships
         <button class="rel-add" id="p-rel-add" type="button"
                 aria-label="Add relationship" title="Add relationship">+</button>
@@ -2048,6 +2145,11 @@ move any card whoever owns it. Click to hand it over."></button>
   </div>
   <div id="toast"></div>
 
+<dialog id="attachment-refusal" aria-labelledby="attachment-refusal-title">
+  <h2 id="attachment-refusal-title">Attachment refused</h2>
+  <p id="attachment-refusal-reason"></p>
+  <form method="dialog"><button type="submit">OK</button></form>
+</dialog>
 <script>
 const API_TOKEN = '%TOKEN%';
 const API_PREFIX = '%API_PREFIX%';
@@ -2512,6 +2614,114 @@ document.getElementById('p-rel-add').addEventListener('click', () => {
   if (kind) kind.focus();
 });
 
+function attachmentRefusal(reason) {
+  document.getElementById('attachment-refusal-reason').textContent = reason;
+  const dialog = document.getElementById('attachment-refusal');
+  if (!dialog.open) dialog.showModal();
+}
+
+function attachmentImage(file) {
+  return ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.mediaType);
+}
+
+async function attachmentCommand(source, action, body) {
+  try {
+    const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/' + action;
+    const res = await apiPost(path, body);
+    const out = await res.json();
+    acceptRevision(out);
+    if (!res.ok) {
+      attachmentRefusal(out.error || 'The attachment change could not be saved.');
+      return false;
+    }
+    toast(out.result);
+    seen = null;
+    return true;
+  } catch (err) {
+    attachmentRefusal('Could not reach the board: ' + err);
+    return false;
+  }
+}
+
+function paintAttachments(it) {
+  const box = document.getElementById('p-attachments');
+  const signature = JSON.stringify([it.id, it.attachments || [], it.coverAttachment]);
+  if (box.dataset.signature === signature || box.querySelector('button:disabled')
+      || box.contains(document.activeElement)) return;
+  box.dataset.signature = signature;
+  box.replaceChildren();
+  const files = it.attachments || [];
+  if (!files.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty'; empty.textContent = 'No attachments.';
+    box.append(empty);
+  }
+  for (const file of files) {
+    const row = document.createElement('div'); row.className = 'attachment';
+    const download = document.createElement('a');
+    download.href = file.url + '?download=1'; download.textContent = file.name;
+    if (attachmentImage(file)) {
+      const previewLink = document.createElement('a');
+      previewLink.href = file.url; previewLink.target = '_blank'; previewLink.rel = 'noopener';
+      const image = document.createElement('img');
+      image.src = file.url; image.alt = file.name; image.loading = 'lazy'; image.draggable = false;
+      previewLink.append(image); row.append(previewLink);
+    }
+    row.append(download);
+    const size = document.createElement('span'); size.className = 'keyhint';
+    size.textContent = (file.size / 1024).toFixed(1) + ' KiB'; row.append(size);
+    const actions = document.createElement('div'); actions.className = 'attachment-actions';
+    if (attachmentImage(file)) {
+      const cover = document.createElement('button'); cover.type = 'button';
+      const selected = it.coverAttachment === file.id;
+      cover.textContent = selected ? 'Clear cover' : 'Set cover';
+      cover.addEventListener('click', async () => {
+        cover.disabled = true;
+        await attachmentCommand(it.id, 'cover', {attachmentId: selected ? null : file.id});
+        cover.disabled = false;
+      });
+      actions.append(cover);
+    }
+    const remove = document.createElement('button'); remove.type = 'button';
+    remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove ' + file.name);
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      await attachmentCommand(it.id, 'attachment', {remove: true, attachmentId: file.id});
+      remove.disabled = false;
+    });
+    actions.append(remove); row.append(actions); box.append(row);
+  }
+}
+
+function fileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]);
+    reader.onerror = () => reject(new Error('Could not read the selected file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+document.getElementById('p-upload').addEventListener('click', () => {
+  if (openId) document.getElementById('p-upload-file').click();
+});
+document.getElementById('p-upload-file').addEventListener('change', async (ev) => {
+  const source = openId;
+  const file = ev.target.files[0];
+  const upload = document.getElementById('p-upload');
+  if (!source || !file) return;
+  const limit = data.attachmentMaxBytes || 10485760;
+  if (file.size > limit) {
+    attachmentRefusal(file.name + ' is too large. The maximum is 10 MiB per file for Git storage.');
+    ev.target.value = ''; return;
+  }
+  upload.disabled = true;
+  try {
+    await attachmentCommand(source, 'attachment', {name: file.name, data: await fileBase64(file)});
+  } catch (err) { attachmentRefusal(String(err)); }
+  finally { upload.disabled = false; ev.target.value = ''; }
+});
+
 // ---- the detail panel ----------------------------------------------------
 
 function openCard(id) {
@@ -2585,6 +2795,7 @@ function openCard(id) {
   }
 
   paintRelations(it);
+  paintAttachments(it);
 
   const cs = document.getElementById('p-comments');
   cs.replaceChildren();
@@ -2617,7 +2828,9 @@ function openCard(id) {
     e.textContent = 'No recorded history \\u2014 migrated before the trail existed.';
     tr.appendChild(e);
   }
-  for (const h of it.history) {
+  const history = [...it.history, ...(it.attachmentHistory || [])]
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  for (const h of history) {
     const at = document.createElement('div');
     at.className = 'at';
     at.textContent = h.when;
@@ -2634,7 +2847,10 @@ function openCard(id) {
     //
     // **Terry's own wording for the line**: "Ticket ownership change: Terry -> Claude".
     const name = userLabel;
-    if (h.ownerTo) {
+    if (h.action) {
+      what.textContent = ({attached: 'Attached file', attachment_removed: 'Removed attachment',
+        cover_set: 'Set cover photo', cover_cleared: 'Cleared cover photo'})[h.action];
+    } else if (h.ownerTo) {
       what.textContent = 'Ticket ownership change: '
         + name(h.ownerFrom) + ' \\u2192 ' + name(h.ownerTo);
     } else if (h.priorityTo) {
@@ -3018,6 +3234,20 @@ function card(item) {
     marks.querySelector('.n').textContent = item.comments.length;
   }
 
+  const files = item.attachments || [];
+  const image = files.find(file => file.id === item.coverAttachment)
+    || files.find(attachmentImage);
+  if (image) {
+    const preview = document.createElement('img');
+    preview.className = 'card-preview'; preview.src = image.url;
+    preview.alt = image.name; preview.loading = 'lazy'; preview.draggable = false;
+    d.prepend(preview);
+  }
+  if (files.length) {
+    const count = document.createElement('span'); count.className = 'attachment-count';
+    count.textContent = files.length + (files.length === 1 ? ' attachment' : ' attachments');
+    d.append(count);
+  }
   d.addEventListener('click', () => openCard(item.id));
   d.addEventListener('dragstart', ev => {
     ev.dataTransfer.setData('text/plain',
@@ -3894,6 +4124,7 @@ def payload() -> bytes:
     return json.dumps(
         {
             "revision": board.revision,
+            "attachmentMaxBytes": attachments.MAX_BYTES,
             "project": board.project,
             "order": ["blockingDepthDesc", "priority", "ticket"],
             "lanes": [
@@ -3919,6 +4150,15 @@ def payload() -> bytes:
                             "subject": item.subject,
                             "priority": item.priority,
                             "blockingDepth": depths[item.id],
+                            "attachments": [
+                                {**file.to_json(), "url": attachment_url(item.id, file.id)}
+                                for file in item.attachments
+                            ],
+                            "coverAttachment": item.cover_attachment,
+                            "attachmentHistory": [
+                                {**event.to_json(), "when": when(event.at)}
+                                for event in reversed(item.attachment_history)
+                            ],
                             **({"archived": True} if item.archived else {}),
                             "priorityLabel": policy.priority_label.get(item.priority, ""),
                             # **Card #0063.** Computed on the SERVER so one clock decides it, and
@@ -3972,6 +4212,7 @@ def payload() -> bytes:
                                 {
                                     "by": h.by,
                                     "when": when(h.at),
+                                    "at": h.at,
                                     "from": h.frm,
                                     "fromLabel": policy.lane_label.get(h.frm or "", ""),
                                     "toLabel": policy.lane_label.get(h.to, h.to),
@@ -4072,6 +4313,11 @@ def create_relationship_specs(
     return tuple(specs)
 
 
+def attachment_url(card_id: str, attachment_id: str) -> str:
+    """One card-scoped read route, with no filesystem details on the wire."""
+    return f"{API_PREFIX}/cards/{urllib.parse.quote(card_id, safe='')}/attachments/{attachment_id}"
+
+
 def apply_link_command(
     board: board_state.Board,
     ref: str,
@@ -4088,6 +4334,18 @@ def apply_link_command(
     if body.get("remove"):
         return board.unlink(ref, kind, other, actor)
     return board.link(ref, kind, other, actor)
+
+
+def apply_attachment_command(
+    board: board_state.Board, ref: str, action: str, body: board_state.JsonObject, actor: str
+) -> str:
+    """Validate card attachment removal or a cover choice."""
+    if action == "attachment":
+        return board.remove_attachment(ref, str(body["attachmentId"]), actor)
+    cover = body.get("attachmentId")
+    if cover is not None and not isinstance(cover, str):
+        raise board_state.BoardError("attachmentId must be a string or null")
+    return board.set_cover(ref, cover, actor)
 
 
 def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per REST action
@@ -4149,6 +4407,33 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
     raise board_state.BoardError(f"unknown card command {action!r}")
 
 
+def execute_http_command(
+    store: BoardStore, expected: int, parts: list[str], body: board_state.JsonObject, actor: str
+) -> tuple[str, int, str | None, attachments.Attachment | None]:
+    """Run one atomic command and capture its committed response fields."""
+    is_card = len(parts) == CARD_COMMAND_PARTS and parts[0] == "cards"
+    if is_card and parts[2] == "attachment" and body.get("remove") is not True:
+        result, revision, uploaded = store.upload(
+            expected, parts[1], body["name"], body["data"], actor
+        )
+        return result, revision, None, uploaded
+    effective_priority: str | None = None
+
+    def mutate(board: board_state.Board) -> str:
+        nonlocal effective_priority
+        result = (
+            apply_attachment_command(board, parts[1], parts[2], body, actor)
+            if is_card and parts[2] in {"attachment", "cover"}
+            else _apply_http_command(board, parts, body, actor, store.policy)
+        )
+        if is_card and parts[2] == "priority":
+            effective_priority = board.find(parts[1]).priority
+        return result
+
+    result, revision = store.execute(expected, mutate)
+    return result, revision, effective_priority, None
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     """The page, the board, a timestamp to poll, the fonts, and three write routes."""
 
@@ -4172,12 +4457,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def _read_json(self) -> board_state.JsonObject | None:
+        """Read one bounded object, reporting a refusal before allocating large uploads."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > attachments.MAX_REQUEST_BYTES:
+                self._json(
+                    {"error": attachments.SIZE_REFUSAL},
+                    413,
+                )
+                return None
             body = cast("board_state.JsonValue", json.loads(self.rfile.read(length) or b"{}"))
+            if isinstance(body, dict):
+                return body
         except ValueError, TypeError:
-            return None
-        return body if isinstance(body, dict) else None
+            pass
+        self._json({"error": "bad request body"}, 400)
+        return None
 
     def _actor(self) -> board_state.Actor | None:
         """Map a bearer credential to a configured actor; never trust body data."""
@@ -4194,6 +4489,113 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raw = raw.removeprefix("revision-")
         return int(raw) if raw.isdigit() else None
 
+    def _attachment_get(self, route: str) -> None:
+        """Serve only an active card attachment, forcing generic files to download."""
+        parts = [urllib.parse.unquote(part) for part in route.strip("/").split("/")]
+        command = parts[len(API_PARTS) :]
+        if (
+            len(command) != ATTACHMENT_READ_PARTS
+            or command[0] != "cards"
+            or command[2] != "attachments"
+        ):
+            self.send_error(404)
+            return
+        try:
+            board = STORE.snapshot() if STORE is not None else board_state.load(BOARD_PATH)
+            item = board.find(command[1])
+            file = next(file for file in item.attachments if file.id == command[3])
+            blob = attachments.read_blob(BOARD_PATH, item.ticket, file)
+        except OSError, ValueError, StopIteration:
+            self.send_error(404)
+            return
+        download = "download=1" in urllib.parse.urlsplit(self.path).query
+        disposition = (
+            "inline"
+            if file.media_type in attachments.IMAGE_TYPES and not download
+            else "attachment"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", file.media_type)
+        self.send_header(
+            "Content-Disposition",
+            f"{disposition}; filename*=UTF-8''{urllib.parse.quote(file.name, safe='')}",
+        )
+        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
+        self.send_header("Cache-Control", "private, max-age=86400, immutable")
+        self.end_headers()
+        self.wfile.write(blob)
+
+    def _status_get(self) -> None:
+        """Read the current board and report service, source, and snapshot health."""
+        # **THE GREEN CIRCLE MEANS "PYTHON READ THAT FILE JUST NOW", so this
+        # route actually reads it.** Terry set the bar: *"green circle means
+        # python has actively polled and read that file within last 5 seconds."*
+        #
+        # **A `stat()` would have been cheaper and would have lied.** It proves
+        # the directory entry exists, not that the board is readable -- a
+        # truncated or half-written file passes `stat` and fails `load`. And a
+        # server answering HTTP proves only that the socket is up.
+        #
+        # **`ok` is the field the dot keys on.** Parsing 12 KB of JSON at 2.5 Hz
+        # is nothing, and it is the difference between a signal that means
+        # something and one that looks reassuring.
+        # **THE EMBEDDED POLICY IS RE-READ HERE TOO.** Terry's standing order is
+        # that a tool able to detect its own staleness resolves it. Schema 4 keeps
+        # lane labels, IDs, and permissions in the same snapshot as the state, so
+        # one validated board read refreshes them together.
+        reloaded = (
+            STORE.reload_policy_if_changed()
+            if STORE is not None
+            else board_state.reload_rules_if_changed()
+        )
+        if reloaded:
+            print(f"  {reloaded}", flush=True)
+
+        code_stale = code_is_stale()
+        current_build = BUILD if code_stale else refresh_build_id_if_clean()
+        restarting, restart_problem = (
+            request_code_restart(self.server) if code_stale else (False, None)
+        )
+        code_meta = {
+            "build": current_build,
+            "codeStale": code_stale,
+            "restarting": restarting,
+            **({"restartProblem": restart_problem} if restart_problem else {}),
+        }
+
+        try:
+            mtime = BOARD_PATH.stat().st_mtime
+            if STORE is not None:
+                STORE.snapshot()
+            else:
+                board_state.load(BOARD_PATH)
+        except (OSError, board_state.BoardError, json.JSONDecodeError) as exc:
+            # **`build` rides on the FAILURE path too.** An unreadable board and a
+            # stale tab are independent problems, and the page must be able to tell
+            # them apart while one of them is happening.
+            self._json(
+                {
+                    "ok": False,
+                    "mtime": 0,
+                    "stamp": "unreadable",
+                    **code_meta,
+                    "push": push_status(),
+                    "error": str(exc),
+                }
+            )
+            return
+        stamp = (
+            datetime.datetime.fromtimestamp(mtime, tz=datetime.UTC)
+            .astimezone()
+            .strftime("%H:%M:%S")
+        )
+        # **`codeStale` rides on BOTH paths, like `build` and for the same
+        # reason.** An unreadable board and a stale process are independent
+        # failures, and either can be true while the other is.
+        self._json({"ok": True, "mtime": mtime, "stamp": stamp, **code_meta, "push": push_status()})
+
     def do_GET(self) -> None:
         route = self.path.partition("?")[0]
         if route in ("/v1/status", "/mtime"):
@@ -4202,74 +4604,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # retaining a second implementation of the status endpoint.
             self._redirect(API_PREFIX + "/status")
         elif route == API_PREFIX + "/status":
-            # **THE GREEN CIRCLE MEANS "PYTHON READ THAT FILE JUST NOW", so this
-            # route actually reads it.** Terry set the bar: *"green circle means
-            # python has actively polled and read that file within last 5 seconds."*
-            #
-            # **A `stat()` would have been cheaper and would have lied.** It proves
-            # the directory entry exists, not that the board is readable -- a
-            # truncated or half-written file passes `stat` and fails `load`. And a
-            # server answering HTTP proves only that the socket is up.
-            #
-            # **`ok` is the field the dot keys on.** Parsing 12 KB of JSON at 2.5 Hz
-            # is nothing, and it is the difference between a signal that means
-            # something and one that looks reassuring.
-            # **THE EMBEDDED POLICY IS RE-READ HERE TOO.** Terry's standing order is
-            # that a tool able to detect its own staleness resolves it. Schema 4 keeps
-            # lane labels, IDs, and permissions in the same snapshot as the state, so
-            # one validated board read refreshes them together.
-            reloaded = (
-                STORE.reload_policy_if_changed()
-                if STORE is not None
-                else board_state.reload_rules_if_changed()
-            )
-            if reloaded:
-                print(f"  {reloaded}", flush=True)
-
-            code_stale = code_is_stale()
-            current_build = BUILD if code_stale else refresh_build_id_if_clean()
-            restarting, restart_problem = (
-                request_code_restart(self.server) if code_stale else (False, None)
-            )
-            code_meta = {
-                "build": current_build,
-                "codeStale": code_stale,
-                "restarting": restarting,
-                **({"restartProblem": restart_problem} if restart_problem else {}),
-            }
-
-            try:
-                mtime = BOARD_PATH.stat().st_mtime
-                if STORE is not None:
-                    STORE.snapshot()
-                else:
-                    board_state.load(BOARD_PATH)
-            except (OSError, board_state.BoardError, json.JSONDecodeError) as exc:
-                # **`build` rides on the FAILURE path too.** An unreadable board and a
-                # stale tab are independent problems, and the page must be able to tell
-                # them apart while one of them is happening.
-                self._json(
-                    {
-                        "ok": False,
-                        "mtime": 0,
-                        "stamp": "unreadable",
-                        **code_meta,
-                        "push": push_status(),
-                        "error": str(exc),
-                    }
-                )
-                return
-            stamp = (
-                datetime.datetime.fromtimestamp(mtime, tz=datetime.UTC)
-                .astimezone()
-                .strftime("%H:%M:%S")
-            )
-            # **`codeStale` rides on BOTH paths, like `build` and for the same
-            # reason.** An unreadable board and a stale process are independent
-            # failures, and either can be true while the other is.
-            self._json(
-                {"ok": True, "mtime": mtime, "stamp": stamp, **code_meta, "push": push_status()}
-            )
+            self._status_get()
         elif route == API_PREFIX + "/board":
             self._send(payload(), "application/json")
         elif route == "/favicon.svg":
@@ -4297,6 +4632,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.end_headers()
             self.wfile.write(blob)
+        elif route.startswith(API_PREFIX + "/cards/"):
+            self._attachment_get(route)
         elif route in ("/", "/index.html"):
             # **A broken board still serves its page.** The title falls back and
             # `/api/v001/board` carries the real error to the banner.
@@ -4356,7 +4693,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         body = self._read_json()
         if body is None:
-            self._json({"error": "bad request body"}, 400)
             return
 
         with _command_gate:
@@ -4368,25 +4704,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"error": "board store is not initialized"}, 409)
                 return
 
-            effective_priority: str | None = None
-
-            def mutate(board: board_state.Board) -> str:
-                nonlocal effective_priority
-                result = _apply_http_command(board, command_parts, body, actor, store.policy)
-                if is_card_command and command_parts[2] == "priority":
-                    effective_priority = board.find(command_parts[1]).priority
-                return result
-
             try:
-                result, revision = store.execute(expected, mutate)
+                result, revision, effective_priority, uploaded = execute_http_command(
+                    store, expected, command_parts, body, actor
+                )
             except KeyError as exc:
                 self._json({"error": f"missing field {exc}"}, 400)
                 return
             except RevisionConflict as exc:
                 self._json({"error": str(exc)}, 412)
                 return
-            except (board_state.BoardError, OSError, json.JSONDecodeError) as exc:
-                self._json({"error": str(exc)}, 409)
+            except (ValueError, OSError) as exc:
+                code = 413 if isinstance(exc, attachments.AttachmentTooLargeError) else 409
+                self._json({"error": str(exc)}, code)
                 return
 
         print(f"  {result}", flush=True)
@@ -4395,6 +4725,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "result": result,
                 "revision": revision,
                 **({"priority": effective_priority} if effective_priority is not None else {}),
+                **({"attachment": uploaded.to_json()} if uploaded is not None else {}),
             }
         )
 

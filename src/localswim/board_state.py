@@ -70,6 +70,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Self, cast
 
+from . import attachments as card_attachments
+
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
 
@@ -1838,6 +1840,7 @@ class ActivityEvent:
     priority_from: str | None = None
     priority_to: str | None = None
     comment_chars: int | None = None
+    attachment_id: str | None = None
     relationship_kind: str | None = None
     other_ticket: int | None = None
     other_id: str | None = None
@@ -1870,6 +1873,8 @@ class ActivityEvent:
             out["priorityTo"] = self.priority_to
         if self.comment_chars is not None:
             out["commentChars"] = self.comment_chars
+        if self.attachment_id is not None:
+            out["attachmentId"] = self.attachment_id
         if self.relationship_kind is not None:
             out["relationshipKind"] = self.relationship_kind
         if self.other_ticket is not None:
@@ -1971,6 +1976,13 @@ class Item:
     history: list[Change] = field(default_factory=list[Change])
     comments: list[Comment] = field(default_factory=list[Comment])
     archived: bool = False
+    attachments: list[card_attachments.Attachment] = field(
+        default_factory=list[card_attachments.Attachment]
+    )
+    attachment_history: list[card_attachments.AttachmentEvent] = field(
+        default_factory=list[card_attachments.AttachmentEvent]
+    )
+    cover_attachment: str | None = None
 
     @property
     def created_at(self) -> str | None:
@@ -2058,6 +2070,14 @@ class Item:
             out["comments"] = [cast("JsonValue", comment.to_json()) for comment in self.comments]
         if self.archived:
             out["archived"] = True
+        if self.attachments:
+            out["attachments"] = [cast("JsonValue", file.to_json()) for file in self.attachments]
+        if self.attachment_history:
+            out["attachmentHistory"] = [
+                cast("JsonValue", event.to_json()) for event in self.attachment_history
+            ]
+        if self.cover_attachment:
+            out["coverAttachment"] = self.cover_attachment
         return out
 
     @classmethod
@@ -2101,6 +2121,12 @@ class Item:
         archived = raw.get("archived", False)
         if not isinstance(archived, bool):
             raise BoardError(f"{where}: archived must be a boolean")
+        try:
+            files, attachment_history, cover = card_attachments.parse_card(
+                cast("dict[str, object]", raw)
+            )
+        except (TypeError, ValueError) as exc:
+            raise BoardError(f"{where}: {exc}") from exc
         history_raw = raw.get("history", [])
         if not isinstance(history_raw, list) or not all(
             isinstance(change, dict) for change in history_raw
@@ -2127,6 +2153,9 @@ class Item:
             # cannot see its siblings, so this only records what the file said.
             parent=parent,
             archived=archived,
+            attachments=files,
+            attachment_history=attachment_history,
+            cover_attachment=cover,
             history=[
                 Change.from_json(change, where)
                 for change in history_raw
@@ -2618,6 +2647,13 @@ class Board:
         ]
         problems.extend(self._parent_history_problems(known_actors))
         problems.extend(self._archive_history_problems())
+        for item in self.items:
+            problems.extend(
+                f"{item.id}: {problem}"
+                for problem in card_attachments.audit_problems(
+                    item.attachments, item.attachment_history, item.cover_attachment, known_actors
+                )
+            )
         problems.extend(
             f"{item_id}: blocked card priority is below required {priority}; "
             "start the board service to reconcile dependency priorities"
@@ -2759,6 +2795,60 @@ class Board:
         self.next_ticket += 1
         self.items.append(item)
         return f"created {item.label} {item_id} in {state} (by {by})"
+
+    def add_attachment(self, ref: str, file: card_attachments.Attachment) -> str:
+        """Attach validated metadata after its immutable bytes have reached disk."""
+        try:
+            card_attachments.Attachment.from_json(file.to_json())
+        except ValueError as exc:
+            raise BoardError(str(exc)) from exc
+        item = self.find(ref)
+        if any(saved.id == file.id for saved in item.attachments):
+            raise BoardError("attachment ID already exists on this card")
+        item.attachments.append(file)
+        item.attachment_history.append(
+            card_attachments.AttachmentEvent(
+                file.at, file.by, "attached", file.id, card_attachments.extension(file.name)
+            )
+        )
+        return f"attached {file.name} to {item.label} (by {file.by})"
+
+    def remove_attachment(self, ref: str, attachment_id: str, by: Actor) -> str:
+        """Detach a file while retaining bytes and audit for recovery."""
+        item = self.find(ref)
+        file = next((file for file in item.attachments if file.id == attachment_id), None)
+        if file is None:
+            raise BoardError("attachment is not on this card")
+        if item.cover_attachment == attachment_id:
+            self.set_cover(ref, None, by)
+        item.attachments.remove(file)
+        item.attachment_history.append(
+            card_attachments.AttachmentEvent(
+                now(), by, "attachment_removed", file.id, card_attachments.extension(file.name)
+            )
+        )
+        return f"removed attachment {file.name} from {item.label} (by {by})"
+
+    def set_cover(self, ref: str, attachment_id: str | None, by: Actor) -> str:
+        """Select an attached raster image, or clear the card's cover."""
+        item = self.find(ref)
+        chosen = attachment_id or item.cover_attachment
+        if chosen is None or attachment_id == item.cover_attachment:
+            return f"{item.label} cover is unchanged"
+        file = next((file for file in item.attachments if file.id == chosen), None)
+        if file is None or file.media_type not in card_attachments.IMAGE_TYPES:
+            raise BoardError("cover must be an attached PNG, JPEG, GIF, or WebP image")
+        item.cover_attachment = attachment_id
+        item.attachment_history.append(
+            card_attachments.AttachmentEvent(
+                now(),
+                by,
+                "cover_set" if attachment_id else "cover_cleared",
+                file.id,
+                card_attachments.extension(file.name),
+            )
+        )
+        return f"{item.label} cover {'set' if attachment_id else 'cleared'} (by {by})"
 
     def _apply_priority_targets(self, targets: Mapping[str, str], by: Actor) -> tuple[str, ...]:
         """Record every actual priority change once, in deterministic ticket order."""
@@ -5025,6 +5115,31 @@ def _archive_activity_events(
     return events
 
 
+def _attachment_activity_events(
+    board: Board, start: datetime.datetime, end: datetime.datetime | None
+) -> list[ActivityEvent]:
+    """Report attachment actions without names or file contents."""
+    events: list[ActivityEvent] = []
+    for item in board.items:
+        for index, event in enumerate(item.attachment_history):
+            instant = _event_instant(event.at, f"{item.id} attachmentHistory[{index}]")
+            if instant < start or (end is not None and instant > end):
+                continue
+            events.append(
+                ActivityEvent(
+                    ticket=item.ticket,
+                    item_id=item.id,
+                    kind=event.action,
+                    at=event.at,
+                    instant=instant,
+                    by=event.by,
+                    attachment_id=event.attachment_id,
+                    sequence=len(item.history) + len(item.comments) + index,
+                )
+            )
+    return events
+
+
 def activity_events(
     board: Board,
     start: datetime.datetime,
@@ -5144,6 +5259,7 @@ def activity_events(
     events.extend(_subject_activity_events(board, start, end))
     events.extend(_detail_activity_events(board, start, end))
     events.extend(_archive_activity_events(board, start, end))
+    events.extend(_attachment_activity_events(board, start, end))
     return sorted(
         events, key=lambda event: (event.instant, event.ticket, event.sequence, event.kind)
     )

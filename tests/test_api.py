@@ -1031,3 +1031,18 @@ def test_browser_root_priority_is_free_and_descendant_floor_is_ongoing(api: Runn
     assert saved.find("leaf").priority == "P1"
     assert saved.revision == 7
     assert saved.verify() == []
+
+
+def test_shutdown_releases_writer_gate_for_final_attachment_snapshot(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def flush(_path: pathlib.Path) -> tuple[bool, str]:
+        assert api_endpoint._shutdown_requested.is_set()
+        acquired = api_endpoint._command_gate.acquire(blocking=False)
+        assert acquired, "shutdown must not hold the gate needed by snapshot staging"
+        api_endpoint._command_gate.release()
+        return True, "snapshot flushed"
+
+    monkeypatch.setattr(api_endpoint, "flush_autopush_for_shutdown", flush)
+    code, _ = request_json(api.base + API + "/shutdown", token=api_endpoint.CLI_TOKEN, body={})
+    assert code == 200

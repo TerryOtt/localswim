@@ -7,6 +7,8 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 
 - `src/localswim/board_state.py` owns the board model, validation, serialization,
   policy checks, storage helpers, and reporting primitives.
+- `src/localswim/attachments.py` owns attachment metadata, replayable audit,
+  bounded file validation, safe storage paths, and immutable file integrity.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
   browser UI. It is the sole writer while a board is live.
@@ -59,6 +61,15 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   lane states, relationships, contents, and history. Archive changes use the live
   service and append to `archiveHistory`; default lists hide archived cards, while
   focused inspection, full snapshot exports, verification, and activity retain them.
+
+- Attachments are capped at 10 MiB per file and stored beside each board as
+  `attachments/<four-digit zero-padded card number>/<GUID>.<extension>`. Preserve the
+  original filename in metadata. Flush files before snapshot references and remove
+  newly written files on transaction failure. Removal detaches files but retains
+  bytes/history; only active attachments may be served or used as cover. Detect safe
+  raster previews from bytes; generic files must download with `nosniff` and sandbox
+  CSP. Git snapshots include exact audited attachment paths, never a directory glob.
+  Browser and bot CLI uploads/removals use the sole live writer and revision checks.
 
 - Order every lane by descending longest downstream blocking-chain depth, ascending
   priority number, then ascending ticket number. Blocked cards inherit the highest

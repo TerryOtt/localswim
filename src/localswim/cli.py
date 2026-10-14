@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import io
+import json
 import pathlib
 import sys
 import urllib.parse
@@ -11,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from localswim import board_state
+from localswim import attachments, board_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -398,6 +400,95 @@ def card_create(  # noqa: PLR0913
             "priority": priority,
             "detail": _detail_text(detail, detail_file),
             "owner": owner or board_state.DEFAULT_OWNER,
+        },
+    )
+
+
+@card_commands.group("attachment", no_args_is_help=True)
+def attachment_commands() -> None:
+    """Add, list, or remove files attached to a card."""
+
+
+@attachment_commands.command("add")
+@click.argument("reference")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path))
+@click.pass_obj
+def attachment_add(context: CliContext, reference: str, file: pathlib.Path) -> None:
+    """Upload FILE through the live service (maximum 10 MiB)."""
+    try:
+        with file.open("rb") as stream:
+            blob = stream.read(attachments.MAX_BYTES + 1)
+    except OSError as exc:
+        raise click.FileError(str(file), hint=str(exc)) from exc
+    if len(blob) > attachments.MAX_BYTES:
+        raise click.ClickException(attachments.SIZE_REFUSAL)
+    _mutate(
+        context,
+        f"{board_state.API_PREFIX}/cards/{_quote(reference)}/attachment",
+        {
+            "name": file.name,
+            "data": base64.b64encode(blob).decode("ascii"),
+        },
+    )
+
+
+@attachment_commands.command("list")
+@click.argument("reference")
+@click.option("as_json", "--json", is_flag=True, help="Print complete attachment metadata.")
+@click.pass_obj
+def attachment_list(context: CliContext, reference: str, *, as_json: bool) -> None:
+    """List active attachment IDs, names, sizes, and the chosen cover."""
+    item = _board_call(lambda: _load(context).find(reference))
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "attachments": [file.to_json() for file in item.attachments],
+                    "coverAttachment": item.cover_attachment,
+                },
+                indent=2,
+            )
+        )
+    else:
+        for file in item.attachments:
+            cover = " [cover]" if file.id == item.cover_attachment else ""
+            click.echo(f"{file.id}  {file.name}  {file.size} bytes{cover}")
+        if not item.attachments:
+            click.echo("No attachments.")
+
+
+@attachment_commands.command("remove")
+@click.argument("reference")
+@click.argument("attachment_id")
+@click.pass_obj
+def attachment_remove(context: CliContext, reference: str, attachment_id: str) -> None:
+    """Detach a file; retained bytes and audit remain recoverable."""
+    _mutate(
+        context,
+        f"{board_state.API_PREFIX}/cards/{_quote(reference)}/attachment",
+        {
+            "remove": True,
+            "attachmentId": attachment_id,
+        },
+    )
+
+
+@attachment_commands.command("cover")
+@click.argument("reference")
+@click.argument("attachment_id", required=False)
+@click.option("clear", "--clear", is_flag=True, help="Clear the selected cover image.")
+@click.pass_obj
+def attachment_cover(
+    context: CliContext, reference: str, attachment_id: str | None, *, clear: bool
+) -> None:
+    """Select an attached image as cover, or use --clear."""
+    if clear == (attachment_id is not None):
+        raise click.UsageError("provide one attachment ID or --clear")
+    _mutate(
+        context,
+        f"{board_state.API_PREFIX}/cards/{_quote(reference)}/cover",
+        {
+            "attachmentId": None if clear else attachment_id,
         },
     )
 

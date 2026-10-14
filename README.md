@@ -268,6 +268,43 @@ Archiving is an optional schema-4 extension: older boards start with no archived
 The snapshot stores a card's `archived` flag only when true and an append-only
 `archiveHistory` array after the first archive operation.
 
+## Card attachments and cover photos
+
+Open a card and choose **Upload attachment**. Files up to **10 MiB each** are accepted;
+a larger file opens an explanatory refusal dialog without changing the board.
+PNG, JPEG, GIF, and WebP pictures preview in the drawer and on the swimlane card.
+Choose **Set cover** on an image to select which picture appears on the card; without
+an explicit cover, the first attached image supplies the preview. Other file types
+remain downloadable attachments. **Remove** detaches a file and clears it as cover
+when necessary. File bytes and audit history are retained for recovery.
+
+The bot uses the same live service:
+
+~~~console
+localswim-cli path/to/board.json card attachment add 29 path/to/picture.png
+localswim-cli path/to/board.json card attachment list 29 --json
+localswim-cli path/to/board.json card attachment cover 29 <attachment-guid>
+localswim-cli path/to/board.json card attachment cover 29 --clear
+localswim-cli path/to/board.json card attachment remove 29 <attachment-guid>
+~~~
+
+Files live beside the board at `attachments/0029/<GUID>.png`: card directories use
+four-digit zero padding, stored filenames use a newly allocated GUID and the original
+simple extension, and the original filename stays in metadata for display/download.
+In the state-store this is `<repository>/<board directory>/attachments/0029/<GUID>.png`.
+Copy the board directory, including `attachments/`, when moving or backing up a board.
+With `--autopush`, the board snapshot and its audited attachment paths are committed
+together; unrelated files and staged changes are excluded.
+
+This is an optional schema-4 extension: cards without files retain their existing
+shape. `attachments` records metadata (GUID, name, size, detected media type, SHA-256,
+upload time, actor); `coverAttachment` records the chosen image GUID; `attachmentHistory`
+records uploads, removals, and cover choices. CLI activity includes these actions and
+GUIDs without filenames or file contents. Writes remain authenticated, revision-checked,
+and atomic. A failed snapshot write removes the newly uploaded file. Downloads validate
+size/digest and serve only current attachments; generic files, including HTML/SVG, are
+forced to download rather than execute in the board origin.
+
 ## Dependency priority inheritance
 
 A blocked card must have at least the urgency of every blocker upstream of it.
@@ -352,7 +389,7 @@ in an appropriate Git repository:
 uv run --frozen localswim --autopush path/to/board.json
 ~~~
 
-When enabled, the server commits only the board path after five quiet seconds and pushes
+When enabled, the server commits the board and its audited attachment paths after five quiet seconds and pushes
 the board repository's current branch. Multiple board services sharing one Git
 repository serialize their commit-and-push operations through one repository-scoped
 process lock. A failed push is retried without requiring another board edit. A valid new
@@ -381,9 +418,18 @@ GET  /api/v001/status
 GET  /api/v001/board
 POST /api/v001/cards
 POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
+POST /api/v001/cards/<id>/attachment
+POST /api/v001/cards/<id>/cover
+GET  /api/v001/cards/<id>/attachments/<attachment-guid>
 POST /api/v001/board/project
 POST /api/v001/shutdown
 ~~~
+
+Attachment uploads POST `{name, data}` with base64 file bytes; removal POSTs
+`{remove: true, attachmentId}` to the same singular route. Cover selection POSTs
+`{attachmentId}` (or null to clear). Upload responses include the assigned attachment
+metadata; oversized bodies/files return HTTP 413. Attachment read routes accept
+`?download=1` to download an image instead of opening its inline preview.
 
 Only the `/api/v001` routes are API endpoints. For seamless upgrades of already-open
 tabs, `/v1/status` and `/mtime` issue no-cache redirects to
@@ -396,7 +442,7 @@ the CLI credential and does not change the board revision.
 
 ## Live code updates
 
-The server watches its installed `api_endpoint` and `board_state` modules. A valid
+The server watches its installed `api_endpoint`, `board_state`, and `attachments` modules. A valid
 change is debounced, preflighted in a child Python process and applied by gracefully
 re-executing the server. An invalid change leaves the healthy process running and
 reports the preflight error.

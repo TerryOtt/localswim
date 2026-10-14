@@ -42,6 +42,7 @@ saved, and only then published as the current in-memory snapshot.
 |---|---|
 | `src/localswim/board_state.py` | Domain model, policy loading, validation, history replay, relationships, JSON storage, file locking, and report primitives. |
 | `src/localswim/cli.py` | Click command tree, contextual help, and command-to-service dispatch. |
+| `src/localswim/attachments.py` | Bounded attachment metadata, audit replay, raster detection, safe paths, flushed file writes, and content integrity. |
 | `src/localswim/api_endpoint.py` | Loopback HTTP server, transactional store, REST boundary, embedded HTML/CSS/JavaScript, live reload, and optional Git publishing. |
 | `src/localswim/rules.json` | Checked legacy/default policy used by controlled migrations. |
 | `pyproject.toml` | uv build metadata, Python contract, dependencies, Ruff/formatter policy, and strict Pyright policy. |
@@ -282,6 +283,39 @@ The server adds an in-process `RLock` around the filesystem lock. Two clients wr
 the same revision produce one winner and one HTTP 412 response; a stale command never
 overwrites newer state.
 
+## Attachment storage and audit
+
+Cards optionally persist `attachments`, `attachmentHistory`, and `coverAttachment`
+without changing schema 4. `attachments.py` validates each GUID, printable original
+filename, byte count (1 through 10 MiB), detected media type, SHA-256, timestamp, and
+actor. Audit replay checks attachment membership and cover choice against current
+state; activity emits action/GUID attribution without filenames or bytes.
+
+`BoardStore.upload()` decodes a bounded body, checks the expected revision under the
+existing writer lock, allocates a GUID, and flushes bytes before saving metadata.
+A snapshot failure removes the new file; failed/stale requests never attach metadata.
+Paths resolve inside `<board directory>/attachments/<ticket:04d>/<GUID><extension>`;
+GUID and extension validation and resolved containment checks reject path traversal.
+Each upload gets a separate file, even for identical names or contents.
+
+`remove_attachment()` detaches metadata and clears a selected cover in the same
+transaction, retaining files and append-only history for recovery. `set_cover()` accepts
+only active raster images. Read routes validate saved byte count and digest. PNG, JPEG,
+GIF, and WebP are detected from bytes and may preview inline; everything else uses
+`application/octet-stream`, attachment disposition, `nosniff`, and sandbox CSP.
+
+Git snapshot paths comprise the board and exact per-card filenames from its audit,
+including removed attachments. HTTP writes pause during snapshot staging/commit so
+the committed metadata and references stay consistent; network push releases this
+pause. The existing repository lock still serializes multiple board services. No
+unrelated or unaudited attachment-directory files may join the commit.
+
+CLI `card attachment` offers `add`, `list --json`, `remove`, and `cover`/`cover --clear`.
+The drawer offers upload, image previews, download, removal, and cover controls;
+oversized selection and HTTP refusal use an accessible modal with the reason.
+The first active image previews on the swimlane card when no explicit cover is set.
+Moving a board requires moving its attachment directory as well as the JSON snapshot.
+
 ## HTTP and CLI boundaries
 
 The server binds only to `127.0.0.1`. Read routes are loopback-accessible without a
@@ -295,6 +329,9 @@ GET  /api/v001/status
 GET  /api/v001/board
 POST /api/v001/cards
 POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
+POST /api/v001/cards/<id>/attachment
+POST /api/v001/cards/<id>/cover
+GET  /api/v001/cards/<id>/attachments/<attachment-guid>
 POST /api/v001/board/project
 ```
 
@@ -448,7 +485,8 @@ preflight and graceful re-exec boundary owns it.
 ## Optional Git publishing
 
 `--autopush` is off unless explicitly supplied. When enabled, a daemon thread waits
-five quiet seconds after the latest board write, commits only the board path, and pushes
+five quiet seconds after the latest board write, commits the board and audited attachment
+paths, and pushes
 the board repository's current branch. Every service using the same Git common
 directory serializes that whole operation with an operating-system file lock in
 the common directory; process exit releases the lock without stale-lock recovery.
@@ -474,6 +512,7 @@ The suite spans these boundaries:
 | Module | Coverage focus |
 |---|---|
 | `test_board.py` | Card operations, transitions, history, links, hierarchy, and sorting. |
+| `test_attachments.py` | Browser/API and CLI uploads, removal, cover selection, size bounds, exact Git staging, snapshot rollback, and immutable file reads. |
 | `test_dependencies.py` | Blocking depth, cross-lane ordering, transitive priority inheritance, cycles, deep chains, and atomic adoption. |
 | `test_archiving.py` | Reversible visibility, archive persistence and audit, intact relationships, and filtered queries. |
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |
