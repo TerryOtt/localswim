@@ -153,7 +153,15 @@ and absent keys discarded. The gateway becomes authoritative thereafter: manual 
 and pin choices survive browser and gateway restarts and are shared across clients.
 The browser serializes preference commands, refreshes and reconciles stale-revision
 conflicts, and shows storage or transport errors while preserving pending choices.
-Per-board drafts and sidebar collapse remain in window-local session storage.
+Per-board drafts and sidebar collapse/width remain in window-local session storage.
+The expanded sidebar defaults to a minimum of 312 pixels. Its focusable vertical
+separator supports captured pointer dragging, Left/Right arrows (16 pixels, or 64 with
+Shift), Home/End for the bounds, double-click to reset, and Escape to cancel a drag.
+The rendered width is capped at workspace width minus 320 pixels, never below 312;
+`state.sidebarWidth` retains the requested width through temporary viewport clamps.
+Collapse uses 44 pixels and restores the expanded choice. Resizing changes CSS without
+rebuilding the board, and existing observers realign lane headers. Attention columns
+keep their fixed coordinates. Width changes never write shared gateway preferences.
 
 Workspace navigation uses History API URLs and updates the active board in place.
 Cold deep links and Back/Forward follow the same selection path. Per-board selected

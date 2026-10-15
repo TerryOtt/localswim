@@ -113,6 +113,10 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   errors without losing pending choices. Import only the first nonempty legacy pin list
   while shared pins remain uninitialized. Keep collapse, drafts, search, selection, and
   scrolling window-local. Group labels/dividers must not indent count columns.
+  Expanded sidebar width defaults to a minimum of 312 pixels, resizes through a captured
+  pointer or keyboard separator, and persists per window. Collapse preserves the expanded
+  choice; viewport clamping reserves board space without replacing the requested width.
+  Resize must preserve board drafts, navigation, scrolling, and fixed attention columns.
   Sort Other boards by the latest audited card edit's exact epoch timestamp, descending,
   then descending total attention count and ascending case-insensitive project name;
   stable keys resolve identical-name ties. Only identical timestamps tie on recency.

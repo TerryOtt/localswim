@@ -21,6 +21,78 @@
   new ResizeObserver(alignCardStarts).observe(board);
   document.getElementById('mk').setAttribute('aria-modal', 'false');
   const rows = new Map();
+  const sidebarMinimum = 312, boardMinimum = 320;
+  const resizer = document.createElement('div');
+  resizer.id = 'ws-resize'; resizer.tabIndex = 0;
+  resizer.setAttribute('role', 'separator');
+  resizer.setAttribute('aria-label', 'Resize boards sidebar');
+  resizer.setAttribute('aria-orientation', 'vertical');
+  resizer.setAttribute('aria-controls', 'workspace-nav');
+  resizer.title = 'Drag to resize · Left/Right arrows, Home/End · Double-click to reset';
+  nav.append(resizer);
+  let sidebarDrag = null;
+  function sidebarMaximum() { return Math.max(sidebarMinimum, content.clientWidth - boardMinimum); }
+  function requestedSidebarWidth() {
+    return Number.isFinite(state.sidebarWidth) && state.sidebarWidth >= sidebarMinimum
+      ? state.sidebarWidth : sidebarMinimum;
+  }
+  function applySidebarWidth() {
+    const width = Math.round(Math.min(requestedSidebarWidth(), sidebarMaximum()));
+    nav.style.setProperty('--ws-sidebar-width', width + 'px');
+    if (state.collapsed && document.activeElement === resizer)
+      document.getElementById('ws-toggle').focus({preventScroll: true});
+    resizer.hidden = !!state.collapsed;
+    resizer.setAttribute('aria-valuemin', String(sidebarMinimum));
+    resizer.setAttribute('aria-valuemax', String(sidebarMaximum()));
+    resizer.setAttribute('aria-valuenow', String(width));
+    resizer.setAttribute('aria-valuetext', width + ' pixels');
+  }
+  function resizeSidebar(width) {
+    state.sidebarWidth = Math.round(Math.max(sidebarMinimum, Math.min(sidebarMaximum(), width)));
+    applySidebarWidth();
+  }
+  function finishSidebarResize(cancel = false) {
+    if (!sidebarDrag) return;
+    const saved = sidebarDrag; sidebarDrag = null;
+    if (resizer.hasPointerCapture(saved.id)) resizer.releasePointerCapture(saved.id);
+    document.body.classList.remove('ws-resizing');
+    if (cancel) state.sidebarWidth = saved.requestedWidth;
+    applySidebarWidth(); alignCardStarts(); restoreScroll(saved.scroll); persist();
+  }
+  resizer.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !event.isPrimary || state.collapsed || sidebarDrag) return;
+    event.preventDefault();
+    sidebarDrag = {id: event.pointerId, x: event.clientX,
+      width: Number(resizer.getAttribute('aria-valuenow')), requestedWidth: state.sidebarWidth,
+      scroll: scrolls()};
+    resizer.focus({preventScroll: true}); resizer.setPointerCapture(event.pointerId);
+    document.body.classList.add('ws-resizing');
+  });
+  resizer.addEventListener('pointermove', event => {
+    if (!sidebarDrag || event.pointerId !== sidebarDrag.id) return;
+    resizeSidebar(sidebarDrag.width + event.clientX - sidebarDrag.x);
+    restoreScroll(sidebarDrag.scroll);
+  });
+  resizer.addEventListener('pointerup', event => {
+    if (sidebarDrag && event.pointerId === sidebarDrag.id) finishSidebarResize();
+  });
+  resizer.addEventListener('pointercancel', () => finishSidebarResize(true));
+  resizer.addEventListener('lostpointercapture', () => finishSidebarResize(true));
+  resizer.addEventListener('dblclick', () => { resizeSidebar(sidebarMinimum); persist(); });
+  resizer.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && sidebarDrag) {
+      event.preventDefault(); event.stopPropagation(); finishSidebarResize(true); return;
+    }
+    const width = Number(resizer.getAttribute('aria-valuenow')), step = event.shiftKey ? 64 : 16;
+    const next = {ArrowLeft: width - step, ArrowRight: width + step,
+      Home: sidebarMinimum, End: sidebarMaximum()}[event.key];
+    if (next === undefined || sidebarDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const saved = scrolls(); resizeSidebar(next); alignCardStarts(); restoreScroll(saved); persist();
+  });
+  new ResizeObserver(applySidebarWidth).observe(content);
+  applySidebarWidth();
   function route(key) { return '/board/' + key.split('/').map(encodeURIComponent).join('/'); }
   function urlKey() {
     if (!location.pathname.startsWith('/board/')) return null;
@@ -373,6 +445,7 @@
     }
     list.scrollTop = scrollTop;
     nav.classList.toggle('collapsed', state.collapsed);
+    applySidebarWidth();
     document.getElementById('ws-toggle').setAttribute('aria-label', state.collapsed ? 'Expand boards' : 'Collapse boards');
     document.getElementById('ws-toggle').setAttribute('aria-expanded', String(!state.collapsed));
   }
@@ -436,7 +509,7 @@
     try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
   window.WorkspaceUI = {capture: persist, loaded, scrolls, restoreScroll, error, reconcile};
-  document.getElementById('ws-toggle').onclick = () => { const saved = scrolls(); state.collapsed = !state.collapsed; persist(); renderRows(); alignCardStarts(); restoreScroll(saved); };
+  document.getElementById('ws-toggle').onclick = () => { finishSidebarResize(); const saved = scrolls(); state.collapsed = !state.collapsed; persist(); renderRows(); alignCardStarts(); restoreScroll(saved); };
   document.getElementById('ws-find').oninput = renderRows;
   document.addEventListener('input', persist);
   document.addEventListener('change', persist);

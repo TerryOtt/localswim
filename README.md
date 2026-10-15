@@ -56,7 +56,12 @@ blank, so a project with two blocked cards and one ready for review has an empty
 column. The circles remain vertically aligned across every project row. Column labels,
 accessible names, and full counts convey their meaning alongside color; large counts
 may display as `99+`. Archived cards are excluded. Collapse the sidebar when lane width
-matters; its state is remembered in that browser window.
+matters; its state is remembered in that browser window. The expanded sidebar starts
+at 312 pixels wide, its minimum. Drag its right edge wider, or focus the separator and
+use Left/Right arrows (Shift for larger steps), Home for the minimum, or End for the
+maximum. Double-click the edge to reset; Escape cancels an active drag. Width is saved
+per window, including across reloads. Resizing the window limits the visible width to
+leave 320 pixels for the board where space permits; widening it restores your choice.
 
 Pin frequently used boards to keep them in a **Pinned** group above **Other boards**.
 Pinned boards keep your manual order. Drag a pinned board's grip relative to another
@@ -67,7 +72,7 @@ count columns stay aligned. Pin choices and order are saved in
 `localswim-gateway.json` at the workspace root. They are shared across browser windows
 and clients and survive browser and gateway restarts. Existing window-local pins are
 imported once, from the first nonempty legacy list, before shared pins are initialized.
-Sidebar collapse, search, selection, scrolling, and drafts remain local to each window.
+Sidebar collapse and width, search, selection, scrolling, and drafts remain local to each window.
 Failed preference saves show an error and support retry; concurrent changes are refreshed
 and reconciled against the gateway revision.
 
