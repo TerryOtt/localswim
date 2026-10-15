@@ -14,6 +14,10 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   browser UI. It is the sole writer while a board is live.
 - `src/localswim/workspace.py` owns directory discovery, the workspace catalog,
   loopback gateway, board-service reuse/startup, and bookmarkable SPA entry routes.
+- `src/localswim/workspace_config.py` owns schema-1 gateway preferences, atomic storage,
+  and cross-process revision checks.
+- `src/localswim/gateway_publish.py` owns configuration-only publishing using the
+  shared board repository lock.
 - `src/localswim/workspace.js` and `workspace.css` own the Attention sidebar,
   History API navigation, fixed count columns, and per-board browser state.
 - `src/localswim/rules.json` is the checked legacy/default policy used for controlled
@@ -88,7 +92,10 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   that board's browser actor credential and `If-Match`. Never write snapshots directly,
   impersonate `cliUser` for browser edits, or accept arbitrary upstream URLs. Reuse a
   healthy correct-board service; start absent services on available loopback ports.
-  Automatic board publishing remains opt-in and cannot change an existing service.
+  New gateways default to publishing disabled; `--autopush` persists true in the gateway
+  configuration and applies to newly owned children. Retain that setting across restarts
+  without the flag. Existing services retain their own publishing policy. Publish only
+  `localswim-gateway.json` under the shared repository lock; exclude unrelated staged files.
 - Stable board keys derive from relative snapshot paths, never mutable project labels.
   Support cold deep links and Back/Forward. Switch boards through SPA navigation without
   document reload, with explicit errors for missing or malformed boards. Keep drafts,
@@ -100,7 +107,12 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 - Show manually ordered Pinned boards above automatically sorted Other boards. Grip
   dragging and keyboard reordering affect only pinned stable keys; pin/unpin controls
   move boards between groups. Preserve manual order across activity updates and reloads
-  in the same independent window. Group labels/dividers must not indent count columns.
+  across clients and browser/gateway restarts in the workspace-root gateway configuration.
+  Gateway preferences have their own browser-authenticated, revision-checked API; never
+  reuse a board revision. Serialize client actions, reconcile conflicts, and surface save
+  errors without losing pending choices. Import only the first nonempty legacy pin list
+  while shared pins remain uninitialized. Keep collapse, drafts, search, selection, and
+  scrolling window-local. Group labels/dividers must not indent count columns.
   Sort Other boards by the latest audited card edit's exact epoch timestamp, descending,
   then descending total attention count and ascending case-insensitive project name;
   stable keys resolve identical-name ties. Only identical timestamps tie on recency.

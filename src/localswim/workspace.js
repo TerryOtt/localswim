@@ -3,6 +3,10 @@
   const categories = [['blocked', 'Blocked'], ['needsHuman', 'Needs Terry'], ['review', 'Ready for Review']];
   let catalog = [], current = null, storageKey = '', state = {records: {}, collapsed: false, pins: []};
   let pending = null, initialized = false, refreshing = false, recoverOnCatalog = false, retryRequested = false;
+  const preferencesRoute = '/api/v001/workspace/preferences';
+  let preferences = null, pinCommands = [], savingPins = false, pinFailure = '', pinRetryAt = 0;
+  let pinFailurePermanent = false;
+  let gatewayPush = null;
   window.workspaceEpoch = 0;
   const link = document.createElement('link');
   link.rel = 'stylesheet'; link.href = '/workspace.css'; document.head.append(link);
@@ -158,6 +162,97 @@
       .filter(key => typeof key === 'string' && known.has(key)))];
   }
   function announce(message) { document.getElementById('ws-announcement').textContent = message; }
+  function showWorkspaceStatus() {
+    let message = !catalog.length ? 'No boards found in this folder.' : '';
+    if (preferences && preferences.autopush && gatewayPush
+        && ['failed', 'off'].includes(gatewayPush.state))
+      message = 'Pinned boards are saved locally, but gateway backup is unavailable: ' + gatewayPush.detail;
+    if (pinCommands.length) message = 'Saving pinned boards…';
+    if (pinFailure) message = 'Pinned change was not saved: ' + pinFailure
+      + (pinFailurePermanent ? '' : ' Retrying when available.');
+    document.getElementById('ws-status').textContent = message;
+  }
+  function projectPins() {
+    if (!preferences) return;
+    let pins = [...preferences.pinnedBoards], initializedPins = preferences.pinsInitialized;
+    for (const command of pinCommands) {
+      if (command.action === 'initialize') {
+        if (!initializedPins) pins = [...command.pinnedBoards];
+      } else if (command.action === 'pin') {
+        if (!pins.includes(command.key)) pins.push(command.key);
+      } else if (command.action === 'unpin') {
+        pins = pins.filter(key => key !== command.key);
+      } else if (command.action === 'move' && pins.includes(command.key) && pins.includes(command.target)) {
+        pins = pins.filter(key => key !== command.key);
+        pins.splice(pins.indexOf(command.target) + (command.after ? 1 : 0), 0, command.key);
+      }
+      initializedPins = true;
+    }
+    state.pins = pins;
+    normalizePins();
+  }
+  function acceptPreferences(value) {
+    if (!value || !Number.isInteger(value.revision) || !Array.isArray(value.pinnedBoards)
+        || typeof value.pinsInitialized !== 'boolean') throw new Error('Gateway preferences could not be read.');
+    if (!preferences || value.revision >= preferences.revision) preferences = value;
+    if (!dragKey) projectPins();
+  }
+  async function savePinCommand(command) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (command.action === 'initialize' && preferences.pinsInitialized) return;
+      const response = await fetch(preferencesRoute, {
+        method: 'POST', keepalive: true, signal: AbortSignal.timeout(20000),
+        headers: {'Authorization': 'Bearer ' + API_TOKEN, 'Content-Type': 'application/json',
+          'If-Match': '"revision-' + preferences.revision + '"'},
+        body: JSON.stringify(command),
+      });
+      const out = await response.json();
+      if (response.status === 412) {
+        acceptPreferences(await apiGet(preferencesRoute));
+        continue;
+      }
+      if (response.status === 401) {
+        const session = await apiGet('/api/v001/browser-session');
+        if (session.workspaceIdentity !== storageKey.slice('localswim.workspace.'.length))
+          throw new Error('The workspace changed. Reload this page.');
+        API_TOKEN = session.token;
+        continue;
+      }
+      if (!response.ok) {
+        const failure = new Error(out.error || 'The gateway could not save this change.');
+        failure.permanent = response.status >= 400 && response.status < 500;
+        throw failure;
+      }
+      acceptPreferences(out);
+      return;
+    }
+    throw new Error('Another window is updating these preferences.');
+  }
+  async function flushPinCommands() {
+    if (savingPins || !preferences || !pinCommands.length || Date.now() < pinRetryAt) return;
+    savingPins = true; showWorkspaceStatus();
+    try {
+      while (pinCommands.length) {
+        const command = pinCommands[0];
+        await savePinCommand(command);
+        pinCommands.shift(); pinFailure = ''; pinFailurePermanent = false; pinRetryAt = 0;
+        projectPins(); persist(); renderRows();
+        announce('Pinned boards saved.');
+      }
+    } catch (err) {
+      pinFailurePermanent = !!err.permanent;
+      if (pinFailurePermanent) pinCommands.shift();
+      pinFailure = err instanceof TypeError ? 'The gateway could not be reached.' : err.message;
+      pinRetryAt = Date.now() + 5000;
+      projectPins(); persist(); renderRows();
+    } finally { savingPins = false; showWorkspaceStatus(); }
+  }
+  function queuePinCommand(command) {
+    if (!preferences) { toast('Gateway preferences are not available. Retry the workspace.', true); return; }
+    pinCommands.push(command); pinFailure = ''; pinFailurePermanent = false; pinRetryAt = 0;
+    projectPins(); persist(); renderRows(); showWorkspaceStatus();
+    flushPinCommands();
+  }
   function clearDropFeedback() {
     for (const row of rows.values()) row.classList.remove('ws-drop-before', 'ws-drop-after');
   }
@@ -166,8 +261,8 @@
     if (key === target || !state.pins.includes(key) || !state.pins.includes(target)) return;
     const order = state.pins.filter(item => item !== key);
     const position = order.indexOf(target) + (after ? 1 : 0);
-    order.splice(position, 0, key); state.pins = order;
-    persist(); renderRows();
+    order.splice(position, 0, key);
+    queuePinCommand({action: 'move', key, target, after});
     const entry = catalog.find(entry => entry.key === key);
     announce(entry.project + ' moved to pinned position ' + (position + 1) + ' of ' + order.length + '.');
   }
@@ -175,8 +270,7 @@
     normalizePins();
     const entry = catalog.find(entry => entry.key === key); if (!entry) return;
     const pinned = state.pins.includes(key);
-    state.pins = pinned ? state.pins.filter(item => item !== key) : [...state.pins, key];
-    persist(); renderRows();
+    queuePinCommand({action: pinned ? 'unpin' : 'pin', key});
     announce(entry.project + (pinned ? ' unpinned. It now follows the automatic board order.' : ' pinned at position ' + state.pins.length + '.'));
   }
   function makePinControls(row, key) {
@@ -291,20 +385,30 @@
       const session = await apiGet('/api/v001/browser-session');
       if (session.workspaceIdentity !== value.identity || typeof session.token !== 'string' || !session.token)
         throw new Error('The workspace session could not be recovered.');
+      if (initialized && storageKey !== 'localswim.workspace.' + value.identity)
+        throw new Error('The workspace folder changed. Reload this page.');
       // A restarted gateway has a new browser credential even when its build is unchanged.
       API_TOKEN = session.token;
       catalog = value.boards;
-      document.getElementById('ws-status').textContent = catalog.length ? '' : 'No boards found in this folder.';
+      gatewayPush = value.gatewayPush || null;
       nav.title = value.root;
       if (!initialized) {
-        initialized = true; storageKey = 'localswim.workspace.' + value.identity;
+        storageKey = 'localswim.workspace.' + value.identity;
         try { const saved = JSON.parse(sessionStorage.getItem(storageKey)); if (saved && saved.records) { state = saved; } } catch (_) {}
+        normalizePins();
+        const legacyPins = [...state.pins];
+        acceptPreferences(value.preferences); initialized = true;
+        if (!preferences.pinsInitialized && legacyPins.length)
+          queuePinCommand({action: 'initialize', pinnedBoards: legacyPins});
         const key = urlKey() || state.lastBoard || (catalog[0] && catalog[0].key);
         if (key) select(key, urlKey() ? 'none' : 'replace');
         else error('No supported boards were found. Add a board to the workspace folder, then retry.');
-      } else if (retryNow || (recoverOnCatalog && !window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none');
+      } else {
+        acceptPreferences(value.preferences);
+        if (retryNow || (recoverOnCatalog && !window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none');
+      }
       if (current && !catalog.some(entry => entry.key === current && !entry.error) && window.workspaceReady) { persist(); window.workspaceEpoch++; error('This board is missing or cannot be read. Choose another board or retry.', true); }
-      renderRows();
+      renderRows(); showWorkspaceStatus(); flushPinCommands();
     } catch (err) { document.getElementById('ws-status').textContent = String(err); if (!initialized || retryNow) error('Could not reach the workspace. Restart localswim, then Retry.'); }
     finally { refreshing = false; if (retryRequested) refresh(); }
   }

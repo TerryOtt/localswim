@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
 
-from . import api_endpoint, attachments, board_state
+from . import api_endpoint, attachments, board_state, gateway_publish, workspace_config
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 DEFAULT_PORT = 8810
 PREFIX = board_state.API_PREFIX + "/workspace"
 BOARD_PREFIX = PREFIX + "/boards/"
+PREFERENCES_ROUTE = PREFIX + "/preferences"
+MAX_PREFERENCES_BYTES = 64 * 1024
 START_WAIT_SECONDS = 15.0
 START_POLL_SECONDS = 0.1
 REQUEST_TIMEOUT = 5.0
@@ -91,7 +93,9 @@ class Workspace:
             raise ValueError(msg)
         self.identity = path_identity(self.root)
         self.token = secrets.token_urlsafe(32)
-        self.autopush = autopush
+        self.settings = workspace_config.GatewayConfigStore(self.root, autopush=autopush)
+        self.autopush = self.settings.snapshot().autopush
+        self.publisher = gateway_publish.GatewayPublisher(self.settings)
         self._children: dict[pathlib.Path, subprocess.Popen[bytes]] = {}
         self._launch_ids: dict[pathlib.Path, str] = {}
         self._lock = threading.RLock()
@@ -111,7 +115,11 @@ class Workspace:
             )
             for name in sorted(filenames):
                 path = parent / name
-                if name.startswith(".") or path.suffix.lower() != ".json":
+                if (
+                    name.startswith(".")
+                    or name == workspace_config.CONFIG_FILENAME
+                    or path.suffix.lower() != ".json"
+                ):
                     continue
                 if path.is_symlink() or not path.resolve().is_relative_to(self.root):
                     continue
@@ -173,7 +181,19 @@ class Workspace:
             except (OSError, ValueError) as exc:
                 entry["error"] = str(exc)
             boards.append(entry)
-        return {"root": str(self.root), "identity": self.identity, "boards": boards}
+        return {
+            "root": str(self.root),
+            "identity": self.identity,
+            "boards": boards,
+            "preferences": self.settings.snapshot().to_json(),
+            "gatewayPush": cast("board_state.JsonObject", self.publisher.status()),
+        }
+
+    def update_preferences(
+        self, revision: int, command: board_state.JsonObject
+    ) -> workspace_config.GatewayPreferences:
+        """Apply one revision-checked command to this root's discovered stable keys."""
+        return self.settings.apply(revision, command, self._paths().keys())
 
     def _existing(self, path: pathlib.Path) -> Endpoint | None:
         try:
@@ -284,7 +304,7 @@ class Workspace:
             if endpoint := self._await_existing(path):
                 return endpoint
             arguments = [sys.executable, "-m", "localswim.api_endpoint", str(path), "--port", "0"]
-            if self.autopush:
+            if self.settings.snapshot().autopush:
                 arguments.append("--autopush")
             launch_id = secrets.token_urlsafe(32)
             environment = {**os.environ, "LOCALSWIM_WORKSPACE_LAUNCH": launch_id}
@@ -310,6 +330,20 @@ class Workspace:
             child.wait(timeout=REQUEST_TIMEOUT)
             msg = "board service did not publish a healthy endpoint"
             raise TimeoutError(msg)
+
+    def start_publishing(self) -> None:
+        """Start gateway configuration publishing only for the live gateway lifecycle."""
+        self.publisher.start()
+
+    def stop_publishing(self) -> None:
+        """Flush pending gateway configuration and stop its publisher worker."""
+        ok, _ = self.publisher.stop()
+        if not ok:
+            print(
+                "Gateway preferences backup failed during shutdown; local settings retained.",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def close(self) -> None:
         """Explicitly stop only children launched here; normal gateway exit leaves writers live."""
@@ -388,6 +422,15 @@ def _rebase(value: board_state.JsonValue, prefix: str) -> board_state.JsonValue:
         }
     if isinstance(value, list):
         return [_rebase(item, prefix) for item in value]
+    return value
+
+
+def _unique_json_object(pairs: list[tuple[str, board_state.JsonValue]]) -> board_state.JsonObject:
+    value: board_state.JsonObject = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
     return value
 
 
@@ -517,6 +560,40 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
         except (OSError, http.client.HTTPException) as exc:
             self._json({"error": "board service unavailable: " + str(exc)}, 503)
 
+    def _preferences_write(self) -> None:
+        if self.headers.get("Authorization") != "Bearer " + self.workspace.token:
+            self._json({"error": "missing or invalid workspace credential"}, 401)
+            return
+        raw_revision = self.headers.get("If-Match")
+        if raw_revision is None:
+            self._json({"error": "If-Match must name the expected preferences revision"}, 428)
+            return
+        revision = raw_revision.strip().strip('"').removeprefix("revision-")
+        if not revision.isascii() or not revision.isdigit():
+            self._json({"error": "invalid preferences revision"}, 400)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 <= length <= MAX_PREFERENCES_BYTES:
+                self._json({"error": "preferences request is too large"}, 413)
+                return
+            command = cast(
+                "board_state.JsonValue",
+                json.loads(self.rfile.read(length), object_pairs_hook=_unique_json_object),
+            )
+            if not isinstance(command, dict):
+                self._json({"error": "preferences command must be an object"}, 400)
+                return
+            snapshot = self.workspace.update_preferences(int(revision), command)
+        except workspace_config.ConfigRevisionConflict as exc:
+            self._json({"error": str(exc)}, 412)
+        except ValueError, TypeError, RecursionError:
+            self._json({"error": "invalid preferences command"}, 400)
+        except OSError:
+            self._json({"error": "preferences storage unavailable"}, 503)
+        else:
+            self._json(snapshot.to_json())
+
     def do_GET(self) -> None:
         """Read the catalog, page assets, or a scoped upstream resource."""
         route = urllib.parse.urlsplit(self.path).path
@@ -524,6 +601,8 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             self._json(
                 {"token": self.workspace.token, "workspaceIdentity": self.workspace.identity}
             )
+        elif route == PREFERENCES_ROUTE:
+            self._json(self.workspace.settings.snapshot().to_json())
         elif route == PREFIX:
             stale = api_endpoint.code_is_stale()
             build = api_endpoint.BUILD if stale else api_endpoint.refresh_build_id_if_clean()
@@ -549,7 +628,9 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """Forward only scoped browser commands, preserving upstream revision checks."""
         route = urllib.parse.urlsplit(self.path).path
-        if route.startswith(BOARD_PREFIX):
+        if route == PREFERENCES_ROUTE:
+            self._preferences_write()
+        elif route.startswith(BOARD_PREFIX):
             self._proxy(route, write=True)
         else:
             self._json({"error": "unknown workspace route"}, 404)
@@ -564,8 +645,10 @@ def serve(root: pathlib.Path, port: int = DEFAULT_PORT, *, autopush: bool = Fals
     server = WorkspaceServer((api_endpoint.HOST, port), workspace)
     print(f"Workspace {workspace.root}", flush=True)
     print(f"  view: http://{api_endpoint.HOST}:{server.server_address[1]}/", flush=True)
+    workspace.start_publishing()
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        workspace.stop_publishing()
     api_endpoint.reexec_if_requested()

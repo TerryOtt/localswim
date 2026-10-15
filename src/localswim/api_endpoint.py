@@ -142,6 +142,8 @@ def build_id() -> str:
                 pathlib.Path(board_state.__file__ or __file__).resolve(),
                 pathlib.Path(attachments.__file__ or __file__).resolve(),
                 pathlib.Path(__file__).with_name("workspace.py"),
+                pathlib.Path(__file__).with_name("workspace_config.py"),
+                pathlib.Path(__file__).with_name("gateway_publish.py"),
                 pathlib.Path(__file__).with_name("workspace.js"),
                 pathlib.Path(__file__).with_name("workspace.css"),
             )
@@ -198,6 +200,8 @@ CODE_FILES = (
     pathlib.Path(board_state.__file__ or __file__).resolve(),
     pathlib.Path(attachments.__file__ or __file__).resolve(),
     pathlib.Path(__file__).with_name("workspace.py"),
+    pathlib.Path(__file__).with_name("workspace_config.py"),
+    pathlib.Path(__file__).with_name("gateway_publish.py"),
     pathlib.Path(__file__).with_name("workspace.js"),
     pathlib.Path(__file__).with_name("workspace.css"),
 )
@@ -585,6 +589,13 @@ def _repository_push_locked(cwd: pathlib.Path) -> Generator[None]:
                 release_process_lock(fd)
         finally:
             os.close(fd)
+
+
+@contextlib.contextmanager
+def repository_push_locked(cwd: pathlib.Path) -> Generator[None]:
+    """Share the board publisher's repository-wide lock with gateway publishers."""
+    with _repository_push_locked(cwd):
+        yield
 
 
 def push_unavailable(board_path: pathlib.Path) -> str:

@@ -46,6 +46,8 @@ saved, and only then published as the current in-memory snapshot.
 | `src/localswim/attachments.py` | Bounded attachment metadata, audit replay, raster detection, safe paths, flushed file writes, and content integrity. |
 | `src/localswim/api_endpoint.py` | Loopback HTTP server, transactional store, REST boundary, embedded HTML/CSS/JavaScript, live reload, and optional Git publishing. |
 | `src/localswim/workspace.py` | Directory discovery, workspace catalog and loopback gateway, board-service reuse and startup, and SPA deep-link serving. |
+| `src/localswim/workspace_config.py` | Schema-1 gateway preferences, strict validation, atomic storage, and cross-process revisions. |
+| `src/localswim/gateway_publish.py` | Configuration-only Git publishing with the shared board repository lock. |
 | `src/localswim/workspace.js` / `workspace.css` | Attention sidebar, SPA navigation, fixed count columns, and per-board browser state. |
 | `src/localswim/rules.json` | Checked legacy/default policy used by controlled migrations. |
 | `pyproject.toml` | uv build metadata, Python contract, dependencies, Ruff/formatter policy, and strict Pyright policy. |
@@ -98,9 +100,27 @@ files. Browser mutations use the board's browser credential and remain attribute
 `browserUser`; they never borrow the CLI identity. `If-Match` and the board service's
 validation, audit, and atomic save remain authoritative.
 
-Workspace `--autopush` is opt-in and applies only to newly started children. Reusing a
-service does not change its publishing configuration. Discovery and workspace browsing
-must not enable private-board publishing implicitly.
+The workspace root contains `localswim-gateway.json`, independent of board snapshots.
+Its schema-1 object has exactly `schema`, `revision`, `autopush`, `pinsInitialized`, and
+`pinnedBoards` (ordered unique stable keys). New gateways default to `autopush: false`;
+`--autopush` persists true. Omitting the flag on later starts preserves true. Newly owned
+children inherit the saved gateway setting; reusing a service preserves its publishing
+configuration. A separate gateway publisher commits only this configuration file, using
+the board publishers' Git common-directory lock and excluding unrelated staged files.
+
+Catalog fields `preferences` and `gatewayPush` expose the authoritative settings and
+gateway publishing status; selected-board publishing status remains independent.
+`GET /api/v001/workspace/preferences` returns the settings snapshot directly.
+`POST` at that route requires the gateway browser bearer and
+`If-Match: "revision-N"` for the configuration revision, never a board revision. Commands
+use `action`: `pin`/`unpin` with `key`, `move` with `key`, `target`, and Boolean `after`,
+or `initialize` with `pinnedBoards`. Initialization adopts only the first nonempty legacy
+list while `pinsInitialized` is false. Normal pin actions initialize shared preferences
+even when their result is empty, preventing a later legacy import from restoring unpins.
+Storage validates bounded JSON, rejects duplicate and unknown fields, and refuses symbolic
+links or unsafe keys. Cross-process locking covers revision comparison, flushed temporary
+writes, and atomic replacement. Stale revisions return 412; malformed commands return 400,
+oversized requests 413, and storage failures 503. Missing `If-Match` returns 428.
 
 The sidebar uses fixed grid columns for Blocked, Needs Terry, and Ready for Review.
 Every project reserves all three slots, including blank zero-count slots. Thus a row
@@ -109,7 +129,7 @@ same column coordinates as every other row. Labels and accessible full-count nam
 supplement red, amber, and blue circles; visible `99+` does not replace the true count.
 Counts exclude archived cards.
 
-The Pinned group precedes Other boards. `state.pins` records the window's manually
+The Pinned group precedes Other boards. `state.pins` reflects the gateway's manually
 ordered stable keys. Grip dragging and Arrow Up/Down/Home/End reorder only those keys;
 pin/unpin controls move boards between groups. Native drag state accepts only known
 pinned keys from the same window. Group headings and a subtle divider appear only for
@@ -128,9 +148,12 @@ stamp parser tolerates unreadable legacy values. Missing activity sorts last; fu
 activity retains its exact recorded timestamp. Tooltips independently show elapsed whole
 minutes, clamped to zero for future activity. Catalog polls refresh order while reusing existing
 row elements and preserving keyboard focus, search, list scrolling, and active selection.
-Legacy session pin order is retained, with duplicates and absent keys discarded.
-Pin order is saved beside per-board drafts and collapse state in window-local session
-storage, so it survives same-window reloads without controlling another window.
+The first nonempty legacy session pin list is migrated conditionally, with duplicates
+and absent keys discarded. The gateway becomes authoritative thereafter: manual order
+and pin choices survive browser and gateway restarts and are shared across clients.
+The browser serializes preference commands, refreshes and reconciles stale-revision
+conflicts, and shows storage or transport errors while preserving pending choices.
+Per-board drafts and sidebar collapse remain in window-local session storage.
 
 Workspace navigation uses History API URLs and updates the active board in place.
 Cold deep links and Back/Forward follow the same selection path. Per-board selected
@@ -575,7 +598,8 @@ preflight and graceful re-exec boundary owns it.
 
 ## Optional Git publishing
 
-`--autopush` is off unless explicitly supplied. When enabled, a daemon thread waits
+Individual-board `--autopush` is off unless explicitly supplied; workspace gateways
+retain their saved setting as described above. When enabled, a daemon thread waits
 five quiet seconds after the latest board write, commits the board and audited attachment
 paths, and pushes
 the board repository's current branch. Every service using the same Git common
@@ -610,6 +634,10 @@ The suite spans these boundaries:
 | `test_policy.py` | Policy immutability, strict edge parsing, actor matching, isolation, and reload. |
 | `test_store.py` | Transactionality, revision races, board placement, and autopush integration. |
 | `test_api.py` | Real threaded loopback routes, auth, revisions, redirects, and code restart. |
+| `test_workspace.py` | Gateway discovery/proxying, child publishing policy, and workspace UI contracts. |
+| `test_gateway_preferences_api.py` | Gateway preference routes, authentication, independent revisions, and persisted settings. |
+| `test_gateway_publish.py` | Configuration-only commits, unrelated staged-file exclusion, shared locking, and push recovery. |
+| `test_workspace_config.py` | Preference validation, atomic cross-process revisions, legacy initialization, and safe storage paths. |
 | `test_cli.py` | CLI-to-service mutations, activity reports, initialization, and offline migrations. |
 | `test_docs.py` | Checked generic and Terry-workflow initialization inputs and generated boards. |
 | `test_check.py` | Gate line-ending parser. |

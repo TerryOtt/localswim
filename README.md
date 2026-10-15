@@ -63,8 +63,13 @@ Pinned boards keep your manual order. Drag a pinned board's grip relative to ano
 pinned board, or focus the grip and use Arrow Up/Down or Home/End to reorder it. Pin and
 unpin controls move boards between groups; dragging only reorders the pinned group.
 Compact group labels and a subtle divider distinguish the groups while the attention
-count columns stay aligned. Pin choices and order survive reloads in the same window;
-independent windows keep their own sidebar preferences.
+count columns stay aligned. Pin choices and order are saved in
+`localswim-gateway.json` at the workspace root. They are shared across browser windows
+and clients and survive browser and gateway restarts. Existing window-local pins are
+imported once, from the first nonempty legacy list, before shared pins are initialized.
+Sidebar collapse, search, selection, scrolling, and drafts remain local to each window.
+Failed preference saves show an error and support retry; concurrent changes are refreshed
+and reconciled against the gateway revision.
 
 Other boards sort by the latest card edit's exact timestamp, most recent first, then
 descending sum of the three attention counts, then ascending board name without case
@@ -102,9 +107,13 @@ storage, and paths that escape the selected directory through symbolic links. Or
 JSON files that are not board snapshots are ignored. Board data stays in its original
 location, including attachment files beside each snapshot.
 
-Workspace children start with automatic board publishing disabled unless `--autopush`
-is explicitly supplied. That option applies only to newly started services and does
-not change the publishing policy of services already running.
+A new workspace defaults to automatic publishing disabled. Starting the gateway with
+`--autopush` saves `autopush: true` in `localswim-gateway.json`; later starts retain that
+setting even when the flag is omitted. The setting publishes the gateway configuration
+and enables automatic board publishing for newly started children. Existing board
+services keep their own publishing policy. Gateway commits include only the configuration
+file, with the same repository lock used by board publishers. Unrelated staged files
+are excluded.
 
 ## Board configuration
 
@@ -506,6 +515,8 @@ A workspace also exposes:
 
 ~~~text
 GET  /api/v001/workspace
+GET  /api/v001/workspace/preferences
+POST /api/v001/workspace/preferences
 GET  /api/v001/workspace/boards/<encoded-key>/status
 GET  /api/v001/workspace/boards/<encoded-key>/board
 POST /api/v001/workspace/boards/<encoded-key>/cards/...
@@ -516,6 +527,18 @@ The catalog includes each board's stable key, project name, the three attention 
 key encoded as one URL segment, for example `localswim%2Flocalswim`. The gateway forwards
 requests to that board's sole writer, preserving revision checks and browser actor
 attribution. Attachment links use the same origin and selected board.
+
+The catalog also includes `preferences` and `gatewayPush`. Preferences use schema 1:
+`revision`, `autopush`, `pinsInitialized`, and the ordered stable-key array
+`pinnedBoards`. `gatewayPush` reports configuration publishing separately from the
+selected board's publishing status. Both preference routes return the preference
+snapshot directly. Preference POST requires the gateway browser bearer credential and
+`If-Match: "revision-N"` using the preference revision, independent of board revisions.
+Bodies are `{ "action": "pin", "key": "project/board" }`, the equivalent `unpin`,
+`{ "action": "move", "key": "project/board", "target": "other/board", "after": true }`,
+or `{ "action": "initialize", "pinnedBoards": ["project/board"] }`. Initialization
+imports only the first nonempty legacy list while shared pins remain uninitialized.
+A stale preference revision returns 412; clients refresh and reconcile pending actions.
 
 Only the `/api/v001` routes are API endpoints. For seamless upgrades of already-open
 tabs, `/v1/status` and `/mtime` issue no-cache redirects to
