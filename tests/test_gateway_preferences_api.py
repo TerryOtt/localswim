@@ -192,10 +192,10 @@ def test_persisted_autopush_is_inherited_only_by_new_board_services(
         launched.append(arguments)
         return cast("subprocess.Popen[bytes]", object())
 
-    def existing(_path: pathlib.Path) -> workspace.Endpoint:
+    def existing(_path: pathlib.Path, **_kwargs: object) -> workspace.Endpoint:
         return endpoint
 
-    def absent(_path: pathlib.Path) -> None:
+    def absent(_path: pathlib.Path, **_kwargs: object) -> None:
         return
 
     monkeypatch.setattr(workspace.subprocess, "Popen", launch)

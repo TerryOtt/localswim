@@ -47,8 +47,9 @@ uv run --frozen localswim path/to/state-store --port 8810
 A directory starts the workspace; a JSON file still starts an individual board. The
 workspace defaults to **http://127.0.0.1:8810/**. It discovers schema-4 boards below the
 directory and presents one active board at a time. Existing healthy board services are
-reused; absent services start on available loopback ports. The CLI continues to use each
-board's JSON path and its own service descriptor.
+reused; absent services start on available loopback ports. If a writer is restarting,
+the gateway waits for its rendezvous to recover instead of starting another writer.
+The CLI continues to use each board's JSON path and its own service descriptor.
 
 The Attention sidebar gives every project three fixed count columns: **Blocked** (red),
 **Needs Terry** (amber), and **Ready for Review** (blue). A zero count leaves its column
@@ -466,7 +467,10 @@ persisted policy and every runtime request use stable IDs.
 `localswim.api_endpoint` is the sole writer while a board is live. Every mutation
 validates the model, increments revision, flushes a temporary file in the board's
 directory and atomically replaces the previous snapshot. Stale writes receive HTTP 412
-instead of overwriting newer state.
+instead of overwriting newer state. A process-lifetime operating-system lock prevents
+two services from owning the same board, even when started on different ports. A stopped
+or crashed process releases ownership automatically; an unrelated listener is never
+terminated to make room for a board service.
 
 Board JSON contains identities, descriptions, comments and audit history. Keep it out
 of this public source repository.
@@ -563,7 +567,15 @@ the CLI credential and does not change the board revision.
 The server watches its installed Python modules and workspace JavaScript/CSS assets. A valid
 change is debounced, preflighted in a child Python process and applied by gracefully
 re-executing the server. An invalid change leaves the healthy process running and
-reports the preflight error.
+reports the preflight error. An individual-board restart drains active requests and
+keeps its actual listening port, including a port assigned by `--port 0`. Startup and
+restart coordination prevents another launch from taking ownership during replacement.
+Process IDs and browser/CLI credentials may change; clients use the replacement service
+descriptor and refresh browser credentials.
+
+When upgrading from a build without lifetime writer ownership, stop and consolidate any
+legacy duplicate board services once before launching the upgraded service. An overwritten
+legacy descriptor cannot reveal every older writer.
 
 A service started from a dirty checkout retains that truthful Build ID while work
 remains. Once the checkout becomes clean, status polling checks at most once every two

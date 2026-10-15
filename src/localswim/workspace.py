@@ -18,7 +18,14 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
 
-from . import api_endpoint, attachments, board_state, gateway_publish, workspace_config
+from . import (
+    api_endpoint,
+    attachments,
+    board_state,
+    gateway_publish,
+    service_ownership,
+    workspace_config,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -260,38 +267,30 @@ class Workspace:
         finally:
             connection.close()
 
-    def _await_existing(self, path: pathlib.Path) -> Endpoint | None:
+    def _await_existing(
+        self, path: pathlib.Path, *, wait_for_upgrade: bool = True
+    ) -> Endpoint | None:
         deadline = time.monotonic() + START_WAIT_SECONDS
         while True:
+            upgrading = False
             try:
-                return self._existing(path)
-            except ServiceUpgradePendingError as exc:
-                if time.monotonic() >= deadline:
-                    msg = "existing board service could not verify its identity after upgrade"
-                    raise OSError(msg) from exc
-                time.sleep(START_POLL_SECONDS)
+                if endpoint := self._existing(path):
+                    return endpoint
+            except ServiceUpgradePendingError:
+                if not wait_for_upgrade:
+                    raise
+                upgrading = True
+            if not upgrading and not service_ownership.writer_busy(path):
+                return None
+            if time.monotonic() >= deadline:
+                msg = "existing board writer did not publish a healthy endpoint before timeout"
+                raise TimeoutError(msg)
+            time.sleep(START_POLL_SECONDS)
 
     @contextlib.contextmanager
-    def _launch_locked(self, path: pathlib.Path) -> Generator[None]:
-        lock = board_state.service_descriptor_path(path).with_suffix(".workspace.lock")
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
-        acquired = False
-        try:
-            if os.fstat(descriptor).st_size == 0:
-                os.write(descriptor, b"\0")
-            deadline = time.monotonic() + START_WAIT_SECONDS
-            while not api_endpoint.try_process_lock(descriptor):
-                if time.monotonic() >= deadline:
-                    msg = "timed out waiting for board service launch"
-                    raise TimeoutError(msg)
-                time.sleep(START_POLL_SECONDS)
-            acquired = True
-            yield
-        finally:
-            if acquired:
-                api_endpoint.release_process_lock(descriptor)
-            os.close(descriptor)
+    def _launch_locked(self, path: pathlib.Path) -> Generator[service_ownership.LaunchGate]:
+        with service_ownership.launch_locked(path, timeout=START_WAIT_SECONDS) as gate:
+            yield gate
 
     def endpoint(self, path: pathlib.Path) -> Endpoint:
         """Reuse a matching live writer, otherwise launch one on an ephemeral port."""
@@ -300,16 +299,32 @@ class Workspace:
             msg = "board is outside the workspace"
             raise ValueError(msg)
         board_state.load(path)
-        with self._lock, self._launch_locked(path):
-            if endpoint := self._await_existing(path):
+        with self._lock:
+            while True:
+                try:
+                    return self._endpoint_under_gate(path)
+                except ServiceUpgradePendingError:
+                    # The old writer takes this same gate before its restart.
+                    # Release it before waiting for the replacement to become ready.
+                    if endpoint := self._await_existing(path):
+                        return endpoint
+
+    def _endpoint_under_gate(self, path: pathlib.Path) -> Endpoint:
+        with self._launch_locked(path) as gate:
+            if endpoint := self._await_existing(path, wait_for_upgrade=False):
                 return endpoint
-            arguments = [sys.executable, "-m", "localswim.api_endpoint", str(path), "--port", "0"]
+            arguments = ["-m", "localswim.api_endpoint", str(path), "--port", "0"]
             if self.settings.snapshot().autopush:
                 arguments.append("--autopush")
             launch_id = secrets.token_urlsafe(32)
-            environment = {**os.environ, "LOCALSWIM_WORKSPACE_LAUNCH": launch_id}
+            environment = {
+                **os.environ,
+                **gate.child_environment(),
+                "LOCALSWIM_WORKSPACE_LAUNCH": launch_id,
+            }
+            command = service_ownership.python_child_command(arguments, environment)
             child = subprocess.Popen(  # noqa: S603 -- fixed Python module and discovered path
-                arguments,
+                command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -320,14 +335,18 @@ class Workspace:
             self._launch_ids[path] = launch_id
             deadline = time.monotonic() + START_WAIT_SECONDS
             while time.monotonic() < deadline:
-                if endpoint := self._existing(path):
-                    return endpoint
-                if child.poll() is not None:
+                try:
+                    if endpoint := self._existing(path):
+                        return endpoint
+                except ServiceUpgradePendingError:
+                    pass
+                if child.poll() is not None and not service_ownership.writer_busy(path):
                     msg = "board service could not start"
                     raise OSError(msg)
                 time.sleep(START_POLL_SECONDS)
-            child.terminate()
-            child.wait(timeout=REQUEST_TIMEOUT)
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=REQUEST_TIMEOUT)
             msg = "board service did not publish a healthy endpoint"
             raise TimeoutError(msg)
 

@@ -12,6 +12,8 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
   browser UI. It is the sole writer while a board is live.
+- `src/localswim/service_ownership.py` owns per-board lifetime writer leases and the
+  startup/restart gate shared by individual services and workspace launches.
 - `src/localswim/workspace.py` owns directory discovery, the workspace catalog,
   loopback gateway, board-service reuse/startup, and bookmarkable SPA entry routes.
 - `src/localswim/workspace_config.py` owns schema-1 gateway preferences, atomic storage,
@@ -42,7 +44,14 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   services, or browser network dependencies without an explicit product decision.
 - Preserve the single-writer design, per-process bearer credential, `If-Match`
   revision checks, schema validation, monotonic revisions, flushed temporary writes,
-  and atomic snapshot replacement.
+  and atomic snapshot replacement. Acquire the board lifetime OS lease before constructing
+  its store, starting autopush, binding, or publishing its descriptor. Keep lease lock files
+  persistent; never unlink an active or released OS-lock path. Coordinate all launches and
+  restart handoffs through the shared startup gate. Drain HTTP workers before releasing
+  ownership; retain the actual bound port, including `--port 0`, across hot restart.
+  Use explicit child-process handoff on Windows; do not assume byte locks are inherited.
+  Keep the old descriptor until replacement publication, preserve workspace launch identity,
+  and rotate bearer credentials normally.
 - Board files can contain private identities, descriptions, comments, and history.
   Keep local boards under ignored `boards/` or outside this public checkout; never add
   real board data, credentials, or service descriptors to source control.
@@ -94,7 +103,11 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 - Workspace mode must proxy each mutation to the board's existing sole writer with
   that board's browser actor credential and `If-Match`. Never write snapshots directly,
   impersonate `cliUser` for browser edits, or accept arbitrary upstream URLs. Reuse a
-  healthy correct-board service; start absent services on available loopback ports.
+  healthy correct-board service; start absent services on available loopback ports. Wait
+  boundedly for missing/refused rendezvous while the lifetime writer lease is busy; do not
+  treat a temporary restart gap as permission to launch another writer or stop a foreign
+  listener. A released crash lease permits recovery. Legacy writers without the lease
+  require one-time consolidation; overwritten descriptors cannot identify all old writers.
   New gateways default to publishing disabled; `--autopush` persists true in the gateway
   configuration and applies to newly owned children. Retain that setting across restarts
   without the flag. Existing services retain their own publishing policy. Publish only

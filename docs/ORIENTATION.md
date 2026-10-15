@@ -45,6 +45,7 @@ saved, and only then published as the current in-memory snapshot.
 | `src/localswim/cli.py` | Click command tree, contextual help, and command-to-service dispatch. |
 | `src/localswim/attachments.py` | Bounded attachment metadata, audit replay, raster detection, safe paths, flushed file writes, and content integrity. |
 | `src/localswim/api_endpoint.py` | Loopback HTTP server, transactional store, REST boundary, embedded HTML/CSS/JavaScript, live reload, and optional Git publishing. |
+| `src/localswim/service_ownership.py` | Per-board lifetime writer ownership and the shared startup/restart gate. |
 | `src/localswim/workspace.py` | Directory discovery, workspace catalog and loopback gateway, board-service reuse and startup, and SPA deep-link serving. |
 | `src/localswim/workspace_config.py` | Schema-1 gateway preferences, strict validation, atomic storage, and cross-process revisions. |
 | `src/localswim/gateway_publish.py` | Configuration-only Git publishing with the shared board repository lock. |
@@ -93,7 +94,12 @@ selected board's existing `/api/v001/<board-api-path>`. Encode the key as one se
 Attachment URLs are rebased through that gateway as well.
 
 The gateway reuses a healthy descriptor only when it identifies the correct board.
-Otherwise it starts a child individual-board service on an ephemeral loopback port;
+It coordinates launches with the same startup gate used by direct board starts and
+hot restarts. Missing or refused rendezvous while the writer lease is busy triggers a
+bounded recovery wait (15 seconds), never a duplicate writer. Healthy matching legacy
+services are reused even when they predate the lease. A crash releases the OS lease so a new
+child can start; an unrelated listener is never terminated or adopted.
+When no writer owns the board, it starts a child on an ephemeral loopback port;
 that child publishes its actual port in the usual descriptor, so existing CLI mutations
 still reach the same sole writer. The gateway never writes board JSON or attachment
 files. Browser mutations use the board's browser credential and remain attributed to
@@ -404,6 +410,32 @@ The server adds an in-process `RLock` around the filesystem lock. Two clients wr
 the same revision produce one winner and one HTTP 412 response; a stale command never
 overwrites newer state.
 
+A separate process-lifetime OS lease in `service_ownership.py` protects the live writer
+throughout the service lifecycle. Every board start acquires it before store construction, autopush,
+listener binding, or descriptor publication. Its lock file remains on disk after release;
+unlinking it would permit two processes to lock different files under the same name.
+Process exit releases the lease without a stale-file age heuristic. The existing
+`.workspace.lock` startup gate serializes direct starts, gateway starts, and hot restarts.
+This ownership boundary is separate from the short snapshot transaction lock above and
+the Git repository publishing lock.
+
+A board hot restart holds the launch gate from before listener closure until the
+replacement is healthy. It drains HTTP request threads, closes the listener, stops and
+joins the board publisher, then hands off through an explicit child process on Windows
+rather than assuming inherited byte
+locks. The replacement uses the actual bound port, including an ephemeral `--port 0`
+assignment. The old descriptor remains until replacement publication; bearer capabilities
+rotate normally, while workspace launch identity is retained. PID continuity is not a
+contract. A one-use capability scoped to the canonical board lets the replacement skip
+only the launch gate; it must still acquire the writer lease. Explicit shutdown wins
+over a pending restart. Failed replacement stops its owned child and releases ownership
+and launch admission, leaving recovery to a later start. Gateway-only re-exec does not
+own a board lease.
+
+Legacy services started before lifetime ownership may need one-time consolidation during
+upgrade. A previously overwritten descriptor cannot enumerate unknown older writers;
+the lease cannot retroactively coordinate a process that never acquired it.
+
 ## Attachment storage and audit
 
 Cards optionally persist `attachments`, `attachmentHistory`, and `coverAttachment`
@@ -649,6 +681,8 @@ The suite spans these boundaries:
 | `test_store.py` | Transactionality, revision races, board placement, and autopush integration. |
 | `test_api.py` | Real threaded loopback routes, auth, revisions, redirects, and code restart. |
 | `test_workspace.py` | Gateway discovery/proxying, child publishing policy, and workspace UI contracts. |
+| `test_service_ownership.py` | Exclusive lifetime leases, one-use launch handoff, real restart port preservation, shutdown precedence, and failed replacement cleanup. |
+| `test_workspace_ownership.py` | Busy-lease rendezvous recovery, stale-service replacement, and shared launch coordination. |
 | `test_gateway_preferences_api.py` | Gateway preference routes, authentication, independent revisions, and persisted settings. |
 | `test_gateway_publish.py` | Configuration-only commits, unrelated staged-file exclusion, shared locking, and push recovery. |
 | `test_workspace_config.py` | Preference validation, atomic cross-process revisions, legacy initialization, and safe storage paths. |

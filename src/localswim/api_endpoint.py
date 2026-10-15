@@ -78,7 +78,7 @@ import urllib.parse
 import uuid
 from typing import TYPE_CHECKING, cast
 
-from . import attachments, board_state
+from . import attachments, board_state, service_ownership
 
 if TYPE_CHECKING:
     import socketserver
@@ -144,6 +144,7 @@ def build_id() -> str:
                 pathlib.Path(__file__).with_name("workspace.py"),
                 pathlib.Path(__file__).with_name("workspace_config.py"),
                 pathlib.Path(__file__).with_name("gateway_publish.py"),
+                pathlib.Path(__file__).with_name("service_ownership.py"),
                 pathlib.Path(__file__).with_name("workspace.js"),
                 pathlib.Path(__file__).with_name("workspace.css"),
             )
@@ -202,6 +203,7 @@ CODE_FILES = (
     pathlib.Path(__file__).with_name("workspace.py"),
     pathlib.Path(__file__).with_name("workspace_config.py"),
     pathlib.Path(__file__).with_name("gateway_publish.py"),
+    pathlib.Path(__file__).with_name("service_ownership.py"),
     pathlib.Path(__file__).with_name("workspace.js"),
     pathlib.Path(__file__).with_name("workspace.css"),
 )
@@ -297,6 +299,8 @@ RESTART_DEBOUNCE_S = 0.75
 _restart_lock = threading.Lock()
 _restart_scheduled = False
 _restart_requested = threading.Event()
+_restart_gate_stack: contextlib.ExitStack | None = None
+_restart_gate: service_ownership.LaunchGate | None = None
 _restart_refused_stamp: tuple[tuple[float, str], ...] | None = None
 _restart_problem: str | None = None
 
@@ -381,6 +385,14 @@ def request_code_restart(
             print(f"  AUTO-RESTART PAUSED: {problem}", flush=True)
             return
 
+        if not _reserve_board_restart(server):
+            with _restart_lock:
+                _restart_scheduled = False
+                _restart_problem = "board launch gate is busy; restart will retry"
+            return
+        if _shutdown_requested.is_set():
+            _release_restart_gate()
+            return
         print("  Python source changed; restarting server.", flush=True)
         _restart_requested.set()
         server.shutdown()
@@ -424,7 +436,105 @@ def request_service_shutdown(server: socketserver.BaseServer) -> tuple[bool, str
     return True, detail
 
 
-def reexec_if_requested() -> None:
+def _reserve_board_restart(server: socketserver.BaseServer) -> bool:
+    """Reserve launch admission while the old board listener is still healthy."""
+    global _restart_gate_stack, _restart_gate
+    if not isinstance(server, BoardHttpServer):
+        return True
+    stack = contextlib.ExitStack()
+    try:
+        gate = stack.enter_context(service_ownership.launch_locked(BOARD_PATH))
+    except OSError:
+        stack.close()
+        return False
+    _restart_gate_stack, _restart_gate = stack, gate
+    return True
+
+
+def _release_restart_gate() -> None:
+    global _restart_gate_stack, _restart_gate
+    stack, _restart_gate_stack, _restart_gate = _restart_gate_stack, None, None
+    if stack is not None:
+        stack.close()
+
+
+def _replacement_ready(child: subprocess.Popen[bytes], port: int) -> bool:
+    try:
+        raw = service_ownership.read_service_metadata(BOARD_PATH)
+        return (
+            isinstance(raw, dict)
+            and raw.get("pid") == child.pid
+            and raw.get("port") == port
+            and service_ownership.service_is_healthy(BOARD_PATH)
+        )
+    except OSError, ValueError, RecursionError:
+        return False
+
+
+def _remove_failed_replacement(child: subprocess.Popen[bytes]) -> None:
+    if child.poll() is None:
+        try:
+            child.terminate()
+        except OSError:
+            child.kill()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=5)
+    target = service_file(BOARD_PATH)
+    with contextlib.suppress(OSError, ValueError, RecursionError):
+        raw = service_ownership.read_service_metadata(BOARD_PATH)
+        if isinstance(raw, dict) and raw.get("pid") == child.pid:
+            target.unlink(missing_ok=True)
+
+
+def _handoff_board(
+    args: argparse.Namespace, port: int, lease: service_ownership.WriterLease
+) -> None:
+    """Replace a drained board process under its continuously held launch gate."""
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        if _shutdown_requested.is_set():
+            remove_service(BOARD_PATH)
+            return
+        gate = _restart_gate
+        if gate is None:
+            raise OSError("board restart has no reserved launch gate")  # noqa: TRY301 -- owned cleanup
+        environment = {**os.environ, **gate.child_environment()}
+        arguments = service_ownership.python_child_command(
+            ["-m", "localswim.api_endpoint", str(BOARD_PATH), "--port", str(port)], environment
+        )
+        if args.autopush:
+            arguments.append("--autopush")
+        lease.release()
+        child = subprocess.Popen(  # noqa: S603 -- fixed module and canonical owned board
+            arguments,
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            env=environment,
+        )
+        deadline = time.monotonic() + service_ownership.LOCK_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            if child.poll() is not None:
+                break
+            if _replacement_ready(child, port):
+                print(f"Board service restarted on {HOST}:{port}.", flush=True)
+                return
+            time.sleep(service_ownership.POLL_SECONDS)
+        raise OSError("replacement board service did not become healthy")  # noqa: TRY301 -- owned cleanup
+    except (OSError, subprocess.SubprocessError) as exc:
+        try:
+            if child is not None:
+                _remove_failed_replacement(child)
+        finally:
+            remove_service(BOARD_PATH)
+        raise SystemExit("ERROR: board restart failed; no replacement writer is running") from exc
+    finally:
+        _release_restart_gate()
+
+
+def _reexec_if_requested() -> None:
     """Replace this process after its listening socket and request threads close."""
     if not _restart_requested.is_set():
         return
@@ -438,9 +548,9 @@ def reexec_if_requested() -> None:
     )
 
 
-def _reexec_if_requested() -> None:
-    """Compatibility seam for existing source lifecycle tests."""
-    reexec_if_requested()
+def reexec_if_requested() -> None:
+    """Compatibility seam for the workspace source lifecycle."""
+    _reexec_if_requested()
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +587,7 @@ _push_lock = threading.Lock()
 _push_operation_lock = threading.Lock()
 _push_state: dict[str, object] = {"state": "off", "at": 0.0, "detail": "not started"}
 _autopush_enabled = False
+_push_stop = threading.Event()
 
 
 def _set_push(state: str, detail: str) -> None:
@@ -731,6 +842,8 @@ def _push_loop(board_path: pathlib.Path) -> None:
     retry_at: float | None = None
     while True:
         time.sleep(_PUSH_TICK_S)
+        if _push_stop.is_set():
+            return
         try:
             now_mtime = board_path.stat().st_mtime
         except OSError:
@@ -764,6 +877,7 @@ def start_autopush(
     """Start the optional publisher, or publish an explicit disabled status."""
     global _autopush_enabled  # noqa: PLW0603 -- one service owns one autopush mode
     _autopush_enabled = enabled
+    _push_stop.clear()
     if not enabled:
         _set_push("off", "disabled; start the server with --autopush to enable")
         print("  autopush  : OFF -- enable with --autopush", flush=True)
@@ -1031,8 +1145,8 @@ def remove_service(path: pathlib.Path) -> None:
     """Remove only the rendezvous file published by this process."""
     target = service_file(path)
     try:
-        raw = cast("board_state.JsonValue", json.loads(target.read_text(encoding="utf-8")))
-    except OSError, ValueError:
+        raw = service_ownership.read_service_metadata(path)
+    except OSError, ValueError, RecursionError:
         return
     if isinstance(raw, dict) and raw.get("token") == CLI_TOKEN:
         target.unlink(missing_ok=True)
@@ -4877,6 +4991,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _serve_board(args: argparse.Namespace) -> None:
+    """Acquire sole-writer ownership before loading or publishing any board state."""
+    path = args.board.resolve()
+    try:
+        delegated = service_ownership.consume_launch(path)
+        with contextlib.ExitStack() as stack:
+            if not delegated:
+                admission = contextlib.ExitStack()
+                try:
+                    admission.enter_context(service_ownership.launch_locked(path))
+                    if service_ownership.service_is_healthy(path):
+                        raise service_ownership.WriterAlreadyRunningError(
+                            "a healthy board service already owns this board"
+                        )
+                    lease = stack.enter_context(service_ownership.writer_claim(path))
+                finally:
+                    admission.close()
+            else:
+                lease = stack.enter_context(service_ownership.writer_claim(path))
+            _serve_owned_board(args, lease)
+    except OSError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
+
+
+def _serve_owned_board(args: argparse.Namespace, lease: service_ownership.WriterLease) -> None:
     global BOARD_PATH, STORE  # noqa: PLW0603 -- one process serves one board
     _shutdown_requested.clear()
     BOARD_PATH = args.board.resolve()
@@ -4928,18 +5066,32 @@ def _serve_board(args: argparse.Namespace) -> None:
     # `git` subprocess that finishes on its own; the worst case at shutdown is a commit
     # that lands without its push, and the next --autopush start reconciles it because
     # the loop begins armed.
-    start_autopush(BOARD_PATH, enabled=args.autopush)
+    _run_board_server(args, port, lease)
 
+
+def _run_board_server(
+    args: argparse.Namespace, port: int, lease: service_ownership.WriterLease
+) -> None:
     server = BoardHttpServer((HOST, port), Handler)
     port = server.server_address[1]
-    publish_service(BOARD_PATH, port)
-    print(f"Listening on {HOST}:{port}. Press Ctrl+C to stop.", flush=True)
+    worker: threading.Thread | None = None
+    served = False
     try:
+        publish_service(BOARD_PATH, port)
+        worker = start_autopush(BOARD_PATH, enabled=args.autopush)
+        print(f"Listening on {HOST}:{port}. Press Ctrl+C to stop.", flush=True)
         server.serve_forever()
+        served = True
     finally:
         server.server_close()
-        remove_service(BOARD_PATH)
-    _reexec_if_requested()
+        _push_stop.set()
+        if worker is not None:
+            worker.join()
+        if not served or not _restart_requested.is_set() or _shutdown_requested.is_set():
+            remove_service(BOARD_PATH)
+            _release_restart_gate()
+    if _restart_requested.is_set() and not _shutdown_requested.is_set():
+        _handoff_board(args, port, lease)
 
 
 def main() -> None:
