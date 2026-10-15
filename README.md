@@ -53,7 +53,8 @@ board's JSON path and its own service descriptor.
 The Attention sidebar gives every project three fixed count columns: **Blocked** (red),
 **Needs Terry** (amber), and **Ready for Review** (blue). A zero count leaves its column
 blank, so a project with two blocked cards and one ready for review has an empty middle
-column. The circles remain vertically aligned across every project row. Column labels,
+column. The circles remain vertically aligned across every project row. Padded, rounded
+column labels use the same colors as their corresponding circles. Column labels,
 accessible names, and full counts convey their meaning alongside color; large counts
 may display as `99+`. Archived cards are excluded. Collapse the sidebar when lane width
 matters; its state is remembered in that browser window. The expanded sidebar starts

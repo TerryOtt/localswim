@@ -103,7 +103,8 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
 - The Attention sidebar's Blocked, Needs Terry, and Ready for Review counts MUST use
   three fixed columns across all project rows. Zero counts leave blank reserved slots;
   they never shift another circle into the empty column. Preserve category labels and
-  accessible true counts alongside color and any capped visible count.
+  accessible true counts alongside color and any capped visible count. Padded, rounded
+  header labels must share the corresponding circle colors and fixed column centers.
 - Show manually ordered Pinned boards above automatically sorted Other boards. Grip
   dragging and keyboard reordering affect only pinned stable keys; pin/unpin controls
   move boards between groups. Preserve manual order across activity updates and reloads

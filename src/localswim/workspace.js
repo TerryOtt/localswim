@@ -15,7 +15,7 @@
   const nav = document.createElement('nav'); nav.id = 'workspace-nav'; nav.setAttribute('aria-label', 'Boards');
   nav.innerHTML = '<div class="ws-heading"><strong>Boards</strong><button type="button" id="ws-toggle" aria-label="Collapse boards">☰</button></div>' +
     '<div class="ws-expanded"><input id="ws-find" type="search" placeholder="Find a board" aria-label="Find a board">' +
-    '<div class="ws-count-grid ws-labels"><span title="Blocked">Blocked</span><span title="Needs Terry">Terry</span><span title="Ready for Review">Review</span></div>' +
+    '<div class="ws-count-grid ws-labels"><span class="blocked" title="Blocked">Blocked</span><span class="needsHuman" title="Needs Terry">Terry</span><span class="review" title="Ready for Review">Review</span></div>' +
     '<div id="ws-list"></div><p id="ws-announcement" class="ws-sr-only" aria-live="polite" aria-atomic="true"></p><p id="ws-status" role="status"></p><a id="ws-window" target="_blank" rel="noopener">Open board in new window ↗</a></div>';
   content.append(nav, board);
   new ResizeObserver(alignCardStarts).observe(board);

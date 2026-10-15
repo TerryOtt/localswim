@@ -127,6 +127,8 @@ Every project reserves all three slots, including blank zero-count slots. Thus a
 with two blocked cards and one review card retains an empty middle slot and shares the
 same column coordinates as every other row. Labels and accessible full-count names
 supplement red, amber, and blue circles; visible `99+` does not replace the true count.
+Padded, rounded header labels share their corresponding circle color rules while
+remaining centered on the same fixed columns, with space above and below the labels.
 Counts exclude archived cards.
 
 The Pinned group precedes Other boards. `state.pins` reflects the gateway's manually
