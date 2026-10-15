@@ -2004,7 +2004,13 @@ PAGE = """<!doctype html>
 %USERCSS%
   .card-preview { display: block; width: 100%; height: 120px; object-fit: contain;
     background: #F4F5F8; border-radius: 5px; margin-bottom: 8px; }
-  .attachment-count { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  /* Allow font-metric rounding around two tabular digits; larger counts grow without clipping. */
+  .attachment-count { display: inline-flex; align-self: flex-end; align-items: center;
+    gap: 5px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .attachment-count svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none;
+    stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .attachment-count .n { min-width: calc(2ch + 1px); text-align: right;
+    font-variant-numeric: tabular-nums; }
   .attachment { border: 1px solid #CCD1DA; border-radius: 6px; padding: 10px; margin: 8px 0; }
   .attachment img { display: block; max-width: 100%; max-height: 200px; object-fit: contain; }
   .attachment a { display: block; color: var(--ink); overflow-wrap: anywhere; }
@@ -3306,7 +3312,13 @@ function card(item) {
   }
   if (files.length) {
     const count = document.createElement('span'); count.className = 'attachment-count';
-    count.textContent = files.length + (files.length === 1 ? ' attachment' : ' attachments');
+    const label = files.length + (files.length === 1 ? ' attachment' : ' attachments');
+    count.setAttribute('role', 'img'); count.setAttribute('aria-label', label); count.title = label;
+    count.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+      + '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19'
+      + 'a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'
+      + '</svg><span class="n"></span>';
+    count.querySelector('.n').textContent = files.length;
     d.append(count);
   }
   d.addEventListener('click', () => openCard(item.id));

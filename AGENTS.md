@@ -78,6 +78,9 @@ swimlane board from one JSON snapshot. Click is its sole runtime dependency.
   raster previews from bytes; generic files must download with `nosniff` and sandbox
   CSP. Git snapshots include exact audited attachment paths, never a directory glob.
   Browser and bot CLI uploads/removals use the sole live writer and revision checks.
+  Card attachment counts use a right-aligned paperclip and tabular numeric field with
+  two digits of reserved width, exact larger totals, and accessible count labels.
+  Omit zero counts and preserve covers and comment badges.
 
 - Order every lane by descending longest downstream blocking-chain depth, ascending
   priority number, then ascending ticket number. Blocked cards inherit the highest

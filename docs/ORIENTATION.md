@@ -435,6 +435,10 @@ CLI `card attachment` offers `add`, `list --json`, `remove`, and `cover`/`cover 
 The drawer offers upload, image previews, download, removal, and cover controls;
 oversized selection and HTTP refusal use an accessible modal with the reason.
 The first active image previews on the swimlane card when no explicit cover is set.
+The card attachment indicator places a fixed-size SVG paperclip before a right-aligned,
+tabular numeric field with a two-digit minimum width. Larger counts grow without capping
+or overlap; zero attachments omit the indicator. Its accessible name and tooltip carry
+the exact singular/plural count. Cover previews and comment badges remain independent.
 Moving a board requires moving its attachment directory as well as the JSON snapshot.
 
 ## HTTP and CLI boundaries

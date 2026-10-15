@@ -363,6 +363,9 @@ Choose **Set cover** on an image to select which picture appears on the card; wi
 an explicit cover, the first attached image supplies the preview. Other file types
 remain downloadable attachments. **Remove** detaches a file and clears it as cover
 when necessary. File bytes and audit history are retained for recovery.
+Cards with attachments show a right-aligned paperclip and count, reserving space for
+two digits. Larger totals remain fully visible. The exact count is also available to
+assistive technology and in the tooltip; cards without attachments omit the indicator.
 
 The bot uses the same live service:
 
