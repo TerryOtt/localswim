@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from . import service_ownership
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
     from typing import IO, Any
@@ -225,8 +227,11 @@ def release_lock(handle: IO[bytes]) -> None:
     handle.close()
 
 
-def service_is_healthy(port: int) -> bool:
-    """Check the loopback service without reading private board content."""
+def service_is_healthy(target: int | Path) -> bool:
+    """Check board identity for lifecycle; retain legacy port-only probes."""
+    if isinstance(target, Path):
+        return service_ownership.service_is_healthy(target)
+    port = target
 
     try:
         with urllib.request.urlopen(
@@ -245,7 +250,7 @@ def handle_idle_cycle(
     publish_status: Callable[[str], None],
 ) -> None:
     """Update health and flush any alert whose quiet window has elapsed."""
-    if service_is_healthy(config.port):
+    if service_is_healthy(config.board):
         runtime.service_misses = 0
     else:
         runtime.service_misses += 1
@@ -660,7 +665,7 @@ def monitor(config: Config) -> int:
         print(f"Watching {config.board} for Codex thread alerts.", flush=True)
         for changes in watch_board(config):
             if stop_requested(config.target_path, os.getpid()):
-                if service_is_healthy(config.port):
+                if service_is_healthy(config.board):
                     if not runtime.stopping:
                         status("stopping")
                     runtime.stopping = True

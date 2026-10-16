@@ -267,7 +267,9 @@ localswim-monitor` in this checkout. Pass the current board port and thread ID:
 localswim-monitor --board-path C:\Projects\localswim-state-store\localswim\localswim.json --board-label "localswim inception" --thread-id THREAD_UUID --port 8794 --status-path C:\Temp\localswim-inception-monitor-status.json --target-path C:\Temp\localswim-inception-monitor-target.json --lock-path C:\Temp\localswim-inception-monitor.lock
 ```
 
-Use the current port rather than assuming the example's port. Launch hidden with
+Use the current port rather than assuming the example's port. The port is a
+compatibility/startup hint; monitor lifecycle health follows the live descriptor
+and validates the board identity. Launch hidden with
 `PYTHONIOENCODING=utf-8`, redirecting output/error to the corresponding board-specific
 `.out.log`/`.err.log` files under `C:\Temp`. All runtime paths are mandatory and
 must be distinct from other boards. Reinvocation retargets the current owner.

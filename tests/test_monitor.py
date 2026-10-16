@@ -1,5 +1,6 @@
 """Shared monitor attribution, quiet windows, portable ownership and graceful reload."""
 
+import hashlib
 import json
 import subprocess
 import uuid
@@ -270,3 +271,39 @@ def test_reload_timeout_cancels_request(
     with pytest.raises(RuntimeError, match="timed out"):
         watcher.claim_monitor(replace(config, reload=True))
     assert "reloadPid" not in watcher.read_json(config.target_path)
+
+
+@pytest.mark.parametrize("correct_identity", [False, True])
+def test_lifecycle_uses_live_descriptor_and_board_identity(
+    config: watcher.Config,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    correct_identity: bool,
+) -> None:
+    live_port = 52668
+    metadata = {
+        "schema": 1,
+        "host": "127.0.0.1",
+        "port": live_port,
+        "board": str(config.board),
+    }
+    monkeypatch.setattr(
+        watcher.service_ownership, "read_service_metadata", Mock(return_value=metadata)
+    )
+    identity_path = config.board if correct_identity else config.board.with_name("other-board.json")
+    identity = hashlib.sha256(str(identity_path.resolve()).casefold().encode("utf-8")).hexdigest()
+    response = Mock(status=200)
+    response.read.return_value = json.dumps({"boardIdentity": identity}).encode("utf-8")
+    connection = Mock()
+    connection.getresponse.return_value = response
+    connect = Mock(return_value=connection)
+    monkeypatch.setattr(watcher.service_ownership.http.client, "HTTPConnection", connect)
+    legacy_probe = Mock()
+    monkeypatch.setattr(watcher.urllib.request, "urlopen", legacy_probe)
+    runtime = watcher.MonitorRuntime(watcher.board_signature(config.board), watcher.now())
+    watcher.handle_idle_cycle(config, "codex", runtime, Mock())
+    assert runtime.service_misses == (0 if correct_identity else 1)
+    connect.assert_called_once_with("127.0.0.1", live_port, timeout=1)
+    assert live_port != config.port
+    legacy_probe.assert_not_called()
+    connection.close.assert_called_once()

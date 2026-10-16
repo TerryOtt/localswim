@@ -651,7 +651,10 @@ Run one monitor per board with distinct runtime paths:
 localswim-monitor --board-path /path/to/board.json --board-label "Project board" --thread-id THREAD_UUID --port 8793 --status-path /runtime/project-status.json --target-path /runtime/project-target.json --lock-path /runtime/project.lock
 ```
 
-The port and all three runtime paths are required. `--automation-actor` defaults to
+The port and all three runtime paths are required. The port is a compatibility
+and startup hint; lifecycle checks follow the live service descriptor and validate
+its board identity, so a relocated listener remains healthy and another board on
+the old port cannot substitute for it. `--automation-actor` defaults to
 `bot`; configure the board's persisted automation actor ID when it differs.
 The default quiet window is 15 seconds; `--quiet-seconds` accepts up to 300 seconds.
 Repeated launches retarget the existing monitor through its target file rather
