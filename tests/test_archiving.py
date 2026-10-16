@@ -1,6 +1,6 @@
 """Archive persistence, reversible visibility, and intact audit and relationship data."""
 
-import datetime
+import datetime as dt
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -183,7 +183,7 @@ def test_archive_activity_includes_hidden_cards_at_inclusive_bounds(
 ) -> None:
     board.create("focus", "Private subject", "backlog", "bot")
     board.set_archived("focus", archived=True, by="bot")
-    stamp = datetime.datetime.fromisoformat(board.archive_history[0].at)
+    stamp = dt.datetime.fromisoformat(board.archive_history[0].at)
     events = board_state.activity_events(board, stamp, stamp)
     assert [event.kind for event in events] == ["archived"]
     assert events[0].to_json() == {

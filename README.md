@@ -9,7 +9,7 @@ beyond Click, the mature command-line parser used for its nested CLI.
 
 Requirements:
 
-- [uv](https://docs.astral.sh/uv/) 0.12.5 (it installs the pinned Python 3.14.7)
+- [Python 3.15.0](https://www.python.org/downloads/release/python-3150/) and [uv](https://docs.astral.sh/uv/) 0.13.1, as pinned for development and CI
 - A modern browser
 - Git only if you want build identifiers or opt-in automatic pushes
 
@@ -644,7 +644,7 @@ as UTF-8 with LF endings by .editorconfig, .gitattributes and the gate.
 
 Install the optional monitor extra with `uv sync --locked --extra monitor` or
 `uv tool install --editable '.[monitor]'` from this checkout. Click remains the sole core dependency.
-The explicit optional dependency decision is `watchfiles==1.2.0` (MIT): native
+The explicit optional dependency decision is `watchfiles==1.3.0` (MIT): native
 filesystem notifications and a trailing-edge quiet window avoid polling board
 contents. Core CLI and board services do not import this package.
 

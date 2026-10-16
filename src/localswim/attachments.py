@@ -2,7 +2,7 @@
 
 import base64
 import binascii
-import datetime
+import datetime as dt
 import hashlib
 import os
 import pathlib
@@ -69,7 +69,7 @@ def _record(raw: object, keys: set[str]) -> dict[str, object]:
 
 
 def _timestamp(value: str) -> str:
-    if datetime.datetime.fromisoformat(value).tzinfo is None:
+    if dt.datetime.fromisoformat(value).tzinfo is None:
         raise ValueError("attachment timestamp must include its time zone")
     return value
 

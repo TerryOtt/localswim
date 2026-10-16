@@ -6,18 +6,17 @@ no duplicate checker added merely for quantity.
 
 ## Runtime, environment, and build
 
-- **Python 3.14.7** is pinned in `.python-version`. It was the latest GA CPython when
-  this toolchain was adopted. `pyproject.toml` accepts `>=3.14,<3.15` so 3.14 patch
-  releases remain compatible; development and CI use the exact pin. Update the patch
-  pin when a later 3.14 release is GA. Move the range only after Python 3.15 is GA and
-  the complete gate passes there.
-- **uv 0.12.5** installs Python, creates the environment, resolves and locks development
+- **Python 3.15.0** is pinned in `.python-version`, the current stable release verified
+  on 2026-10-16. `pyproject.toml` accepts `>=3.15,<3.16`; development and CI use the
+  exact pin. Update the patch pin when a later 3.15 release is GA. Move the range to
+  3.16 only after Python 3.16 is GA and the complete gate passes there.
+- **uv 0.13.1** installs Python, creates the environment, resolves and locks development
   dependencies, runs commands, and builds distributions. `[tool.uv].required-version`
   refuses silent behavior changes from a different uv release.
 - **uv_build** is the native build backend, bounded to its current compatible minor
-  (`>=0.12.5,<0.13`). The package uses the standard `src/localswim` layout, publishes a
+  (`>=0.13.1,<0.14`). The package uses the standard `src/localswim` layout, publishes a
   `py.typed` marker, and includes `rules.json` plus the bundled Inter assets.
-- **Click 8.4.2** is the sole core runtime dependency. Its BSD-3-Clause license is compatible
+- **Click 8.5.0** is the sole core runtime dependency. Its BSD-3-Clause license is compatible
   with localswim's MIT license, and its established nested-command and contextual-help
   model replaces the increasingly brittle flat `argparse` option matrix. Terry
   explicitly accepted this dependency tradeoff on 2026-08-25.
@@ -40,8 +39,8 @@ developer-only uv source override.
 
 | Tool | Pin | Job |
 |---|---:|---|
-| Ruff | 0.16.3 | Lint every stable rule (`select = ["ALL"]`) and own formatting/import order. |
-| Pyright | 1.1.411 | Strict static typing, including unknown-type flow and unused symbols. |
+| Ruff | 0.17.1 | Lint every stable rule (`select = ["ALL"]`) and own formatting/import order. |
+| Pyright | 1.1.414 | Strict static typing, including unknown-type flow and unused symbols. |
 | pytest | 9.1.1 | Runtime behavior and regression coverage. |
 
 The Ruff exclusions are documented beside the configuration in `pyproject.toml`. They
@@ -97,7 +96,7 @@ full gate, publishing authority, and project invariants.
 
 ## Optional monitor dependency decision
 
-The shared board monitor uses the explicitly selected `watchfiles==1.2.0` MIT
+The shared board monitor uses the explicitly selected `watchfiles==1.3.0` MIT
 package for native filesystem notifications. It is isolated in the `monitor` extra
 so Click remains the sole core runtime dependency. Install with
 `uv sync --locked --extra monitor` for checkout use or

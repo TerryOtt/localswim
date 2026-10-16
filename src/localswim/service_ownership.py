@@ -42,7 +42,7 @@ def python_child_command(arguments: list[str], environment: dict[str, str]) -> l
     if os.name == "nt":
         executable = getattr(sys, "_base_executable", sys.executable) or sys.executable
         # CPython uses this marker for venv discovery without its redirector process:
-        # https://github.com/python/cpython/blob/3.14/Modules/getpath.py
+        # https://github.com/python/cpython/blob/v3.15.0/Modules/getpath.py
         environment["__PYVENV_LAUNCHER__"] = sys.executable
     return [executable, *arguments]
 

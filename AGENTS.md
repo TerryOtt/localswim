@@ -2,7 +2,7 @@
 
 ## Purpose and layout
 
-localswim is a Python 3.14 application, built and run with uv, that serves a local
+localswim is a Python 3.15 application, built and run with uv, that serves a local
 swimlane board from one JSON snapshot. Click is its sole core runtime dependency;
 native board monitoring is an optional extra.
 
@@ -172,11 +172,11 @@ persisted configuration applies when loaded.
 ## Code conventions
 
 - Target exactly the Python version in `.python-version` for development and CI
-  (currently the latest 3.14 patch, 3.14.7). Keep the package contract at
-  `>=3.14,<3.15`; update the pin when a later 3.14 patch is GA, and move the range to
-  3.15 only after 3.15 is GA and verified. Click 8.4.2 was explicitly accepted for
-  nested command scopes and contextual help; any additional runtime dependency still
-  requires clear justification and an explicit decision.
+  (currently 3.15.0, verified stable on 2026-10-16). Keep the package contract at
+  `>=3.15,<3.16`; update the pin when a later 3.15 patch is GA, and move the range to
+  3.16 only after 3.16 is GA and verified. The original Click 8.4.2 dependency decision
+  covered nested command scopes and contextual help; the current pin is 8.5.0. Any
+  additional core runtime dependency still requires clear justification and an explicit decision.
 - Use uv for Python installation, locking, synchronization, execution, and builds.
   Do not introduce pip/venv/requirements-file instructions. Change dependencies in
   `pyproject.toml`, refresh `uv.lock`, and commit both.
@@ -248,7 +248,7 @@ directly from `.venv/Scripts`. If the pinned interpreter is absent, install it w
 
 ```console
 $env:UV_CACHE_DIR='C:\Temp\localswim-uv-cache'
-uv python install 3.14.7
+uv python install 3.15.0
 uv sync --locked
 ```
 

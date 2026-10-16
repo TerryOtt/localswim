@@ -50,7 +50,7 @@ jobs:
       - name: Install pinned uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          version: "0.12.5"
+          version: "0.13.1"
           enable-cache: true
           cache-dependency-glob: uv.lock
 
@@ -81,7 +81,7 @@ jobs:
             "$tool_dir/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
 
       - name: Synchronize locked project environment
-        run: uv sync --locked
+        run: uv sync --locked --extra monitor
 
       # **The path is passed explicitly rather than guessed.** `check.py`'s fallback
       # guesses are Terry's machine; CI knows exactly where it put things, and saying
@@ -89,7 +89,7 @@ jobs:
       # a guess that happens to be wrong.
       - name: Run the gate
         run: >
-          uv run --frozen python check.py
+          uv run --frozen --extra monitor python check.py
           --word-table .word-table-src/scripts/claude-dirty-words.py
 
       - name: Build source and wheel distributions
@@ -97,7 +97,7 @@ jobs:
 
       - name: Smoke-test the built wheel
         run: >
-          uv run --isolated --no-project --python 3.14.7
+          uv run --isolated --no-project --python 3.15.0
           --with ./dist/localswim-*.whl
           python -c
           "import importlib.resources, localswim;

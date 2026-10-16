@@ -2,7 +2,7 @@
 
 import base64
 import contextlib
-import datetime
+import datetime as dt
 import json
 import os
 import subprocess
@@ -259,7 +259,7 @@ def test_catalog_recency_uses_every_card_edit_audit(
     board_state.save(board, path)
     instance = workspace.Workspace(tmp_path)
     assert catalog_boards(instance)[0]["lastCardEditMs"] == int(
-        datetime.datetime.fromisoformat(recent).timestamp() * 1000
+        dt.datetime.fromisoformat(recent).timestamp() * 1000
     )
 
 
@@ -278,7 +278,7 @@ def test_catalog_recency_includes_comments_on_archived_cards(
     board.comment("card", "Still relevant activity", "terry")
     board_state.save(board, path)
     row = catalog_boards(workspace.Workspace(tmp_path))[0]
-    assert row["lastCardEditMs"] == int(datetime.datetime.fromisoformat(recent).timestamp() * 1000)
+    assert row["lastCardEditMs"] == int(dt.datetime.fromisoformat(recent).timestamp() * 1000)
     assert row["counts"] == {"blocked": 0, "needsHuman": 0, "review": 0}
 
 
@@ -300,7 +300,7 @@ def test_catalog_recency_normalizes_offsets_and_ignores_unreadable_stamps(
     row = catalog_boards(workspace.Workspace(tmp_path))[0]
     assert "error" not in row
     assert row["lastCardEditMs"] == int(
-        datetime.datetime.fromisoformat("2026-10-14T14:00:00Z").timestamp() * 1000
+        dt.datetime.fromisoformat("2026-10-14T14:00:00Z").timestamp() * 1000
     )
 
 

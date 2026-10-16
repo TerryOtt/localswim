@@ -60,7 +60,7 @@ The client preserves unsent form state in session storage and reloads itself onc
 import argparse
 import contextlib
 import copy
-import datetime
+import datetime as dt
 import errno
 import hashlib
 import html
@@ -790,7 +790,7 @@ def _commit_board_snapshot(board_path: pathlib.Path) -> tuple[bool, str]:
         return False, f"git status failed: {status.stderr.strip()[:200]}"
     committed = bool(status.stdout.strip())
     if committed:
-        when = datetime.datetime.now(tz=datetime.UTC).astimezone()
+        when = dt.datetime.now(tz=dt.UTC).astimezone()
         # Terry's stamp format, from his display preferences: `2026-08-19 02:56pm`.
         stamp = f"{when:%Y-%m-%d %I:%M:%S}" + f"{when:%p}".lower()
         message = (
@@ -1257,7 +1257,7 @@ def inline(text: str) -> str:
 
 #: How long a finished card stays on screen. **Terry's number, card #0063**: *"cards in
 #: COMPLETED for >= 24 hours should not be shown"*.
-OLD_AFTER = datetime.timedelta(hours=24)
+OLD_AFTER = dt.timedelta(hours=24)
 
 
 def is_old(item: board_state.Item) -> bool:
@@ -1280,7 +1280,7 @@ def is_old(item: board_state.Item) -> bool:
     since = item.state_since
     if since is None:
         return False
-    return datetime.datetime.now().astimezone() - board_state.parse_stamp(since) >= OLD_AFTER
+    return dt.datetime.now().astimezone() - board_state.parse_stamp(since) >= OLD_AFTER
 
 
 #: Where sRGB's transfer curve switches from its linear foot to the power segment.
@@ -1401,7 +1401,7 @@ def when(stamp: str) -> str:
     carries whatever its old date column said, and showing that beats showing nothing.
     """
     try:
-        moment = datetime.datetime.fromisoformat(stamp)
+        moment = dt.datetime.fromisoformat(stamp)
     except ValueError:
         return stamp
     # `% NOON or NOON` is what makes midnight read `12:05am` and noon `12:00pm`,
@@ -4817,11 +4817,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }
             )
             return
-        stamp = (
-            datetime.datetime.fromtimestamp(mtime, tz=datetime.UTC)
-            .astimezone()
-            .strftime("%H:%M:%S")
-        )
+        stamp = dt.datetime.fromtimestamp(mtime, tz=dt.UTC).astimezone().strftime("%H:%M:%S")
         # **`codeStale` rides on BOTH paths, like `build` and for the same
         # reason.** An unreadable board and a stale process are independent
         # failures, and either can be true while the other is.

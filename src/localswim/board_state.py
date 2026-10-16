@@ -49,7 +49,7 @@ either. **It would have added a dependency and moved the rules, not enforced the
 import argparse
 import contextlib
 import copy
-import datetime
+import datetime as dt
 import graphlib
 import hashlib
 import io
@@ -1464,12 +1464,12 @@ def now() -> str:
     inclusive activity query to repeat the earlier event. Existing whole-second stamps
     remain valid ISO 8601 and continue to parse; only new audit evidence gains precision.
     """
-    return datetime.datetime.now().astimezone().isoformat(timespec="microseconds")
+    return dt.datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 #: Safe fallback for an absent or unreadable event timestamp. Aware rather than naive,
 #: because a naive value cannot be compared with real stamps carrying an offset.
-_BEGINNING_OF_TIME = datetime.datetime.min.replace(tzinfo=datetime.UTC)
+_BEGINNING_OF_TIME = dt.datetime.min.replace(tzinfo=dt.UTC)
 
 
 def priority_ranks(policy: TransitionPolicy) -> dict[str, int]:
@@ -1595,7 +1595,7 @@ def item_order_key(
     )
 
 
-def parse_stamp(raw: str | None) -> datetime.datetime:
+def parse_stamp(raw: str | None) -> dt.datetime:
     """One history `at` string as an aware datetime, or `_BEGINNING_OF_TIME`.
 
     **It NEVER raises.** A malformed stamp returns the fallback, because the board is
@@ -1605,17 +1605,17 @@ def parse_stamp(raw: str | None) -> datetime.datetime:
         return _BEGINNING_OF_TIME
 
     text = raw.strip()
-    parsed: datetime.datetime | None = None
+    parsed: dt.datetime | None = None
 
     try:
-        parsed = datetime.datetime.fromisoformat(text)
+        parsed = dt.datetime.fromisoformat(text)
     except ValueError:
         # **A trailing zone WORD, as on #0012.** `fromisoformat` handles a numeric
         # offset and refuses an abbreviation, and abbreviations are ambiguous besides
         # -- so the word is dropped and the remainder read as local time.
         head = text.rsplit(" ", 1)[0] if " " in text else text
         try:
-            parsed = datetime.datetime.fromisoformat(head)
+            parsed = dt.datetime.fromisoformat(head)
         except ValueError:
             parsed = None
 
@@ -1802,7 +1802,7 @@ class NewestComment:
     ticket: int
     item_id: str
     at: str
-    instant: datetime.datetime
+    instant: dt.datetime
     by: str
     text: str
     sequence: int
@@ -1831,7 +1831,7 @@ class ActivityEvent:
     item_id: str
     kind: str
     at: str
-    instant: datetime.datetime
+    instant: dt.datetime
     by: str
     lane_from: str | None = None
     lane_to: str | None = None
@@ -4978,12 +4978,12 @@ def _detail_text(args: argparse.Namespace) -> str:
 _RFC3339 = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})")
 
 
-def _parse_activity_bound(raw: str, option: str) -> datetime.datetime:
+def _parse_activity_bound(raw: str, option: str) -> dt.datetime:
     """Parse one strict, offset-bearing RFC 3339 CLI boundary."""
     if _RFC3339.fullmatch(raw) is None:
         raise BoardError(f"{option} requires an RFC 3339 timestamp with a UTC offset")
     try:
-        parsed = datetime.datetime.fromisoformat(raw)
+        parsed = dt.datetime.fromisoformat(raw)
     except ValueError as exc:
         raise BoardError(f"{option} has an invalid timestamp: {raw!r}") from exc
     if parsed.utcoffset() is None:
@@ -4993,7 +4993,7 @@ def _parse_activity_bound(raw: str, option: str) -> datetime.datetime:
 
 def _activity_bounds(
     args: argparse.Namespace,
-) -> tuple[datetime.datetime, datetime.datetime | None]:
+) -> tuple[dt.datetime, dt.datetime | None]:
     """Resolve the selected CLI activity window, inclusive at both boundaries."""
     since = cast("str | None", args.activity_since)
     if since is not None:
@@ -5008,7 +5008,7 @@ def _activity_bounds(
     return start, end
 
 
-def _event_instant(raw: str, where: str) -> datetime.datetime:
+def _event_instant(raw: str, where: str) -> dt.datetime:
     """Parse a stored event timestamp and refuse to hide malformed audit data."""
     instant = parse_stamp(raw)
     if instant == _BEGINNING_OF_TIME:
@@ -5018,8 +5018,8 @@ def _event_instant(raw: str, where: str) -> datetime.datetime:
 
 def _subject_activity_events(
     board: Board,
-    start: datetime.datetime,
-    end: datetime.datetime | None,
+    start: dt.datetime,
+    end: dt.datetime | None,
 ) -> list[ActivityEvent]:
     """Return privacy-safe rename events inside one inclusive window."""
     events: list[ActivityEvent] = []
@@ -5050,8 +5050,8 @@ def _subject_activity_events(
 
 def _detail_activity_events(
     board: Board,
-    start: datetime.datetime,
-    end: datetime.datetime | None,
+    start: dt.datetime,
+    end: dt.datetime | None,
 ) -> list[ActivityEvent]:
     """Return actor-only description edits inside one inclusive window."""
     events: list[ActivityEvent] = []
@@ -5083,8 +5083,8 @@ def _detail_activity_events(
 
 def _archive_activity_events(
     board: Board,
-    start: datetime.datetime,
-    end: datetime.datetime | None,
+    start: dt.datetime,
+    end: dt.datetime | None,
 ) -> list[ActivityEvent]:
     """Keep archive events in audit queries even while the affected cards are hidden."""
     events: list[ActivityEvent] = []
@@ -5116,7 +5116,7 @@ def _archive_activity_events(
 
 
 def _attachment_activity_events(
-    board: Board, start: datetime.datetime, end: datetime.datetime | None
+    board: Board, start: dt.datetime, end: dt.datetime | None
 ) -> list[ActivityEvent]:
     """Report attachment actions without names or file contents."""
     events: list[ActivityEvent] = []
@@ -5142,8 +5142,8 @@ def _attachment_activity_events(
 
 def activity_events(
     board: Board,
-    start: datetime.datetime,
-    end: datetime.datetime | None,
+    start: dt.datetime,
+    end: dt.datetime | None,
 ) -> list[ActivityEvent]:
     """Return sanitized events in one inclusive window, oldest first.
 
@@ -5339,8 +5339,8 @@ def _report_newest_comments(
 
 def _report_activity(
     board: Board,
-    start: datetime.datetime,
-    end: datetime.datetime | None,
+    start: dt.datetime,
+    end: dt.datetime | None,
     *,
     as_json: bool,
 ) -> None:
@@ -5584,15 +5584,15 @@ def _report(board: Board, args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-def parse_activity_bound(raw: str, option: str) -> datetime.datetime:
+def parse_activity_bound(raw: str, option: str) -> dt.datetime:
     """Expose strict RFC 3339 parsing to the command-oriented CLI."""
     return _parse_activity_bound(raw, option)
 
 
 def report_activity(
     board: Board,
-    start: datetime.datetime,
-    end: datetime.datetime | None,
+    start: dt.datetime,
+    end: dt.datetime | None,
     *,
     as_json: bool,
 ) -> None:

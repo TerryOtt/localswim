@@ -1,7 +1,7 @@
 """Attachment upload, bounded storage, covers, removal, CLI, and Git durability."""
 
 import base64
-import datetime
+import datetime as dt
 import json
 import urllib.error
 import urllib.request
@@ -112,9 +112,7 @@ def test_upload_preview_cover_and_removal_have_atomic_attributed_history(api: Ru
         urllib.request.urlopen(url, timeout=5)
     with refusal.value:
         assert refusal.value.code == 404
-    events = board_state.activity_events(
-        saved, datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC), None
-    )
+    events = board_state.activity_events(saved, dt.datetime(2000, 1, 1, tzinfo=dt.UTC), None)
     attachment_events = [event.to_json() for event in events if event.attachment_id]
     assert [event["kind"] for event in attachment_events] == [
         "attached",
