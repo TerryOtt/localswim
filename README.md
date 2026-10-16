@@ -397,7 +397,11 @@ forced to download rather than execute in the board origin.
 
 ## Dependency priority inheritance
 
-A blocked card must have at least the urgency of every blocker upstream of it.
+A blocked unfinished card must have at least the urgency of every unfinished blocker
+upstream of it. Completion is determined by the stable state ID `completed`, regardless
+of its display label. Completed cards receive no automatic promotions and do not
+transmit urgency through historical chains. Archived unfinished cards still inherit
+priority; archived completed cards are exempt too.
 A card with no blockers can have any priority, regardless of the cards it blocks.
 For example, a P5 blocker may block a P0 card and stay P5. A P1 blocker linked to a
 P5 card promotes the blocked card to P1. If the blocker later becomes P0, all blocked
@@ -415,10 +419,14 @@ and the command result explains the effective priority. Removing a link or lower
 a blocker's priority never silently demotes its descendants; a later explicit priority
 change can lower a card if its remaining blockers permit that change.
 
-Depths and priority requirements include all stored cards, including completed and
-archived cards. Existing blocking cycles are kept intact: members share one rank and
-the highest priority required by their group or upstream blockers. The graph is traversed
-iteratively, so long chains do not depend on Python's recursion limit.
+Depths include all stored cards, including completed and archived cards, and all stored
+links remain intact. Priority propagation excludes completed cards, so it stops across
+completed intermediates even in cycles. Open members of a cycle continue to inherit
+urgency from unfinished blockers in that group or upstream. The graph is traversed
+iteratively, so long chains do not depend on Python's recursion limit. Completion never
+demotes descendants, and reconciliation does not change completed priority or history.
+If custom policy permits reopening a completed card, unfinished priority inheritance
+resumes with audited promotions in the same transaction.
 
 The live service reconciles older boards on startup, and reconciles valid externally
 replaced snapshots when reading them, through audited, revision-checked transactions

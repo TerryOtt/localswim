@@ -47,6 +47,7 @@ required-version = "==0.13.1"
 
 [tool.uv.build-backend]
 source-include = [
+    ".githooks/pre-commit",
     "AGENTS.md",
     "CONTRIBUTING.md",
     "check.py",

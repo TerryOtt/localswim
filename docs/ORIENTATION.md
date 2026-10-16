@@ -266,15 +266,22 @@ Card order is descending longest downstream blocking-chain depth, ascending prio
 number, then monotonically allocated ticket number. The browser and focused CLI triage
 queries share this comparator. Numeric P IDs compare numerically; named scales retain
 policy order. Only canonical `blocks` edges contribute, across every lane and all stored
-cards. Strongly connected groups preserve cycles with one shared depth and inherited
-priority; the condensed DAG is processed without recursive traversal.
+cards. Depths and strongly connected groups use the full stored graph, preserving links
+and cycle ranks. Priority inheritance uses unfinished cards only: stable state ID
+`completed` is exempt regardless of display label, and urgency does not pass through a
+completed intermediate. Archived unfinished cards still inherit; archived completed
+cards are exempt. The condensed DAG is processed without recursive traversal.
 
-`blocking_order()` derives longest downstream depths for sorting, then traverses
-in the opposite direction to inherit the highest urgency from upstream blockers.
+`blocking_order()` derives longest downstream depths for sorting from the entire stored
+graph, then traverses in the opposite direction to inherit the highest urgency through
+unfinished cards.
 Relationship mutations and `set_priority()` promote blocked descendants with ordinary
 priority audit entries in the actor's transaction. Requested lower urgency is clamped
 to the upstream requirement before recording changes. A card with no blockers can have
-any priority, even if its descendants are more urgent. Unlinking never demotes cards
+any priority, even if its descendants are more urgent. Completed cards receive no
+automatic promotions; reconciliation never changes their priority or history.
+Completion does not demote descendants. If policy permits reopening, inheritance
+resumes with audited promotions in the same transaction. Unlinking never demotes cards
 automatically. Both caller-facing `blocks` and `blocked_by` accept different priorities
 and apply the same ongoing blocker-to-blocked rule without rejecting a relationship.
 `verify()` reports an unsatisfied dependency requirement. `BoardStore` reconciles old

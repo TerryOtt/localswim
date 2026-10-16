@@ -95,7 +95,11 @@ native board monitoring is an optional extra.
 
 - Order every lane by descending longest downstream blocking-chain depth, ascending
   priority number, then ascending ticket number. Blocked cards inherit the highest
-  urgency among upstream blockers, with audited promotion in the same transaction.
+  urgency among unfinished upstream blockers, with audited promotion in the same
+  transaction. Completion is determined by stable state ID `completed`, never its
+  display label. Completed cards receive no automatic promotions and do not transmit
+  urgency through historical chains; archived unfinished cards still participate.
+  Preserve all stored dependency links and derive depths from the full graph.
   A card with no blockers may have any priority, regardless of its descendants.
   Both `blocks` and `blocked_by` enforce this ongoing floor without rejecting different
   priorities. Removing links must not silently downgrade priorities. Only blocking

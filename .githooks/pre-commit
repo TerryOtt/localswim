@@ -12,4 +12,9 @@
 #
 # **`git commit --no-verify` bypasses this**, deliberately. The gate is a helper, not
 # a guard against the person typing.
+# Repository-local variables exported by Git must not reach tests that create
+# their own repositories. Discovery still finds this worktree from its directory.
+for git_variable in $(git rev-parse --local-env-vars); do
+    unset "$git_variable"
+done
 exec uv run --frozen python check.py

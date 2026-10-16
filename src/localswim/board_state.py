@@ -1528,14 +1528,46 @@ class BlockingOrder:
     priorities: dict[str, str]
 
 
+def _blocking_priorities(
+    graph: Mapping[str, set[str]],
+    priorities: Mapping[str, str],
+    ranks: Mapping[str, int],
+) -> dict[str, str]:
+    """Propagate urgency through the unfinished graph, with cycles collapsed."""
+    groups = _blocking_components(graph)
+    group_by_id = {node: index for index, group in enumerate(groups) for node in group}
+    blockers: dict[int, set[int]] = {index: set() for index in range(len(groups))}
+    for parent, children in graph.items():
+        source = group_by_id[parent]
+        for child in children:
+            if group_by_id[child] != source:
+                blockers[group_by_id[child]].add(source)
+    inherited: dict[int, str] = {}
+    sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter(blockers)
+    for group_id in sorter.static_order():
+        candidates = [priorities[node] for node in groups[group_id]]
+        candidates.extend(inherited[parent] for parent in blockers[group_id])
+        inherited[group_id] = min(
+            candidates, key=lambda priority: (ranks[priority], len(priority), priority)
+        )
+    return {
+        node: priorities[node]
+        if ranks[priorities[node]] == ranks[inherited[group_by_id[node]]]
+        else inherited[group_by_id[node]]
+        for node in graph
+    }
+
+
 def blocking_order(
     board: Board,
     priority_overrides: Mapping[str, str] | None = None,
 ) -> BlockingOrder:
     """Longest downstream blocks-chain and highest urgency among upstream blockers.
 
-    All stored cards participate, across lanes and regardless of archive state. Cyclic
-    groups share a rank and highest inherited urgency; other relationship kinds and
+    All stored cards participate in depth, regardless of lane or archive state.
+    Priority inheritance uses only edges between unfinished cards: the stable state
+    ID ``completed`` neither receives nor transmits urgency, even inside a cycle.
+    Archived unfinished cards still participate. Other relationship kinds and
     parent/child hierarchy do not create blocking edges.
     """
     graph: dict[str, set[str]] = {item.id: set() for item in board.items}
@@ -1554,30 +1586,18 @@ def blocking_order(
     overrides = priority_overrides or {}
     priorities = {item.id: overrides.get(item.id, item.priority) for item in board.items}
     depths: dict[int, int] = {}
-    blockers: dict[int, set[int]] = {index: set() for index in range(len(groups))}
-    for source, children in dependencies.items():
-        for child in children:
-            blockers[child].add(source)
-    inherited: dict[int, str] = {}
     sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter(dependencies)
-    downstream_first = list(sorter.static_order())
-    for group_id in downstream_first:
+    for group_id in sorter.static_order():
         children = dependencies[group_id]
         depths[group_id] = max((depths[child] + 1 for child in children), default=0)
-    for group_id in reversed(downstream_first):
-        candidates = [priorities[node] for node in groups[group_id]]
-        candidates.extend(inherited[parent] for parent in blockers[group_id])
-        inherited[group_id] = min(
-            candidates, key=lambda priority: (ranks[priority], len(priority), priority)
-        )
+    unfinished = {item.id for item in board.items if item.state != "completed"}
+    priority_graph: dict[str, set[str]] = {
+        node: children & unfinished if node in unfinished else set()
+        for node, children in graph.items()
+    }
     return BlockingOrder(
         depths={node: depths[group_by_id[node]] for node in graph},
-        priorities={
-            node: priorities[node]
-            if ranks[priorities[node]] == ranks[inherited[group_by_id[node]]]
-            else inherited[group_by_id[node]]
-            for node in graph
-        },
+        priorities=_blocking_priorities(priority_graph, priorities, ranks),
     )
 
 
@@ -2866,14 +2886,14 @@ class Board:
         return tuple(changed)
 
     def dependency_priority_promotions(self) -> dict[str, str]:
-        """Only higher urgency is inherited; removing a dependency never demotes."""
+        """Unfinished cards inherit higher urgency; completed cards are exempt."""
         targets = blocking_order(self).priorities
         return {
             item.id: targets[item.id] for item in self.items if item.priority != targets[item.id]
         }
 
     def enforce_dependency_priorities(self, by: Actor) -> tuple[str, ...]:
-        """Promote blocked cards transitively, preserving links and lane state."""
+        """Promote through unfinished cards without demotions or changed links."""
         return self._apply_priority_targets(blocking_order(self).priorities, by)
 
     def set_priority(self, item_id: str, priority: str, by: Actor) -> str:
@@ -3225,6 +3245,7 @@ class Board:
         # between them, which is exactly why the ordering costs nothing and is worth
         # having anyway: the next person to add a step between them inherits the safe
         # order rather than discovering it.
+        before = [(card, card.priority, len(card.history)) for card in self.items]
         entry = Change(at=now(), frm=was, to=to_state, by=by)
         item.history.append(entry)
         item.state = to_state
@@ -3232,10 +3253,21 @@ class Board:
         # **Abort rather than half-apply.** If the result would not survive its own
         # audit, undo both and raise -- a board that fails `verify()` on the next load
         # is worse than a move that plainly did not happen.
-        broken = [p for p in self.verify() if p.startswith(f"{item_id}:")]
+        accepted = False
+        try:
+            # Reopening reconnects this card to priority inheritance. Reconcile
+            # before local verification, rather than waiting for store enforcement.
+            if was == "completed":
+                self.enforce_dependency_priorities(by)
+            broken = [p for p in self.verify() if p.startswith(f"{item.id}:")]
+            accepted = not broken
+        finally:
+            if not accepted:
+                for card, priority, history_length in before:
+                    card.priority = priority
+                    del card.history[history_length:]
+                item.state = was
         if broken:
-            item.history.pop()
-            item.state = was
             raise BoardError("; ".join(broken))
         return f"{item_id}: {was} → {to_state} (by {by})"
 
