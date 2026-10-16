@@ -409,7 +409,10 @@ Four conventions matter beyond a simple `may_move()` lookup:
    actor can act until something external changes, such as hardware arriving from a
    vendor.
 3. Bot cannot sign off its own work. Only the browser/human actor has
-   `ready_for_review -> completed`.
+   `ready_for_review -> completed`. The drawer's **Terry Reviewed & Approved** action
+   performs that transition together with the exact `Reviewed & approved, moving to Completed.` comment in
+   one revision-checked transaction; the human check applies even when a board's raw
+   transition policy permits Bot to move to Completed.
 4. The human actor may move `ready_for_work -> in_progress` when starting selected
    work directly in the browser. Card ownership remains independent of movement
    permission.
@@ -517,6 +520,7 @@ GET  /api/v001/board
 POST /api/v001/cards
 POST /api/v001/cards/priorities
 POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
+POST /api/v001/cards/<id>/approve
 POST /api/v001/cards/<id>/attachment
 POST /api/v001/cards/<id>/cover
 GET  /api/v001/cards/<id>/attachments/<attachment-guid>
@@ -528,6 +532,12 @@ browser credential is embedded in the served page. The CLI credential is publish
 a temporary service descriptor whose filename is a hash of the resolved, case-folded
 board path. The descriptor lives under the system temp `claude-status` directory and
 is removed only by the process that owns its token.
+
+The approval route accepts an empty JSON object and uses the authenticated browser actor
+and request revision. It validates the `ready_for_review -> completed` move before
+appending `Reviewed & approved, moving to Completed.` and changing state in the same transaction. Bot actors
+cannot invoke this special action even where the general transition policy permits that
+move; stale, repeated, or failed requests do not leave a comment behind.
 
 Useful refusal statuses are:
 

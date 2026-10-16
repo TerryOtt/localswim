@@ -73,6 +73,11 @@ native board monitoring is an optional extra.
   `ready_for_work` without per-ticket permission and orders it one card at a time;
   dependencies between ready cards affect execution order, not readiness. Bot must
   never move its own work to `completed`.
+  Human review approval validates the `ready_for_review -> completed` transition and
+  appends the exact `Reviewed & approved, moving to Completed.` comment in one authenticated,
+  revision-checked transaction. Bot actors cannot use this action even if policy allows
+  the raw transition. Keep comment and move atomic; repeated or stale requests must not
+  duplicate the comment.
 - Keep the checked generic and Terry-workflow examples distinct. Terry's seven-lane
   workflow is an intentional public example of how he works, not a universal default.
 

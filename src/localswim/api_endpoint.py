@@ -1943,6 +1943,11 @@ PAGE = """<!doctype html>
            font-weight: 700; border: 0; cursor: pointer;
            padding: 2px 16px 2px 6px; line-height: 1.35; }
   #p-pri:disabled { opacity: .5; cursor: wait; }
+  #panel header > .head { flex-wrap: wrap; }
+  #p-approve { background: #166534; color: #FFFFFF; border: 1px solid #14532D;
+               border-radius: 4px; padding: 5px 9px; font: inherit; font-size: 12px;
+               font-weight: 700; cursor: pointer; }
+  #p-approve:disabled { opacity: .65; cursor: wait; }
   /* The list itself is drawn by the OS and cannot inherit a white-on-color chip, so
      the options are given readable defaults rather than left half-styled. */
   #p-pri option { color: var(--ink); background: #FFFFFF; font-weight: 600; }
@@ -2193,6 +2198,7 @@ edit leaves the current process running and reports the failing check here."></s
         <span class="pri-wrap"><select class="pri" id="p-pri"
           title="Priority. Either of us can change it, and the change is recorded in
 the audit trail."></select></span>
+        <button id="p-approve" type="button" hidden>Reviewed &amp; Approved</button>
         <span id="p-tix"></span>
       </div>
       <!-- **Card #0081.** The title is a button-shaped nothing until you click it: no
@@ -2914,6 +2920,51 @@ document.getElementById('p-upload-file').addEventListener('change', async (ev) =
 
 // ---- the detail panel ----------------------------------------------------
 
+const pendingApprovals = new Set();
+
+function approvalKey(prefix, id) { return JSON.stringify([prefix, id]); }
+
+function canApproveReview(it) {
+  return !!it && !it.archived && it.state === 'ready_for_review'
+    && (data.actors || []).some(actor => actor.id === data.browserUser && actor.class === 'human')
+    && data.lanes.some(lane => lane.state === 'completed')
+    && allowed('ready_for_review', 'completed');
+}
+
+function renderApproval(it) {
+  const button = document.getElementById('p-approve');
+  button.hidden = !canApproveReview(it);
+  button.textContent = userLabel(data.browserUser) + ' Reviewed & Approved';
+  button.disabled = !!it && pendingApprovals.has(approvalKey(API_PREFIX, it.id));
+}
+
+async function approveReview() {
+  const id = openId, prefix = API_PREFIX, epoch = window.workspaceEpoch;
+  const key = approvalKey(prefix, id);
+  if (!canApproveReview(itemById(id)) || pendingApprovals.has(key)) return;
+  const stillHere = () => API_PREFIX === prefix && window.workspaceEpoch === epoch && openId === id;
+  pendingApprovals.add(key);
+  renderApproval(itemById(id));
+  try {
+    const res = await apiPost(prefix + '/cards/' + encodeURIComponent(id) + '/approve', {});
+    const out = await res.json();
+    if (out.workspaceBoardChanged || !stillHere()) return;
+    acceptRevision(out);
+    seen = null;
+    toast(res.ok ? out.result : (out.error || 'Review approval refused'), !res.ok);
+  } catch (err) {
+    if (stillHere()) {
+      seen = null;
+      toast('Approval outcome unknown. Refresh and check the card before retrying. ' + err, true);
+    }
+  } finally {
+    pendingApprovals.delete(key);
+    if (stillHere()) renderApproval(itemById(id));
+  }
+}
+
+document.getElementById('p-approve').addEventListener('click', approveReview);
+
 function openCard(id) {
   const it = itemById(id);
   if (!it) return;
@@ -2934,6 +2985,7 @@ function openCard(id) {
     relationshipDraft = null;
   }
   openId = id;
+  renderApproval(it);
   // **The priority control, card #0062.** Options come from `data.priorities`, which
   // the server builds from `rules.json` -- the same source `lanes()` ranks by, so a
   // value offered here can never be one the sort does not know.
@@ -4701,6 +4753,10 @@ def execute_http_command(
 
     def mutate(board: board_state.Board) -> str:
         nonlocal effective_priority
+        if is_card and parts[2] == "approve":
+            if body:
+                raise board_state.BoardError("review approval requires an empty request body")
+            return board.approve_review(parts[1], actor)
         result = (
             apply_attachment_command(board, parts[1], parts[2], body, actor)
             if is_card and parts[2] in {"attachment", "cover"}

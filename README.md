@@ -154,8 +154,12 @@ That example carries Terry's working agreement, not merely his lane names:
 | Completed | Terry reviewed and accepted the work. |
 
 Terry delegates backlog triage and work ordering to Bot. Bot should promote every
-sufficiently scoped card to Ready For Work, then take work one card at a time. Only
-Terry may sign off Bot's work by moving it from Ready for review to Completed.
+sufficiently scoped card to Ready For Work, then take work one card at a time. A human
+can approve a Ready for review card with the drawer's **Terry Reviewed & Approved**
+action near the priority control (other boards use their human actor's display name).
+It adds the `Reviewed & approved, moving to Completed.` comment and moves the card to Completed as one
+authenticated, revision-checked action. The action is available only to a human browser
+actor; Bot cannot approve its own work.
 
 The important fields are:
 
@@ -536,6 +540,7 @@ GET  /api/v001/board
 POST /api/v001/cards
 POST /api/v001/cards/priorities
 POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
+POST /api/v001/cards/<id>/approve
 POST /api/v001/cards/<id>/attachment
 POST /api/v001/cards/<id>/cover
 GET  /api/v001/cards/<id>/attachments/<attachment-guid>
@@ -548,6 +553,12 @@ Attachment uploads POST `{name, data}` with base64 file bytes; removal POSTs
 `{attachmentId}` (or null to clear). Upload responses include the assigned attachment
 metadata; oversized bodies/files return HTTP 413. Attachment read routes accept
 `?download=1` to download an image instead of opening its inline preview.
+
+Review approval POSTs an empty JSON object to `/api/v001/cards/<id>/approve`. It uses
+the authenticated browser actor and `If-Match` revision, validates the review-to-
+completed transition, appends exactly `Reviewed & approved, moving to Completed.`, and moves the card within
+one transaction. Bot actors are refused even if a board's ordinary transition policy
+allows that move. A stale or repeated request does not append a duplicate comment.
 
 The batch priority route accepts exactly `{cards: [reference, ...], priority: ID}`
 with 1–1000 reference strings and an exact stable embedded-policy priority ID. It

@@ -3316,6 +3316,36 @@ class Board:
             raise BoardError("; ".join(broken))
         return f"{item_id}: {was} → {to_state} (by {by})"
 
+    def approve_review(self, reference: str, actor: Actor) -> str:
+        """Record a human's review and completion together, or roll both back."""
+        if not any(user.id == actor and user.user_class == HUMAN for user in self.users):
+            raise BoardError("review approval requires a configured human actor")
+        source, target = "ready_for_review", "completed"
+        if source not in self.policy.states or target not in self.policy.states:
+            raise BoardError("review approval requires ready_for_review and completed states")
+        item = self.find(reference)
+        if item.state != source:
+            raise BoardError("review approval requires a card in ready_for_review")
+        if not self.policy.may_move(actor, source, target):
+            raise BoardError(self.policy.explain_refusal(actor, source, target))
+
+        before = [(card, card.priority, len(card.history)) for card in self.items]
+        comment_count = len(item.comments)
+        accepted = False
+        try:
+            self.comment(reference, "Reviewed & approved, moving to Completed.", actor)
+            result = self.move(reference, target, actor)
+            accepted = True
+            return result
+        finally:
+            # A finally block also restores direct callers interrupted by cancellation.
+            if not accepted:
+                del item.comments[comment_count:]
+                for card, priority, history_length in before:
+                    card.priority = priority
+                    del card.history[history_length:]
+                item.state = source
+
     def comment(self, item_id: str, text: str, by: Actor) -> str:
         """Leave a note on a card. **Either of us, any card, any state.**
 
