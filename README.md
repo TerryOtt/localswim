@@ -428,6 +428,22 @@ demotes descendants, and reconciliation does not change completed priority or hi
 If custom policy permits reopening a completed card, unfinished priority inheritance
 resumes with audited promotions in the same transaction.
 
+For explicit normalization, `localswim-cli <board> card set-priorities PRIORITY
+REFERENCES...` applies one exact policy priority ID to 1–1000 selected card references
+in a single revision-checked operation. Canonical duplicate references and selected
+Completed cards are rejected; archived unfinished cards are allowed. The operation
+evaluates all selected overrides together before applying dependency floors, so a
+selected unfinished cycle can be lowered as a group. Unfinished blockers outside the
+selection still impose their floors, and selected cards may therefore finish at a more
+urgent effective priority than requested. The result reports each selected card's
+effective priority and every actual change, including promotions to unselected cards.
+Audit entries are written once per changed card, in ticket order, under the real
+credential actor. A no-op writes no audit entries but follows the store's normal
+revision policy. Supply `--expected-revision` to require a specific revision; without
+it, the CLI fetches once and submits once. It does not refresh or retry after a conflict.
+If a mutation request times out, its outcome is unknown; inspect the board before
+retrying. `--json` prints the structured result.
+
 The live service reconciles older boards on startup, and reconciles valid externally
 replaced snapshots when reading them, through audited, revision-checked transactions
 attributed to `cliUser`. Offline CLI reads never rewrite the snapshot. If verification
@@ -518,6 +534,7 @@ The browser and CLI use these loopback routes:
 GET  /api/v001/status
 GET  /api/v001/board
 POST /api/v001/cards
+POST /api/v001/cards/priorities
 POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
 POST /api/v001/cards/<id>/attachment
 POST /api/v001/cards/<id>/cover
@@ -531,6 +548,16 @@ Attachment uploads POST `{name, data}` with base64 file bytes; removal POSTs
 `{attachmentId}` (or null to clear). Upload responses include the assigned attachment
 metadata; oversized bodies/files return HTTP 413. Attachment read routes accept
 `?download=1` to download an image instead of opening its inline preview.
+
+The batch priority route accepts exactly `{cards: [reference, ...], priority: ID}`
+with 1–1000 reference strings and an exact stable embedded-policy priority ID. It
+returns `result`, committed `revision`, selected-card `priorities` (effective values),
+and ordered `changes` entries `{id, from, to}` for all actual changes, including
+cascades. It rejects duplicate canonical aliases and any selected Completed card;
+archived unfinished cards remain eligible. The combined selected overrides are
+evaluated before floors are applied, while unfinished blockers outside the selection
+can clamp effective priorities. The request uses the ordinary bearer credential and
+`If-Match` revision boundary.
 
 A workspace also exposes:
 

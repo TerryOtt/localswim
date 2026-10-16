@@ -4648,6 +4648,45 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
     raise board_state.BoardError(f"unknown card command {action!r}")
 
 
+def execute_priority_batch(
+    store: BoardStore, expected: int, body: board_state.JsonObject, actor: str
+) -> board_state.JsonObject:
+    """Capture selected effective priorities and all changes in the locked candidate."""
+    response: board_state.JsonObject = {}
+
+    def mutate(board: board_state.Board) -> str:
+        if set(body) != {"cards", "priority"}:
+            raise board_state.BoardError(
+                "priority batch requires exactly cards and priority fields"
+            )
+        references = body["cards"]
+        priority = body["priority"]
+        if not isinstance(references, list) or not (
+            1 <= len(references) <= board_state.MAX_PRIORITY_BATCH
+        ):
+            raise board_state.BoardError(
+                f"cards must be a list of 1..{board_state.MAX_PRIORITY_BATCH} references"
+            )
+        if any(not isinstance(ref, str) or not ref.strip() for ref in references):
+            raise board_state.BoardError("cards must contain nonempty reference strings")
+        if not isinstance(priority, str):
+            raise board_state.BoardError("priority must be a stable policy priority ID string")
+        refs = cast("list[str]", references)
+        before = {item.id: item.priority for item in board.items}
+        result = board.set_priorities(refs, priority, actor)
+        response["priorities"] = {board.find(ref).id: board.find(ref).priority for ref in refs}
+        response["changes"] = [
+            {"id": item.id, "from": before[item.id], "to": item.priority}
+            for item in sorted(board.items, key=lambda item: item.ticket)
+            if item.priority != before[item.id]
+        ]
+        return result
+
+    result, revision = store.execute(expected, mutate)
+    response.update(result=result, revision=revision)
+    return response
+
+
 def execute_http_command(
     store: BoardStore, expected: int, parts: list[str], body: board_state.JsonObject, actor: str
 ) -> tuple[str, int, str | None, attachments.Attachment | None]:
@@ -4673,6 +4712,21 @@ def execute_http_command(
 
     result, revision = store.execute(expected, mutate)
     return result, revision, effective_priority, None
+
+
+def _http_command_response(
+    store: BoardStore, expected: int, parts: list[str], body: board_state.JsonObject, actor: str
+) -> board_state.JsonObject:
+    """Keep the ordinary command response envelope stable."""
+    result, revision, effective_priority, uploaded = execute_http_command(
+        store, expected, parts, body, actor
+    )
+    response: board_state.JsonObject = {"result": result, "revision": revision}
+    if effective_priority is not None:
+        response["priority"] = effective_priority
+    if uploaded is not None:
+        response["attachment"] = cast("board_state.JsonObject", uploaded.to_json())
+    return response
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -4901,25 +4955,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _shutdown_post(self) -> None:
+        """Authenticate and schedule the existing graceful shutdown command."""
+        if self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
+            self._json({"error": "missing or invalid service credential"}, 401)
+            return
+        ok, detail = request_service_shutdown(self.server)
+        if not ok:
+            self._json({"error": f"final autopush failed: {detail}"}, 503)
+            return
+        self._json({"result": "board service shutdown scheduled", "push": detail})
+
     def do_POST(self) -> None:  # noqa: PLR0911 -- BaseHTTPRequestHandler contract
         """Execute one authenticated, revision-checked domain command."""
         route = self.path.partition("?")[0]
         if route == API_PREFIX + "/shutdown":
-            if self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
-                self._json({"error": "missing or invalid service credential"}, 401)
-                return
-            ok, detail = request_service_shutdown(self.server)
-            if not ok:
-                self._json({"error": f"final autopush failed: {detail}"}, 503)
-                return
-            self._json({"result": "board service shutdown scheduled", "push": detail})
+            self._shutdown_post()
             return
         parts = [urllib.parse.unquote(part) for part in route.strip("/").split("/")]
         command_parts = parts[len(API_PARTS) :] if parts[: len(API_PARTS)] == API_PARTS else []
         is_create = command_parts == ["cards"]
         is_project = command_parts == ["board", "project"]
+        is_priority_batch = route == API_PREFIX + "/cards/priorities"
         is_card_command = len(command_parts) == CARD_COMMAND_PARTS and command_parts[0] == "cards"
-        if not (is_create or is_project or is_card_command):
+        if not (is_create or is_project or is_card_command or is_priority_batch):
             self.send_error(404)
             return
 
@@ -4945,9 +5004,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             try:
-                result, revision, effective_priority, uploaded = execute_http_command(
-                    store, expected, command_parts, body, actor
-                )
+                if is_priority_batch:
+                    response = execute_priority_batch(store, expected, body, actor)
+                else:
+                    response = _http_command_response(store, expected, command_parts, body, actor)
             except KeyError as exc:
                 self._json({"error": f"missing field {exc}"}, 400)
                 return
@@ -4959,15 +5019,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"error": str(exc)}, code)
                 return
 
-        print(f"  {result}", flush=True)
-        self._json(
-            {
-                "result": result,
-                "revision": revision,
-                **({"priority": effective_priority} if effective_priority is not None else {}),
-                **({"attachment": uploaded.to_json()} if uploaded is not None else {}),
-            }
-        )
+        print(f"  {response['result']}", flush=True)
+        self._json(response)
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002, ARG002
         # **The parameter names are the base class's and MUST NOT be renamed.** A

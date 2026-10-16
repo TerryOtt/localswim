@@ -73,7 +73,7 @@ from typing import TYPE_CHECKING, Self, cast
 from . import attachments as card_attachments
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
+    from collections.abc import Generator, Mapping, Sequence
 
 type JsonValue = bool | int | float | str | list[JsonValue] | JsonObject | None
 type JsonObject = dict[str, JsonValue]
@@ -154,6 +154,7 @@ DEFAULT_PORT = 8792
 # The TCP port range, named so the validation reads as a rule rather than as two
 # numbers somebody typed.
 MIN_PORT, MAX_PORT = 1, 65535
+MAX_PRIORITY_BATCH = 1000
 
 # **`LANES`, `STATES`, `PRIORITIES`, `PRIORITY_LABEL` and `DEFAULT_PRIORITY` are all
 # LOADED FROM `rules.json`**, further down, once `LaneRules` exists to hold them.
@@ -2919,6 +2920,50 @@ class Board:
             result += f"; promoted {downstream} blocked card(s)"
         return result
 
+    def set_priorities(self, references: Sequence[str], priority: str, by: Actor) -> str:
+        """Apply one explicit unfinished selection together, then inherit blocker floors."""
+        if not isinstance(cast("object", priority), str) or priority not in self.policy.priorities:
+            raise BoardError(f"unknown priority {priority!r}")
+        if not isinstance(cast("object", by), str) or by not in {user.id for user in self.users}:
+            raise BoardError(f"unknown actor {by!r}")
+        if (
+            not isinstance(references, (list, tuple))
+            or not 1 <= len(references) <= MAX_PRIORITY_BATCH
+        ):
+            raise BoardError(f"cards must contain 1..{MAX_PRIORITY_BATCH} references")
+        selected: dict[str, Item] = {}
+        for reference in references:
+            if not isinstance(cast("object", reference), str) or not reference.strip():
+                raise BoardError("card references must be nonempty strings")
+            item = self.find(reference)
+            if item.id in selected:
+                raise BoardError(f"duplicate card selection {item.id!r}")
+            if item.state == "completed":
+                raise BoardError(f"{item.label} is Completed; select only unfinished cards")
+            selected[item.id] = item
+        targets = blocking_order(self, dict.fromkeys(selected, priority)).priorities
+        previous = [(item, item.priority, list(item.history)) for item in self.items]
+        try:
+            changed = self._apply_priority_targets(targets, by)
+        except BaseException:
+            for item, saved_priority, history in previous:
+                item.priority = saved_priority
+                item.history[:] = history
+            raise
+        result = (
+            f"requested {priority} for {len(selected)} card(s); "
+            f"changed {len(changed)} card(s) (by {by})"
+        )
+        clamped = [
+            item
+            for item in sorted(selected.values(), key=lambda item: item.ticket)
+            if item.priority != priority
+        ]
+        if clamped:
+            effective = ", ".join(f"{item.label}={item.priority}" for item in clamped)
+            result += f"; clamped by blocking dependencies: {effective}"
+        return result
+
     # ---- relationships, card #0028 -------------------------------------------
 
     def parent_cycle(self, item: Item) -> list[str] | None:
@@ -4090,7 +4135,12 @@ def _service_json(
             error = str(exc)
         raise BoardError(f"board service refused the command: {error}") from exc
     except (OSError, urllib.error.URLError, ValueError) as exc:
-        raise BoardError(f"could not reach board service; nothing changed: {exc}") from exc
+        outcome = (
+            "mutation outcome is unknown; inspect before retrying"
+            if body is not None
+            else "nothing changed"
+        )
+        raise BoardError(f"could not reach board service; {outcome}: {exc}") from exc
     if not isinstance(raw, dict):
         raise BoardError("board service returned a non-object response")
     return raw
@@ -4142,6 +4192,84 @@ def apply_remote_mutation(
     if not isinstance(result, str):
         raise BoardError("board service returned no result")
     return result
+
+
+def _priority_batch_response(response: JsonObject, count: int) -> JsonObject:
+    """Require a complete structured result before a caller reports success."""
+    revision = response.get("revision")
+    priorities = response.get("priorities")
+    changes = response.get("changes")
+    if (
+        not isinstance(response.get("result"), str)
+        or type(revision) is not int
+        or revision < 0
+        or not isinstance(priorities, dict)
+        or len(priorities) != count
+        or any(
+            not key or not isinstance(value, str) or not value for key, value in priorities.items()
+        )
+        or not isinstance(changes, list)
+    ):
+        raise BoardError(
+            "board service returned an invalid priority batch result; mutation outcome is unknown"
+        )
+    seen: set[str] = set()
+    for change in changes:
+        if (
+            not isinstance(change, dict)
+            or set(change) != {"id", "from", "to"}
+            or any(not isinstance(change[key], str) or not change[key] for key in change)
+            or change["from"] == change["to"]
+        ):
+            raise BoardError(
+                "board service returned invalid priority changes; mutation outcome is unknown"
+            )
+        item_id = cast("str", change["id"])
+        if item_id in seen or (item_id in priorities and priorities[item_id] != change["to"]):
+            raise BoardError(
+                "board service returned inconsistent priority changes; mutation outcome is unknown"
+            )
+        seen.add(item_id)
+    return response
+
+
+def apply_remote_priority_batch(
+    path: pathlib.Path,
+    references: Sequence[str],
+    priority: str,
+    *,
+    expected_revision: int | None = None,
+) -> JsonObject:
+    """Send one bounded batch, using an explicit revision without a preliminary GET."""
+    if expected_revision is not None and (
+        type(expected_revision) is not int or expected_revision < 0
+    ):
+        raise BoardError("expected revision must be a nonnegative integer")
+    if not isinstance(references, (list, tuple)) or not 1 <= len(references) <= MAX_PRIORITY_BATCH:
+        raise BoardError(f"cards must contain 1..{MAX_PRIORITY_BATCH} references")
+    if any(
+        not isinstance(cast("object", reference), str) or not reference.strip()
+        for reference in references
+    ):
+        raise BoardError("card references must be nonempty strings")
+    if not isinstance(cast("object", priority), str) or not priority:
+        raise BoardError("priority must be a nonempty stable priority ID")
+    descriptor = _service_descriptor(path)
+    base = f"http://{descriptor['host']}:{descriptor['port']}"
+    token = str(descriptor["token"])
+    revision = expected_revision
+    if revision is None:
+        snapshot = _service_json(base + API_PREFIX + "/board", token)
+        revision = snapshot.get("revision")
+        if type(revision) is not int or revision < 0:
+            raise BoardError("board service response has no valid revision")
+    response = _service_json(
+        base + API_PREFIX + "/cards/priorities",
+        token,
+        body={"cards": list(references), "priority": priority},
+        revision=revision,
+    )
+    return _priority_batch_response(response, len(references))
 
 
 def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:

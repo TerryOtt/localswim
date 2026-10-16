@@ -9,7 +9,7 @@ import pathlib
 import sys
 import urllib.parse
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import click
 
@@ -559,6 +559,62 @@ def card_set_priority(context: CliContext, reference: str, priority: str) -> Non
         f"{board_state.API_PREFIX}/cards/{_quote(reference)}/priority",
         {"priority": priority},
     )
+
+
+@card_commands.command("set-priorities")
+@click.argument("priority")
+@click.argument("references", nargs=-1, required=True)
+@click.option(
+    "--expected-revision",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Require this exact board revision; never refresh or retry a conflict.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the complete service result as JSON.")
+@click.pass_obj
+def card_set_priorities(
+    context: CliContext,
+    priority: str,
+    references: tuple[str, ...],
+    expected_revision: int | None,
+    *,
+    as_json: bool,
+) -> None:
+    """Set PRIORITY for 1–1000 unfinished REFERENCES in one atomic transaction.
+
+    Use exact board priority IDs and unique card IDs or ticket references. Archived
+    unfinished cards are allowed; Completed cards are refused. Dependency floors
+    can clamp requested priorities. JSON includes effective selected priorities and
+    every actual change, including changes outside the selection.
+
+    Without --expected-revision, fetch the current revision once before submitting.
+    A mutation timeout has an unknown outcome; inspect the board before retrying.
+    """
+    if len(references) > board_state.MAX_PRIORITY_BATCH:
+        raise click.BadParameter(
+            f"provide at most {board_state.MAX_PRIORITY_BATCH} references",
+            param_hint="REFERENCES",
+        )
+    result = _board_call(
+        lambda: board_state.apply_remote_priority_batch(
+            context.board.resolve(),
+            references,
+            priority,
+            expected_revision=expected_revision,
+        )
+    )
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    priorities = cast("dict[str, str]", result["priorities"])
+    changes = cast("list[board_state.JsonObject]", result["changes"])
+    click.echo(
+        f"  Selected {len(priorities)} card(s); {len(changes)} actual priority change(s); "
+        f"revision {result['revision']}."
+    )
+    for reference, effective in priorities.items():
+        if effective != priority:
+            click.echo(f"  Clamped {reference}: requested {priority}, effective {effective}.")
 
 
 @card_commands.command("set-detail")

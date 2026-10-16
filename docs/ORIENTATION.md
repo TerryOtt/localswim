@@ -295,6 +295,18 @@ CLI next/search JSON names `blockingDepthDesc`, `priority`, and `ticket` explici
 A priority mutation response includes the committed `priority`, letting the focused
 drawer selector reflect a clamped request immediately without depending on blur.
 
+The explicit batch operation `card set-priorities PRIORITY REFERENCES...` applies the
+same requested priority to 1–1000 selected references within one locked transaction.
+Canonical duplicate aliases and selected Completed cards are rejected; archived
+unfinished cards are eligible. All selected overrides are evaluated together before
+dependency floors, allowing a selected unfinished cycle to be lowered as one group.
+Unfinished blockers outside the selection still impose floors, so the structured result
+reports selected effective priorities and every actual ticket-ordered change, including
+unselected cascades. The actor receives one history entry per actual change; a no-op
+adds no history and follows the ordinary store revision policy. No refresh or retry is
+performed after a conflict. A mutation timeout has an unknown outcome and requires
+inspection before retry.
+
 Item history, relationship history, parent history, and comments are separate. All
 three histories are machine-written and append-only; comments are human/bot prose.
 Item history has three event shapes:
@@ -503,6 +515,7 @@ Current API routes:
 GET  /api/v001/status
 GET  /api/v001/board
 POST /api/v001/cards
+POST /api/v001/cards/priorities
 POST /api/v001/cards/<id>/{move,comment,assign,priority,subject,detail,link,parent,archive,unarchive}
 POST /api/v001/cards/<id>/attachment
 POST /api/v001/cards/<id>/cover

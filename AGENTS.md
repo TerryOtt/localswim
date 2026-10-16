@@ -105,6 +105,12 @@ native board monitoring is an optional extra.
   priorities. Removing links must not silently downgrade priorities. Only blocking
   relationships contribute; hierarchy and other links do not. Keep browser and CLI
   ordering consistent.
+- Explicit batch priority changes use the live writer and one revision-checked store
+  transaction. Evaluate all selected overrides together before applying unfinished
+  dependency floors; preserve external floors and report effective selected priorities
+  plus every actual change. Reject selected Completed cards and canonical duplicate
+  references; archived unfinished cards remain eligible. Keep no-op audit behavior and
+  timeout-unknown semantics explicit in user documentation. Never edit board JSON.
 
 - Workspace mode must proxy each mutation to the board's existing sole writer with
   that board's browser actor credential and `If-Match`. Never write snapshots directly,
