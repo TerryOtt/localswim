@@ -7,6 +7,7 @@
   let preferences = null, pinCommands = [], savingPins = false, pinFailure = '', pinRetryAt = 0;
   let pinFailurePermanent = false;
   let gatewayPush = null;
+  let gatewayStatus = normalizePageStatus(null);
   window.workspaceEpoch = 0;
   const link = document.createElement('link');
   link.rel = 'stylesheet'; link.href = '/workspace.css'; document.head.append(link);
@@ -93,7 +94,18 @@
   });
   new ResizeObserver(applySidebarWidth).observe(content);
   applySidebarWidth();
-  function route(key) { return '/board/' + key.split('/').map(encodeURIComponent).join('/'); }
+  function normalizePageStatus(value) {
+    const build = typeof value?.build === 'string' ? value.build.trim() : '';
+    const known = build !== 'unknown' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(build);
+    return {build: known ? build : null,
+      codeStale: value?.codeStale === true, restarting: value?.restarting === true,
+      restartProblem: typeof value?.restartProblem === 'string' ? value.restartProblem : null};
+  }
+  function route(key) {
+    const next = new URL(window.location.href);
+    next.pathname = '/board/' + key.split('/').map(encodeURIComponent).join('/');
+    return next.pathname + next.search + next.hash;
+  }
   function urlKey() {
     if (!location.pathname.startsWith('/board/')) return null;
     try { return location.pathname.slice(7).split('/').map(decodeURIComponent).join('/'); }
@@ -185,6 +197,7 @@
     drafts = {...(pending.drafts || {})}; query = pending.query || ''; unhideOld = !!pending.unhideOld;
     staleReloadState = null; HAY.clear(); seen = null; lastOk = 0; lastCta = null;
     data = {lanes: [], edges: [], counts: {}, actors: [], revision: 0};
+    codeStale = false; restarting = false; restartProblem = null;
     document.getElementById('find').value = query;
     document.getElementById('counts').replaceChildren();
     document.getElementById('banner').classList.remove('show');
@@ -463,6 +476,7 @@
       // A restarted gateway has a new browser credential even when its build is unchanged.
       API_TOKEN = session.token;
       catalog = value.boards;
+      gatewayStatus = normalizePageStatus(value);
       gatewayPush = value.gatewayPush || null;
       nav.title = value.root;
       if (!initialized) {
@@ -481,7 +495,7 @@
         if (retryNow || (recoverOnCatalog && !window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none');
       }
       if (current && !catalog.some(entry => entry.key === current && !entry.error) && window.workspaceReady) { persist(); window.workspaceEpoch++; error('This board is missing or cannot be read. Choose another board or retry.', true); }
-      renderRows(); showWorkspaceStatus(); flushPinCommands();
+      renderRows(); showWorkspaceStatus(); flushPinCommands(); renderLive();
     } catch (err) { document.getElementById('ws-status').textContent = String(err); if (!initialized || retryNow) error('Could not reach the workspace. Restart localswim, then Retry.'); }
     finally { refreshing = false; if (retryRequested) refresh(); }
   }
@@ -508,7 +522,8 @@
     }
     try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
-  window.WorkspaceUI = {capture: persist, loaded, scrolls, restoreScroll, error, reconcile};
+  window.WorkspaceUI = {capture: persist, loaded, scrolls, restoreScroll, error, reconcile,
+    pageStatus: () => gatewayStatus};
   document.getElementById('ws-toggle').onclick = () => { finishSidebarResize(); const saved = scrolls(); state.collapsed = !state.collapsed; persist(); renderRows(); alignCardStarts(); restoreScroll(saved); };
   document.getElementById('ws-find').oninput = renderRows;
   document.addEventListener('input', persist);

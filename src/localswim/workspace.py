@@ -623,11 +623,7 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
         elif route == PREFERENCES_ROUTE:
             self._json(self.workspace.settings.snapshot().to_json())
         elif route == PREFIX:
-            stale = api_endpoint.code_is_stale()
-            build = api_endpoint.BUILD if stale else api_endpoint.refresh_build_id_if_clean()
-            if stale:
-                api_endpoint.request_code_restart(self.server)
-            self._json({**self.workspace.catalog(), "build": build, "codeStale": stale})
+            self._json({**self.workspace.catalog(), **api_endpoint.source_status(self.server)})
         elif route.startswith(BOARD_PREFIX):
             self._proxy(route)
         elif route in ("/", "/index.html") or route.startswith("/board/"):

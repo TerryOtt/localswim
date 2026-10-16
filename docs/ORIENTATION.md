@@ -189,6 +189,17 @@ closing the error view cannot overwrite drawer/editor/create drafts.
 Each successful catalog refresh also obtains the workspace browser session and checks
 its identity before replacing the page's browser credential. This recovers credentials
 rotated by a gateway restart without retrying mutations that might have already applied.
+Workspace page reloads compare `PAGE_BUILD` with the normalized gateway catalog build,
+never the selected writer's build. `WorkspaceUI.pageStatus()` retains gateway source
+metadata independently of board availability; unknown or malformed identifiers never
+fall back to a board ID. `renderLive()` evaluates it even when board polling is stopped.
+The shared `source_status()` helper supplies build, staleness, restart and refusal
+metadata to both standalone status and the workspace catalog. Proxied board status
+keeps its original diagnostics; gateway and board restart warnings are labeled separately.
+Navigation preserves the reload query marker and other query/hash state, so the one-reload
+proof survives a route change. Selecting another board clears only the old board's source
+warnings. Existing per-board capture and pending restoration preserve unsent drafts.
+
 The gateway/board/monitor processes launched under Codex may stop when Codex exits;
 restore the service and use Retry rather than treating cached monitor files as proof
 that a listener or monitor process is still alive.

@@ -405,6 +405,19 @@ def request_code_restart(
     return True, None
 
 
+def source_status(server: socketserver.BaseServer) -> board_state.JsonObject:
+    """Describe the loaded source for the process serving this page."""
+    stale = code_is_stale()
+    current_build = BUILD if stale else refresh_build_id_if_clean()
+    restarting, problem = request_code_restart(server) if stale else (False, None)
+    return {
+        "build": current_build,
+        "codeStale": stale,
+        "restarting": restarting,
+        **({"restartProblem": problem} if problem else {}),
+    }
+
+
 class BoardHttpServer(http.server.ThreadingHTTPServer):
     """Finish active mutations before the process replaces itself."""
 
@@ -4053,14 +4066,18 @@ function renderLive() {
   // mismatch -- it is "cannot tell", and shouting on it would fire this every time git
   // is unavailable, which is how a warning becomes wallpaper.
   const stale = document.getElementById('stale');
-  const known = serverBuild && serverBuild !== 'unknown' && PAGE_BUILD !== 'unknown';
-  const drifted = known && serverBuild !== PAGE_BUILD;
-  if (drifted && reloadForServerBuild(serverBuild)) return;
+  // Workspace HTML belongs to the gateway; the selected writer may have another build.
+  const pageMeta = window.localswimWorkspace
+    ? window.WorkspaceUI?.pageStatus() || {} : {build: serverBuild};
+  const reloadBuild = typeof pageMeta.build === 'string' ? pageMeta.build : null;
+  const known = reloadBuild && reloadBuild !== 'unknown' && PAGE_BUILD !== 'unknown';
+  const drifted = known && reloadBuild !== PAGE_BUILD;
+  if (drifted && reloadForServerBuild(reloadBuild)) return;
   if (known && !drifted) clearStaleReloadMarker();
   const reloadFailed = drifted;
   if (reloadFailed) {
     stale.textContent = 'AUTO-RELOAD FAILED  \\u00b7  page ' + PAGE_BUILD
-      + '  \\u00b7  server ' + serverBuild;
+      + '  \\u00b7  server ' + reloadBuild;
   }
   stale.classList.toggle('show', reloadFailed);
 
@@ -4074,11 +4091,17 @@ function renderLive() {
   // The server owns the graceful re-exec. This pill reports the short transition or,
   // if preflight refuses the changed source, the specific problem that needs fixing.
   const restart = document.getElementById('restart');
-  restart.textContent = restartProblem
-    ? 'AUTO-RESTART PAUSED  \\u00b7  ' + restartProblem
-    : (restarting ? 'RESTARTING SERVER  \\u00b7  code changed on disk'
-                  : 'RESTART SERVER  \\u00b7  code changed on disk');
-  restart.classList.toggle('show', !!codeStale);
+  const boardSource = {codeStale, restarting, restartProblem};
+  const sources = window.localswimWorkspace
+    ? [[pageMeta, 'GATEWAY'], [boardSource, 'BOARD']] : [[boardSource, 'SERVER']];
+  const warnings = sources.filter(([status]) => status.codeStale).map(([status, label]) => {
+    if (status.restartProblem)
+      return 'AUTO-RESTART PAUSED · ' + (window.localswimWorkspace ? label + ' · ' : '')
+        + status.restartProblem;
+    return (status.restarting ? 'RESTARTING ' : 'RESTART ') + label + ' · code changed on disk';
+  });
+  restart.textContent = warnings.join(' · ');
+  restart.classList.toggle('show', warnings.length > 0);
 
   // **A THIRD flag, and this one is about the DATA rather than the view.** Card #0013.
   //
@@ -4771,17 +4794,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if reloaded:
             print(f"  {reloaded}", flush=True)
 
-        code_stale = code_is_stale()
-        current_build = BUILD if code_stale else refresh_build_id_if_clean()
-        restarting, restart_problem = (
-            request_code_restart(self.server) if code_stale else (False, None)
-        )
-        code_meta = {
-            "build": current_build,
-            "codeStale": code_stale,
-            "restarting": restarting,
-            **({"restartProblem": restart_problem} if restart_problem else {}),
-        }
+        code_meta = source_status(self.server)
 
         try:
             mtime = BOARD_PATH.stat().st_mtime

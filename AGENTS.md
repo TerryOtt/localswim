@@ -151,6 +151,10 @@ native board monitoring is an optional extra.
 - Bound workspace reads and keep one poll in flight per navigation epoch. Show clear
   recovery and Retry for failed loads; never leave Loading indefinitely or lose queued
   retries. Advance the snapshot marker only after rendering/restoration succeeds.
+  Compare workspace page build identity only with gateway catalog metadata, including
+  when the selected board is unavailable. Preserve selected-board source diagnostics,
+  independent gateway/board restart warnings, and the reload marker through navigation.
+  Unknown gateway build metadata must never fall back to a board-service build.
   Preserve pending drafts throughout errors and refresh browser credentials after a
   gateway restart. Confirm actual listener/process health; saved monitor status can be
   stale after its launching process exits.

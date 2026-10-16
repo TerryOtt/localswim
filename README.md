@@ -583,7 +583,10 @@ seconds and adopts the clean commit only after two Git reads agree and both load
 Python source digests still match disk. Changed source continues through the guarded
 re-exec path; the metadata refresh never hides or overrides real code drift.
 
-Open tabs detect a source upgrade and reload once. Normal workspace board switching
+Open tabs detect a source upgrade and reload once. In workspace mode, reload checks use the
+gateway build that served the page; another board service having a different build
+does not trigger a browser reload. Gateway and board source-restart warnings remain
+independent. The reload marker survives board navigation so a failed refresh cannot loop. Normal workspace board switching
 uses SPA navigation and does not reload the browser document. Comment drafts, active editors, a
 partially written card, search text and view state survive in per-tab session storage.
 
