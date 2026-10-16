@@ -2,7 +2,7 @@
 
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among
-boards with an Attention sidebar. It binds only to loopback and has no runtime dependency
+boards with an Attention sidebar. It binds only to loopback and has no core runtime dependency
 beyond Click, the mature command-line parser used for its nested CLI.
 
 ## Quick start
@@ -636,6 +636,51 @@ git config core.hooksPath .githooks
 
 GitHub Actions runs the same gate on pushes and pull requests. Text files are enforced
 as UTF-8 with LF endings by .editorconfig, .gitattributes and the gate.
+
+## Shared board-write monitor
+
+Install the optional monitor extra with `uv sync --locked --extra monitor` or
+`uv tool install --editable '.[monitor]'` from this checkout. Click remains the sole core dependency.
+The explicit optional dependency decision is `watchfiles==1.2.0` (MIT): native
+filesystem notifications and a trailing-edge quiet window avoid polling board
+contents. Core CLI and board services do not import this package.
+
+Run one monitor per board with distinct runtime paths:
+
+```console
+localswim-monitor --board-path /path/to/board.json --board-label "Project board" --thread-id THREAD_UUID --port 8793 --status-path /runtime/project-status.json --target-path /runtime/project-target.json --lock-path /runtime/project.lock
+```
+
+The port and all three runtime paths are required. `--automation-actor` defaults to
+`bot`; configure the board's persisted automation actor ID when it differs.
+The default quiet window is 15 seconds; `--quiet-seconds` accepts up to 300 seconds.
+Repeated launches retarget the existing monitor through its target file rather
+than creating another owner. Keep lock files persistent even after exit.
+
+After the quiet window, the monitor queries sanitized metadata through
+`localswim-cli BOARD activity between --json START END`. A nonempty result is
+suppressed only when every event belongs to the configured automation actor.
+Human, mixed, unknown, empty, malformed and failed results queue an alert.
+Filesystem signatures and activity-event counts differ and are never compared.
+No board prose or service credentials enter monitor logs or status files.
+An already queued alert should first inspect only its bounded activity metadata;
+proven automation-only activity needs no card inspection or work resumption.
+
+Add `--reload` to the same launch command after deploying an updated package.
+It requests replacement of the exact recorded monitor PID while the board stays
+live. The old monitor continues observing writes, drains its pending quiet window,
+and releases its OS lock. The replacement waits up to 330 seconds, owns that same
+lock, and resumes the prior activity cursor; a write during handoff becomes a new
+pending burst. The status document publishes `reloadSupported: true` and
+`actorFilterVersion: 2`. A timeout fails rather than starting a duplicate.
+The old FGA-local monitor predates this protocol and needs its existing graceful
+board-stop/restart boundary once before future reloads can leave the board running.
+Do not use PID termination or assume Windows byte locks survive process replacement.
+
+Stop requests retain the existing target-file protocol: schema 1 plus `stopPid`
+for the exact owner makes it wait until its board service has stopped before exit.
+A normal monitor also exits after five consecutive failed service-health checks.
+Status files are a sanitized handoff, not proof of a process or listener's health.
 
 ## License
 

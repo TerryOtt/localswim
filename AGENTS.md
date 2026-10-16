@@ -3,12 +3,14 @@
 ## Purpose and layout
 
 localswim is a Python 3.14 application, built and run with uv, that serves a local
-swimlane board from one JSON snapshot. Click is its sole runtime dependency.
+swimlane board from one JSON snapshot. Click is its sole core runtime dependency;
+native board monitoring is an optional extra.
 
 - `src/localswim/board_state.py` owns the board model, validation, serialization,
   policy checks, storage helpers, and reporting primitives.
 - `src/localswim/attachments.py` owns attachment metadata, replayable audit,
   bounded file validation, safe storage paths, and immutable file integrity.
+- `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
   browser UI. It is the sole writer while a board is live.
@@ -257,26 +259,30 @@ edit. The service runs with `--autopush` because this board's private state-stor
 repository is its durable snapshot.
 
 Whenever that service is running, a board-write monitor MUST also be running and
-targeted at the active Codex thread. The shared monitor implementation and its locked
-`watchfiles` environment live in the FGA architecture checkout. Launch it from
-`C:\Projects\FGA\architecture-design` through `uv run --frozen python` as a hidden
-background process after the service is healthy, passing the board's current port and
-`$env:CODEX_THREAD_ID`:
+targeted at the active Codex thread. Use the shared installed `localswim-monitor`
+command from `localswim[monitor]`, or `uv run --frozen --extra monitor
+localswim-monitor` in this checkout. Pass the current board port and thread ID:
 
 ```console
-scripts/watch_localswim.py --board-path C:\Projects\localswim-state-store\localswim\localswim.json --board-label "localswim inception" --thread-id $env:CODEX_THREAD_ID --port 8794 --status-path C:\Temp\localswim-inception-monitor-status.json --target-path C:\Temp\localswim-inception-monitor-target.json --lock-path C:\Temp\localswim-inception-monitor.lock
+localswim-monitor --board-path C:\Projects\localswim-state-store\localswim\localswim.json --board-label "localswim inception" --thread-id THREAD_UUID --port 8794 --status-path C:\Temp\localswim-inception-monitor-status.json --target-path C:\Temp\localswim-inception-monitor-target.json --lock-path C:\Temp\localswim-inception-monitor.lock
 ```
 
-Redirect standard output to `C:\Temp\localswim-inception-monitor.out.log` and standard
-error to `C:\Temp\localswim-inception-monitor.err.log`; the child process must inherit
-`PYTHONIOENCODING=utf-8`. The board-specific status, target, and lock paths are
-mandatory: reusing the FGA monitor defaults would retarget and displace the separate
-mandatory FGA-board monitor. Invoking the command again with these paths safely
-retargets the existing Inception monitor rather than creating a duplicate. Treat the
-status JSON as the sanitized health handoff. The monitor never reads board content and
-coalesces writes behind a trailing-edge 15-second quiet window. After an alert, inspect
-the persistent board through `localswim-cli`; routine alerts do not justify a GitHub
-visibility query.
+Use the current port rather than assuming the example's port. Launch hidden with
+`PYTHONIOENCODING=utf-8`, redirecting output/error to the corresponding board-specific
+`.out.log`/`.err.log` files under `C:\Temp`. All runtime paths are mandatory and
+must be distinct from other boards. Reinvocation retargets the current owner.
+Add `--reload` after package updates to drain pending activity and replace the
+monitor without stopping the board. The old FGA-local process cannot honor this
+protocol until its one-time graceful restart. See README's monitor section.
+
+The monitor never reads board content. After a trailing-edge 15-second quiet
+window it queries sanitized `localswim-cli` activity metadata. Suppress a nonempty
+result only when every event is by the configured automation actor (`bot` by
+default). Human, mixed, unknown, empty, malformed and failed queries still alert.
+Never require one activity event per observed filesystem write. For queued alerts,
+inspect only activity metadata first; proven automation-only events need no card
+inspection, work resumption or further action. Preserve Terry's alerts. Keep prose
+and credentials out of logs. Routine alerts do not justify a GitHub visibility query.
 
 ## Git in the Codex sandbox
 

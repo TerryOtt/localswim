@@ -313,8 +313,8 @@ Description changes similarly append optional schema-4 `detailHistory` entries w
 only timestamp, actor, and stable card ID. This lets a board-write monitor attribute
 `set-detail` mutations without reading or logging private prose; Git remains the
 source for comparing old and new text. Older boards have no fabricated detail history.
-Project edits and no-op writes still have no actor-only event, so a fail-closed
-monitor may alert on those even when Bot issued them.
+Project edits and no-op writes still have no actor-only event, so the monitor
+alerts on those even when Bot issued them.
 
 Archiving is independent of lane state. `Item.archived` defaults to false and is omitted
 from persisted cards while false. The optional schema-4 `archiveHistory` array records
@@ -784,3 +784,12 @@ Keep each fact in the narrowest durable place:
 When a schema, route, invariant, or workflow changes, update every affected layer in
 the same change. Do not copy the full transition table or vocabulary list into another
 document; link to the authoritative data so it cannot drift.
+
+## Shared monitor ownership
+
+`src/localswim/monitor.py` owns the optional `localswim-monitor` entry point,
+portable lifetime lock, sanitized CLI attribution, per-board target/status files,
+and cooperative reload. `tests/test_monitor.py` covers fail-open actor filtering,
+event-count independence, quiet-window debounce, PID scoping, lock exclusion,
+and cursor continuity during reload. See README's shared board-write monitor
+section for launch arguments and migration from the old FGA-local watcher.

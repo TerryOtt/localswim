@@ -17,7 +17,7 @@ no duplicate checker added merely for quantity.
 - **uv_build** is the native build backend, bounded to its current compatible minor
   (`>=0.12.5,<0.13`). The package uses the standard `src/localswim` layout, publishes a
   `py.typed` marker, and includes `rules.json` plus the bundled Inter assets.
-- **Click 8.4.2** is the sole runtime dependency. Its BSD-3-Clause license is compatible
+- **Click 8.4.2** is the sole core runtime dependency. Its BSD-3-Clause license is compatible
   with localswim's MIT license, and its established nested-command and contextual-help
   model replaces the increasingly brittle flat `argparse` option matrix. Terry
   explicitly accepted this dependency tradeoff on 2026-08-25.
@@ -94,3 +94,13 @@ uv run --frozen pytest -q `
 
 Do not invoke `.venv/Scripts/...` directly. See `AGENTS.md` for the Git sandbox flags,
 full gate, publishing authority, and project invariants.
+
+## Optional monitor dependency decision
+
+The shared board monitor uses the explicitly selected `watchfiles==1.2.0` MIT
+package for native filesystem notifications. It is isolated in the `monitor` extra
+so Click remains the sole core runtime dependency. Install with
+`uv sync --locked --extra monitor` for checkout use or
+`uv tool install 'localswim[monitor]'` for the installed command. Its transitive
+dependencies are pinned in `uv.lock`. Importing core localswim modules does not
+require the extra; invoking monitoring without it reports an installation hint.

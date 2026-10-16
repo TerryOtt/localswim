@@ -22,6 +22,9 @@ classifiers = [
 ]
 dependencies = ["click==8.4.2"]
 
+[project.optional-dependencies]
+monitor = ["watchfiles==1.2.0"]
+
 [project.urls]
 Homepage = "https://github.com/TerryOtt/localswim"
 Issues = "https://github.com/TerryOtt/localswim/issues"
@@ -30,6 +33,7 @@ Repository = "https://github.com/TerryOtt/localswim"
 [project.scripts]
 localswim = "localswim.api_endpoint:main"
 localswim-cli = "localswim.cli:main"
+localswim-monitor = "localswim.monitor:main"
 
 [dependency-groups]
 dev = [
