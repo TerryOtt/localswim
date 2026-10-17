@@ -412,7 +412,9 @@ Four conventions matter beyond a simple `may_move()` lookup:
    `ready_for_review -> completed`. The drawer's **Terry Reviewed & Approved** action
    performs that transition together with the exact `Reviewed & approved, moving to Completed.` comment in
    one revision-checked transaction; the human check applies even when a board's raw
-   transition policy permits Bot to move to Completed.
+   transition policy permits Bot to move to Completed. A confirmed success closes the
+   source drawer through its existing draft-preserving close path. Refusals, failures,
+   and delayed responses after switching cards or boards do not close the current drawer.
 4. The human actor may move `ready_for_work -> in_progress` when starting selected
    work directly in the browser. Card ownership remains independent of movement
    permission.

@@ -99,36 +99,47 @@ function section(start, end) {
   return input.source.slice(a, b);
 }
 const button = {hidden: true, disabled: false, textContent: '', addEventListener() {}};
-const ctx = vm.createContext({input, button, JSON, Set, encodeURIComponent,
-  document: {getElementById: () => button}});
+const events = [], say = {value: 'unsent'};
+const elements = {'p-approve': button, say};
+for (const id of ['scrim', 'panel']) {
+  elements[id] = {classList: {remove(name) {events.push([id, name]);}}};
+}
+const ctx = vm.createContext({input, button, events, say, JSON, Set, encodeURIComponent,
+  document: {getElementById: id => elements[id]}});
 vm.runInContext(`
 let API_PREFIX = '/alpha', API_TOKEN = 'synthetic', openId = 'review', seen = 'fresh';
 let data = {revision: 4, browserUser: 'terry', actors: [{id:'terry', class:'human'}],
   lanes: [{state:'ready_for_review'}, {state:'completed'}]};
 let card = {id:'review', state:'ready_for_review', archived:false};
 let permit = true, calls = [], toasts = [], reconciled = [], drafts = {review:'unsent'};
+let relationshipDraft = {pending:true};
 let resolveFetch, rejectFetch;
 const window = {workspaceEpoch: 1, WorkspaceUI: {
   reconcile: (...args) => reconciled.push(args)}};
 function allowed() { return permit; }
 function itemById(id) { return card && card.id === id ? card : null; }
 function userLabel() { return 'Terry'; }
-function toast(...args) { toasts.push(args); }
+function toast(...args) { toasts.push(args); events.push(['toast', seen, data.revision]); }
 function fetch(path, options) {
   calls.push({path, options});
   return new Promise((resolve, reject) => {resolveFetch=resolve; rejectFetch=reject;});
 }
 ` + section('async function apiPost(', '// **The repaint counter') +
 section('const pendingApprovals =', 'function openCard('), ctx);
+vm.runInContext(section('function closeCard()',
+  "document.getElementById('close').addEventListener"), ctx);
 vm.runInContext(`this.run = async () => {
   renderApproval(card);
   const eligible = !button.hidden && !button.disabled && button.textContent;
   const first = approveReview();
   const pendingDisabled = button.disabled;
   await approveReview();
+  const closedBeforeResponse = events.length;
+  say.value = 'typed while approval pending';
   if (input.mode === 'board') {API_PREFIX='/beta'; window.workspaceEpoch++; data.revision=99;}
   if (input.mode === 'card') {openId='other'; card={id:'other', state:'ready_for_review'};}
   if (input.mode === 'closed') {openId=null;}
+  if (input.mode === 'epoch') {window.workspaceEpoch++;}
   if (input.mode === 'removed') {card=null;}
   if (input.mode === 'board_error') {API_PREFIX='/beta'; window.workspaceEpoch++; data.revision=99;}
   if (input.mode.endsWith('error')) rejectFetch(Error('synthetic connection loss'));
@@ -137,6 +148,7 @@ vm.runInContext(`this.run = async () => {
   await first;
   const result = {eligible, pendingDisabled, calls, toasts, reconciled,
     seen, revision:data.revision, drafts, pending:pendingApprovals.size,
+    closedBeforeResponse, events, openId, relationshipDraft,
     disabled:button.disabled, hidden:button.hidden};
   for (const kind of ['bot','denied','wrong','archived','target_missing','source_missing']) {
     card={id:'review', state:'ready_for_review'}; permit=true;
@@ -157,7 +169,8 @@ ctx.run().then(result => process.stdout.write(JSON.stringify(result)))
 
 
 @pytest.mark.parametrize(
-    "mode", ["stay", "board", "card", "closed", "removed", "error", "board_error", "refused"]
+    "mode",
+    ["stay", "board", "card", "closed", "epoch", "removed", "error", "board_error", "refused"],
 )
 def test_browser_approval_guards_pending_request_and_navigation(mode: str) -> None:
     """Execute production callbacks with deferred fetch, including late failures."""
@@ -182,13 +195,22 @@ def test_browser_approval_guards_pending_request_and_navigation(mode: str) -> No
     assert request["options"]["headers"]["If-Match"] == '"revision-4"'
     assert request["options"]["headers"]["Authorization"] == "Bearer synthetic"
     assert request["options"]["body"] == "{}"
-    assert observed["drafts"] == {"review": "unsent"}
+    assert observed["closedBeforeResponse"] == 0
+    if mode == "stay":
+        assert observed["drafts"] == {"review": "typed while approval pending"}
+        assert observed["openId"] is None
+        assert observed["relationshipDraft"] is None
+        assert observed["events"] == [["toast", None, 5], ["scrim", "show"], ["panel", "show"]]
+    else:
+        assert observed["drafts"] == {"review": "unsent"}
+        assert observed["relationshipDraft"] == {"pending": True}
+        assert all(event[0] == "toast" for event in observed["events"])
     assert observed["pending"] == 0
     assert all(
         observed[kind]
         for kind in ["bot", "denied", "wrong", "archived", "target_missing", "source_missing"]
     )
-    if mode in {"board", "board_error", "card", "closed"}:
+    if mode in {"board", "board_error", "card", "closed", "epoch"}:
         assert observed["toasts"] == []
         assert observed["seen"] == "fresh"
         assert observed["revision"] == (99 if mode.startswith("board") else 4)
@@ -196,8 +218,8 @@ def test_browser_approval_guards_pending_request_and_navigation(mode: str) -> No
         assert len(observed["toasts"]) == 1
         assert observed["seen"] is None
         assert observed["revision"] == (4 if mode == "error" else 5)
-        assert observed["disabled"] is False
-    assert len(observed["reconciled"]) == (1 if mode == "board" else 0)
+        assert observed["disabled"] is (mode == "stay")
+    assert len(observed["reconciled"]) == (1 if mode in {"board", "epoch"} else 0)
     if mode == "error":
         assert "outcome unknown" in observed["toasts"][0][0]
         assert observed["toasts"][0][1] is True

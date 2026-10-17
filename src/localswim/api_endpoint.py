@@ -2952,6 +2952,7 @@ async function approveReview() {
     acceptRevision(out);
     seen = null;
     toast(res.ok ? out.result : (out.error || 'Review approval refused'), !res.ok);
+    if (res.ok && itemById(id)) closeCard();
   } catch (err) {
     if (stillHere()) {
       seen = null;

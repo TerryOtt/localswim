@@ -159,7 +159,9 @@ can approve a Ready for review card with the drawer's **Terry Reviewed & Approve
 action near the priority control (other boards use their human actor's display name).
 It adds the `Reviewed & approved, moving to Completed.` comment and moves the card to Completed as one
 authenticated, revision-checked action. The action is available only to a human browser
-actor; Bot cannot approve its own work.
+actor; Bot cannot approve its own work. After confirmed approval, the drawer closes
+and retains any unsent comment draft for that card. Refused or failed approvals leave
+it open; a delayed response cannot close a different card or board.
 
 The important fields are:
 

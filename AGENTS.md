@@ -77,7 +77,9 @@ native board monitoring is an optional extra.
   appends the exact `Reviewed & approved, moving to Completed.` comment in one authenticated,
   revision-checked transaction. Bot actors cannot use this action even if policy allows
   the raw transition. Keep comment and move atomic; repeated or stale requests must not
-  duplicate the comment.
+  duplicate the comment. Close the source drawer only after confirmed success and
+  preserve its comment draft; failures and stale navigation responses must not close
+  another drawer.
 - Keep the checked generic and Terry-workflow examples distinct. Terry's seven-lane
   workflow is an intentional public example of how he works, not a universal default.
 
