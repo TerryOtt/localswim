@@ -129,6 +129,33 @@ def board_set_project(context: CliContext, name: str) -> None:
     _mutate(context, board_state.API_PREFIX + "/board/project", {"project": name})
 
 
+@board_commands.command("grant-permissions")
+@click.option("--actor", "actors", multiple=True, required=True, help="Existing actor ID.")
+@click.option("--create-in", "create", multiple=True, help="Existing lane ID for creation.")
+@click.option(
+    "--move", "moves", multiple=True, nargs=2, help="Existing source and destination IDs."
+)
+@click.pass_obj
+def board_grant_permissions(
+    context: CliContext,
+    actors: tuple[str, ...],
+    create: tuple[str, ...],
+    moves: tuple[tuple[str, str], ...],
+) -> None:
+    """Add creation or move permissions through the live board service."""
+    if not create and not moves:
+        raise click.UsageError("at least one --create-in or --move permission is required")
+    _mutate(
+        context,
+        board_state.API_PREFIX + "/board/permissions",
+        {
+            "actors": list(actors),
+            "create": list(create),
+            "moves": [{"from": frm, "to": to} for frm, to in moves],
+        },
+    )
+
+
 @board_commands.command("init")
 @click.argument(
     "description",

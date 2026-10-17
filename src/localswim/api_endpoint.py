@@ -1053,7 +1053,19 @@ class BoardStore:
                 committed = candidate
             # `board_state.edit` saves on exit. Publish in memory only after that succeeds.
             self._board = copy.deepcopy(committed)
+            self.policy = self._board.policy
             return result, committed.revision
+
+    def grant_permissions(
+        self, expected: int, body: board_state.JsonObject, actor: str
+    ) -> tuple[str, int]:
+        """Grant only embedded permissions through the normal locked transaction."""
+        if self._external_policy:
+            raise board_state.BoardError("permission grants require an embedded board policy")
+        actors, create, moves = permission_grant_specs(body)
+        return self.execute(
+            expected, lambda board: board.grant_permissions(actors, create, moves, actor)
+        )
 
     def upload(
         self, expected_revision: int, ref: str, name: object, encoded: object, actor: str
@@ -4701,6 +4713,44 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
     raise board_state.BoardError(f"unknown card command {action!r}")
 
 
+def permission_grant_specs(
+    body: board_state.JsonObject,
+) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """Reject malformed grant requests without coercing identifiers or actor lists."""
+    if set(body) != {"actors", "create", "moves"}:
+        raise board_state.BoardError("permission grants require exactly actors, create and moves")
+    strings: dict[str, list[str]] = {}
+    for field in ("actors", "create"):
+        values = body[field]
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise board_state.BoardError(f"{field} must be a list of strings")
+        strings[field] = cast("list[str]", values)
+    raw_moves = body["moves"]
+    if not isinstance(raw_moves, list):
+        raise board_state.BoardError("moves must be a list of objects")
+    moves: list[tuple[str, str]] = []
+    for move in raw_moves:
+        if not isinstance(move, dict) or set(move) != {"from", "to"}:
+            raise board_state.BoardError("each move requires exactly from and to")
+        source, target = move["from"], move["to"]
+        if not isinstance(source, str) or not isinstance(target, str):
+            raise board_state.BoardError("move from and to must be strings")
+        moves.append((source, target))
+    return strings["actors"], strings["create"], moves
+
+
+def _unique_request_fields(
+    pairs: list[tuple[str, board_state.JsonValue]],
+) -> board_state.JsonObject:
+    """Preserve the meaning of strict grant bodies by rejecting duplicate JSON keys."""
+    result: board_state.JsonObject = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate request field {key!r}")
+        result[key] = value
+    return result
+
+
 def execute_priority_batch(
     store: BoardStore, expected: int, body: board_state.JsonObject, actor: str
 ) -> board_state.JsonObject:
@@ -4808,7 +4858,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.end_headers()
 
-    def _read_json(self) -> board_state.JsonObject | None:
+    def _read_json(self, *, unique_fields: bool = False) -> board_state.JsonObject | None:
         """Read one bounded object, reporting a refusal before allocating large uploads."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -4818,7 +4868,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     413,
                 )
                 return None
-            body = cast("board_state.JsonValue", json.loads(self.rfile.read(length) or b"{}"))
+            raw = self.rfile.read(length) or b"{}"
+            body = cast(
+                "board_state.JsonValue",
+                json.loads(raw, object_pairs_hook=_unique_request_fields)
+                if unique_fields
+                else json.loads(raw),
+            )
             if isinstance(body, dict):
                 return body
         except ValueError, TypeError:
@@ -5023,7 +5079,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._json({"result": "board service shutdown scheduled", "push": detail})
 
-    def do_POST(self) -> None:  # noqa: PLR0911 -- BaseHTTPRequestHandler contract
+    def do_POST(self) -> None:  # noqa: PLR0911, PLR0912 -- explicit REST dispatch
         """Execute one authenticated, revision-checked domain command."""
         route = self.path.partition("?")[0]
         if route == API_PREFIX + "/shutdown":
@@ -5033,9 +5089,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         command_parts = parts[len(API_PARTS) :] if parts[: len(API_PARTS)] == API_PARTS else []
         is_create = command_parts == ["cards"]
         is_project = command_parts == ["board", "project"]
+        is_permissions = command_parts == ["board", "permissions"]
         is_priority_batch = route == API_PREFIX + "/cards/priorities"
         is_card_command = len(command_parts) == CARD_COMMAND_PARTS and command_parts[0] == "cards"
-        if not (is_create or is_project or is_card_command or is_priority_batch):
+        if not (is_create or is_project or is_permissions or is_card_command or is_priority_batch):
             self.send_error(404)
             return
 
@@ -5043,11 +5100,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if actor is None:
             self._json({"error": "missing or invalid service credential"}, 401)
             return
+        if is_permissions and self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
+            self._json({"error": "permission grants require the CLI credential"}, 403)
+            return
         expected = self._expected_revision()
         if expected is None:
             self._json({"error": "If-Match must name the expected board revision"}, 428)
             return
-        body = self._read_json()
+        body = self._read_json(unique_fields=is_permissions)
         if body is None:
             return
 
@@ -5061,7 +5121,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             try:
-                if is_priority_batch:
+                if is_permissions:
+                    result, revision = store.grant_permissions(expected, body, actor)
+                    response = {"result": result, "revision": revision}
+                elif is_priority_batch:
                     response = execute_priority_batch(store, expected, body, actor)
                 else:
                     response = _http_command_response(store, expected, command_parts, body, actor)

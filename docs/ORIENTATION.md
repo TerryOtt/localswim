@@ -527,6 +527,7 @@ POST /api/v001/cards/<id>/attachment
 POST /api/v001/cards/<id>/cover
 GET  /api/v001/cards/<id>/attachments/<attachment-guid>
 POST /api/v001/board/project
+POST /api/v001/board/permissions
 ```
 
 The server maps credentials to actors; request bodies cannot select who is acting. The
@@ -540,6 +541,15 @@ and request revision. It validates the `ready_for_review -> completed` move befo
 appending `Reviewed & approved, moving to Completed.` and changing state in the same transaction. Bot actors
 cannot invoke this special action even where the general transition policy permits that
 move; stale, repeated, or failed requests do not leave a comment behind.
+
+`board grant-permissions` adds creation lanes and moves for each selected actor
+through `POST /api/v001/board/permissions`. Its exact body is
+`{actors: [ID, ...], create: [laneID, ...], moves: [{from: laneID, to: laneID}, ...]}`.
+Only the CLI credential may invoke it, with `If-Match`. Validate every actor, lane,
+and move before adding grants in one sole-writer transaction; preserve unrelated
+permissions, cards, and history. The Terry workflow template grants both actors
+creation in Blocked and Needs Terry and moves to either lane from Backlog. See the
+[README command example](../README.md#board-configuration) for live-board upgrades.
 
 Useful refusal statuses are:
 

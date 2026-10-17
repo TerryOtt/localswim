@@ -80,6 +80,10 @@ native board monitoring is an optional extra.
   duplicate the comment. Close the source drawer only after confirmed success and
   preserve its comment draft; failures and stale navigation responses must not close
   another drawer.
+- Terry and Bot may create in Blocked and Needs Terry and move there from Backlog.
+  Keep these grants in the Terry template; upgrade live boards only through the
+  CLI-authenticated, revision-checked additive permission route in the sole writer.
+  Validate the complete request before changing any permissions.
 - Keep the checked generic and Terry-workflow examples distinct. Terry's seven-lane
   workflow is an intentional public example of how he works, not a universal default.
 

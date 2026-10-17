@@ -43,7 +43,7 @@ TERRY_LANE_POLICY: list[board_state.JsonObject] = [
     {
         "id": "blocked",
         "label": "Blocked",
-        "create": [],
+        "create": ["bot", "terry"],
         "note": (
             "Neither Bot nor Terry can act until an external condition changes, such as "
             "hardware arriving from a vendor."
@@ -52,7 +52,7 @@ TERRY_LANE_POLICY: list[board_state.JsonObject] = [
     {
         "id": "needs_terry_action",
         "label": "Needs Terry",
-        "create": [],
+        "create": ["bot", "terry"],
         "note": (
             "Bot work waiting for Terry to answer, approve a recommendation, make a judgment "
             "call, or personally act."
@@ -127,6 +127,7 @@ def test_terry_workflow_board_preserves_personal_lane_and_priority_model() -> No
             ("backlog", "ready_for_work"),
             ("backlog", "in_progress"),
             ("backlog", "needs_terry_action"),
+            ("backlog", "blocked"),
             ("ready_for_work", "backlog"),
             ("ready_for_work", "in_progress"),
             ("ready_for_work", "needs_terry_action"),
@@ -151,6 +152,7 @@ def test_terry_workflow_board_preserves_personal_lane_and_priority_model() -> No
         [
             ("backlog", "ready_for_work"),
             ("backlog", "needs_terry_action"),
+            ("backlog", "blocked"),
             ("ready_for_work", "backlog"),
             ("ready_for_work", "in_progress"),
             ("ready_for_work", "blocked"),

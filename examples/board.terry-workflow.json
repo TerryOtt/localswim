@@ -60,13 +60,19 @@
       {
         "id": "blocked",
         "label": "Blocked",
-        "create": [],
+        "create": [
+          "bot",
+          "terry"
+        ],
         "note": "Neither Bot nor Terry can act until an external condition changes, such as hardware arriving from a vendor."
       },
       {
         "id": "needs_terry_action",
         "label": "Needs Terry",
-        "create": [],
+        "create": [
+          "bot",
+          "terry"
+        ],
         "note": "Bot work waiting for Terry to answer, approve a recommendation, make a judgment call, or personally act."
       },
       {
@@ -95,6 +101,10 @@
         {
           "from": "backlog",
           "to": "needs_terry_action"
+        },
+        {
+          "from": "backlog",
+          "to": "blocked"
         },
         {
           "from": "ready_for_work",
@@ -177,6 +187,10 @@
         {
           "from": "backlog",
           "to": "needs_terry_action"
+        },
+        {
+          "from": "backlog",
+          "to": "blocked"
         },
         {
           "from": "ready_for_work",

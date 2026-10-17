@@ -2386,6 +2386,65 @@ class Board:
     cli_user: str = ""
     default_owner: str = ""
 
+    def _validate_permission_grants(
+        self,
+        actors: Sequence[str],
+        create: Sequence[str],
+        moves: Sequence[tuple[str, str]],
+        by: str,
+    ) -> None:
+        """Refuse the whole request before constructing any policy additions."""
+        known_actors = {user.id for user in self.users}
+        if by not in known_actors:
+            raise BoardError(f"unknown actor {by!r}")
+        if not actors:
+            raise BoardError("actors must contain at least one actor ID")
+        if not create and not moves:
+            raise BoardError("at least one create or move permission is required")
+        for actor in actors:
+            if actor not in known_actors:
+                raise BoardError(f"unknown actor {actor!r}; use an existing actor ID")
+        for lane in (*create, *(end for move in moves for end in move)):
+            if lane not in self.policy.states:
+                raise BoardError(f"unknown lane {lane!r}; use an existing lane ID")
+        for frm, to in moves:
+            if frm == to:
+                raise BoardError(f"move permission joins {frm!r} to itself")
+
+    def grant_permissions(
+        self,
+        actors: Sequence[str],
+        create: Sequence[str],
+        moves: Sequence[tuple[str, str]],
+        by: str,
+    ) -> str:
+        """Add exact-ID permissions atomically, retaining every existing grant and card."""
+        self._validate_permission_grants(actors, create, moves, by)
+        known_actors = {user.id for user in self.users}
+
+        document = self.policy.to_json()
+        lanes = cast("list[JsonObject]", document["lanes"])
+        edges = cast("dict[str, list[JsonValue]]", document["edges"])
+        for lane_row in lanes:
+            if lane_row["id"] in create:
+                grants = cast("list[JsonValue]", lane_row["create"])
+                for actor in actors:
+                    if actor not in grants:
+                        grants.append(actor)
+        for actor in dict.fromkeys(actors):
+            actor_edges = edges.setdefault(actor, []) if moves else []
+            existing = {
+                (edge["from"], edge["to"]) for edge in cast("list[JsonObject]", actor_edges)
+            }
+            for frm, to in moves:
+                if (frm, to) not in existing:
+                    actor_edges.append({"from": frm, "to": to})
+                    existing.add((frm, to))
+        policy = TransitionPolicy.from_json(document, "permission grants")
+        policy.validate_actors(known_actors, "board", frozenset({self.browser_user, self.cli_user}))
+        self.policy = policy
+        return "Granted permissions for " + ", ".join(dict.fromkeys(actors))
+
     # ---- serialization -------------------------------------------------------
 
     def to_json(self) -> JsonObject:

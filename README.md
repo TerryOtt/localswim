@@ -141,6 +141,17 @@ workflow, also used by FGA:
 uv run --frozen localswim-cli boards/my-project.json board init examples/board-description.terry-workflow.json examples/permissions.terry-workflow.json
 ~~~
 
+Both Terry and Bot may create cards in Blocked and Needs Terry, and move cards
+there directly from Backlog. Existing boards can receive these same additive grants
+through their running service:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json board grant-permissions --actor bot --actor terry --create-in blocked --create-in needs_terry_action --move backlog blocked --move backlog needs_terry_action
+~~~
+
+All actors, lanes, and moves are validated before any grant is applied. Existing
+grants and other board data are preserved; never edit a live board snapshot directly.
+
 That example carries Terry's working agreement, not merely his lane names:
 
 | Lane | Terry workflow meaning |
@@ -547,6 +558,7 @@ POST /api/v001/cards/<id>/attachment
 POST /api/v001/cards/<id>/cover
 GET  /api/v001/cards/<id>/attachments/<attachment-guid>
 POST /api/v001/board/project
+POST /api/v001/board/permissions
 POST /api/v001/shutdown
 ~~~
 
@@ -571,6 +583,16 @@ archived unfinished cards remain eligible. The combined selected overrides are
 evaluated before floors are applied, while unfinished blockers outside the selection
 can clamp effective priorities. The request uses the ordinary bearer credential and
 `If-Match` revision boundary.
+
+The board permission route accepts exactly this body, using stable actor and lane IDs:
+
+~~~json
+{"actors":["bot","terry"],"create":["blocked","needs_terry_action"],"moves":[{"from":"backlog","to":"blocked"},{"from":"backlog","to":"needs_terry_action"}]}
+~~~
+
+It requires the CLI credential and `If-Match`; browser credentials cannot change
+permissions. The sole writer validates the entire request and adds all grants in
+one revision-checked transaction, preserving existing permissions and board data.
 
 A workspace also exposes:
 

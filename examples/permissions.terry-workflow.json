@@ -10,8 +10,14 @@
       "Terry"
     ],
     "In progress": [],
-    "Blocked": [],
-    "Needs Terry": [],
+    "Blocked": [
+      "Bot",
+      "Terry"
+    ],
+    "Needs Terry": [
+      "Bot",
+      "Terry"
+    ],
     "Ready for review": [],
     "Completed": []
   },
@@ -20,6 +26,7 @@
       { "from": "Backlog", "to": "Ready For Work" },
       { "from": "Backlog", "to": "In progress" },
       { "from": "Backlog", "to": "Needs Terry" },
+      { "from": "Backlog", "to": "Blocked" },
       { "from": "Ready For Work", "to": "Backlog" },
       { "from": "Ready For Work", "to": "In progress" },
       { "from": "Ready For Work", "to": "Needs Terry" },
@@ -42,6 +49,7 @@
     "Bot": [
       { "from": "Backlog", "to": "Ready For Work" },
       { "from": "Backlog", "to": "Needs Terry" },
+      { "from": "Backlog", "to": "Blocked" },
       { "from": "Ready For Work", "to": "Backlog" },
       { "from": "Ready For Work", "to": "In progress" },
       { "from": "Ready For Work", "to": "Blocked" },
