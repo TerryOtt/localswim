@@ -182,8 +182,8 @@ native board monitoring is an optional extra.
 
 ## Subagents on authorized tickets
 
-Terry authorized up to five direct subagents (width 5), one level below the
-primary agent (depth 1), on all tickets authorized to work, 2026-10-14.
+Terry updated the ceiling on 2026-10-17 to up to 16 direct subagents (width 16),
+one level below the primary agent (depth 1), on all tickets authorized to work.
 Use parallel delegation where useful without requesting per-ticket permission.
 Subagents must not spawn subagents. This does not authorize starting other tickets
 or unrelated work. The primary retains responsibility for integration, required
