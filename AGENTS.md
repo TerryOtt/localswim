@@ -269,6 +269,21 @@ uv python install 3.15.0
 uv sync --locked
 ```
 
+## Human-readable ticket descriptions and comments
+
+Terry requires Bot-authored ticket descriptions and comments to be easy for humans
+to scan (2026-10-16). Avoid walls of text.
+
+- Use short paragraphs with blank lines between them.
+- Use bulleted or numbered lists for requirements, findings, verification and next steps.
+- Separate distinct topics with meaningful line breaks; use brief labels when helpful.
+- Lead with the outcome or action, then include only the supporting detail needed.
+- Keep technical references concise and link to detailed evidence instead of packing
+  logs or long explanations into a single paragraph.
+
+Apply this guidance to new descriptions, updates, progress comments and handoffs.
+Do not rewrite historical comments unless Terry requests it.
+
 ## Local inception-board coordination
 
 Use `C:\Projects\localswim-state-store\localswim\localswim.json` as the machine-local
