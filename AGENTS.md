@@ -434,3 +434,26 @@ ID. The current live rule ID and exact update command are recorded in
 changes under `.github/workflows/`; refresh it with
 `gh auth refresh -h github.com -s repo -s workflow` when necessary. Never print, copy,
 or persist the `gh` authentication token.
+
+## Rolling worker assignments for the localswim work plan
+
+Terry requested a rolling three-turn worker plan on 2026-10-19. While #0112 is
+active, refresh its planned worker assignments before ending every turn.
+
+- Reconcile actual handoffs, carryover, owner acceptance and schedule changes
+  first. Pre-assign authors to every card in the new remaining turns 1-3;
+  record a descriptive agent name, explicit model/effort, authorized scope
+  reference and prerequisite readiness in #0112 and its current TXT/JSON plan.
+- Plan fresh independent validation for each card using the appropriate
+  model/effort. Replace finished authors with fresh non-author reviewers as
+  slots open; never reserve idle author/reviewer pairs.
+- Planned assignments do not spawn agents, reserve active slots, authorize
+  future scope or bypass prerequisite acceptance. Recheck eligibility and move
+  the card In Progress before any actual work, tests, review or delegation.
+- Respect the current session's concurrency/model limits and depth one. Do not
+  change configuration or persistent limits merely to fit a planned assignment.
+- Refresh the new turns 1-3 even after partial completion, reordering, findings
+  or planning-only work. Retain unfinished cards visibly; do not decrement the
+  remaining-turn count simply because a conversation turn ended.
+- Preserve history and superseded assignments as evidence, clearly identify
+  the current assignment set, and state missing inputs or owner decisions.
