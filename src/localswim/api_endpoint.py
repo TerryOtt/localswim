@@ -72,6 +72,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -781,14 +782,49 @@ def _snapshot_paths(board_path: pathlib.Path) -> list[str]:
     ]
 
 
+_GIT_STATUS_ARGV_LIMIT = 16_000
+_GIT_STATUS_ARGS = ["status", "--porcelain=v1", "--untracked-files=all", "--"]
+
+
+def _status_path_chunks(paths: list[str]) -> Generator[list[str]]:
+    """Keep each quoted Windows command below half the process command-line limit."""
+    # Include Git, separators, quoting and the terminating NUL in UTF-16 code units.
+    fixed_size = len(subprocess.list2cmdline(["git", *_GIT_STATUS_ARGS])) + 1
+    size = fixed_size
+    chunk: list[str] = []
+    for path in paths:
+        quoted = subprocess.list2cmdline([path])
+        path_size = len(quoted.encode("utf-16-le", errors="surrogatepass")) // 2 + 1
+        if fixed_size + path_size > _GIT_STATUS_ARGV_LIMIT:
+            raise ValueError("snapshot path exceeds the Git status command-line budget")
+        if size + path_size > _GIT_STATUS_ARGV_LIMIT:
+            yield chunk
+            chunk = []
+            size = fixed_size
+        chunk.append(path)
+        size += path_size
+    if chunk:
+        yield chunk
+
+
+def _snapshot_changed(paths: list[str], cwd: pathlib.Path) -> tuple[bool, str]:
+    """Check all exact paths before staging, including failures after a dirty batch."""
+    changed = False
+    for chunk in _status_path_chunks(paths):
+        status = _git([*_GIT_STATUS_ARGS, *chunk], cwd)
+        if status.returncode != 0:
+            return False, f"git status failed: {status.stderr.strip()[:200]}"
+        changed = changed or bool(status.stdout.strip())
+    return changed, ""
+
+
 def _commit_board_snapshot(board_path: pathlib.Path) -> tuple[bool, str]:
     """Commit one consistent snapshot while HTTP writers are paused."""
     cwd = board_path.parent
-    paths = _snapshot_paths(board_path)
-    status = _git(["status", "--porcelain=v1", "--untracked-files=all", "--", *paths], cwd)
-    if status.returncode != 0:
-        return False, f"git status failed: {status.stderr.strip()[:200]}"
-    committed = bool(status.stdout.strip())
+    paths = [f":(literal){path}" for path in _snapshot_paths(board_path)]
+    committed, problem = _snapshot_changed(paths, cwd)
+    if problem:
+        return False, problem
     if committed:
         when = dt.datetime.now(tz=dt.UTC).astimezone()
         # Terry's stamp format, from his display preferences: `2026-08-19 02:56pm`.
@@ -799,12 +835,17 @@ def _commit_board_snapshot(board_path: pathlib.Path) -> tuple[bool, str]:
             "history array carries the per-move audit, so this commit exists for\n"
             "durability rather than for granularity.\n"
         )
-        add = _git(["add", "--", *paths], cwd)
-        if add.returncode != 0:
-            return False, f"git add failed: {add.stderr.strip()[:200]}"
-        commit = _git(["commit", "-m", message, "--", *paths], cwd)
-        if commit.returncode != 0:
-            return False, f"git commit failed: {commit.stderr.strip()[:200]}"
+        with tempfile.TemporaryDirectory(prefix="localswim-pathspec-") as directory:
+            pathspec = pathlib.Path(directory) / "paths"
+            # write_bytes closes the file before Git opens it, including on Windows.
+            pathspec.write_bytes(b"".join(path.encode("utf-8") + b"\0" for path in paths))
+            options = [f"--pathspec-from-file={pathspec}", "--pathspec-file-nul"]
+            add = _git(["add", *options], cwd)
+            if add.returncode != 0:
+                return False, f"git add failed: {add.stderr.strip()[:200]}"
+            commit = _git(["commit", "-m", message, *options], cwd)
+            if commit.returncode != 0:
+                return False, f"git commit failed: {commit.stderr.strip()[:200]}"
     return committed, ""
 
 

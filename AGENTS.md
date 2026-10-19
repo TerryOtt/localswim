@@ -100,6 +100,9 @@ native board monitoring is an optional extra.
   raster previews from bytes; generic files must download with `nosniff` and sandbox
   CSP. Git snapshots include exact audited attachment paths, never a directory glob.
   Browser and bot CLI uploads/removals use the sole live writer and revision checks.
+  Bound publisher status arguments and use literal NUL-delimited pathspec files for
+  add/commit so growing audit inventories never become one oversized command line.
+  Refuse any failed status batch and clean temporary pathspec files on every outcome.
   Card attachment counts use a right-aligned paperclip and tabular numeric field with
   two digits of reserved width, exact larger totals, and accessible count labels.
   Omit zero counts and preserve covers and comment badges.

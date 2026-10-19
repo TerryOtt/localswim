@@ -498,6 +498,13 @@ the committed metadata and references stay consistent; network push releases thi
 pause. The existing repository lock still serializes multiple board services. No
 unrelated or unaudited attachment-directory files may join the commit.
 
+The publisher bounds status command arguments and supplies add/commit paths through
+literal NUL-delimited temporary pathspec files, avoiding Windows command-line overflow
+as the attachment audit grows. Every status batch must succeed before staging starts.
+The pathspec file is closed before Git opens it and is removed after success or failure.
+These transport details preserve the same repository lock, mutation pause, exact audited
+inventory and exclusion of unrelated staged files; they do not change Git filtering rules.
+
 CLI `card attachment` offers `add`, `list --json`, `remove`, and `cover`/`cover --clear`.
 The drawer offers upload, image previews, download, removal, and cover controls;
 oversized selection and HTTP refusal use an accessible modal with the reason.
@@ -727,6 +734,7 @@ The suite spans these boundaries:
 |---|---|
 | `test_board.py` | Card operations, transitions, history, links, hierarchy, and sorting. |
 | `test_attachments.py` | Browser/API and CLI uploads, removal, cover selection, size bounds, exact Git staging, snapshot rollback, and immutable file reads. |
+| `test_snapshot_publish.py` | Large audited inventories, bounded literal Git paths, unrelated staged-file exclusion, temporary pathspec cleanup, and publication failure/retry. |
 | `test_dependencies.py` | Blocking depth, cross-lane ordering, transitive priority inheritance, cycles, deep chains, and atomic adoption. |
 | `test_archiving.py` | Reversible visibility, archive persistence and audit, intact relationships, and filtered queries. |
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |

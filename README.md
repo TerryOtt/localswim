@@ -531,6 +531,12 @@ board that is not yet tracked is adopted on the first pass; unrelated tracked or
 untracked files remain untouched. The server refuses ignored boards, non-repositories
 and repositories without a remote; it cannot prove that a configured remote is private.
 
+Large attachment histories do not expand into one process command line. Snapshot
+status checks use bounded path batches; staging and commit receive exact literal
+paths through temporary NUL-delimited pathspec files. Removed attachment files remain
+part of that audited inventory. Unrelated staged files and unaudited directory contents
+remain excluded, and any failed status batch refuses the snapshot attempt.
+
 Stop a live service through its authenticated CLI rendezvous rather than terminating
 its process:
 
