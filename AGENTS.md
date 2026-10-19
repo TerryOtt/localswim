@@ -182,13 +182,36 @@ native board monitoring is an optional extra.
 
 ## Subagents on authorized tickets
 
-Terry updated the ceiling on 2026-10-17 to up to 16 direct subagents (width 16),
-one level below the primary agent (depth 1), on all tickets authorized to work.
+Terry updated the global ceiling on 2026-10-17 to up to 16 direct subagents (width 16),
+one level below the primary agent (depth 1), on all tickets authorized to work, subject
+to scoped work-plan limits below.
 Use parallel delegation where useful without requesting per-ticket permission.
 Subagents must not spawn subagents. This does not authorize starting other tickets
 or unrelated work. The primary retains responsibility for integration, required
 verification, commits/pushes and handoff. Respect a lower current-session limit;
 persisted configuration applies when loaded.
+
+## Localswim work-plan Astra authorization
+
+Effective 2026-10-19, Terry explicitly authorizes GPT-6 Astra (`gpt-6-astra`)
+with Medium reasoning (`medium`) on every turn until work-plan #0112 is completed
+or Terry revokes this authorization.
+
+- Use as many Astra / Medium subagents as the authorized work needs, within the
+  four-active-subagent limit below. Do not ask for repeated per-turn approval.
+- Scope covers the localswim plan and authorized work in its maintained schedule.
+  It does not extend to unrelated projects or tasks.
+- At most four direct subagents may be active concurrently, excluding the parent.
+  This plan-specific ceiling supersedes the global 16; depth remains 1, with no
+  grandchildren. Finished agents' slots may be reused during the same turn.
+- Replace finished authors with fresh independent reviewers as slots open;
+  do not reserve idle author/reviewer pairs. Review-only turns may start four
+  independent reviewers.
+- Preserve independent review, required verification, and Terry's control of
+  Completed. Authorization does not expand the approved work scope.
+
+After this plan is complete, the default requirement for fresh per-turn Astra
+approval applies again outside any other explicit standing authorization.
 
 ## Code conventions
 
