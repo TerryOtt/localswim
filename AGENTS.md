@@ -191,16 +191,17 @@ or unrelated work. The primary retains responsibility for integration, required
 verification, commits/pushes and handoff. Respect a lower current-session limit;
 persisted configuration applies when loaded.
 
-## Localswim work-plan Astra authorization
+## Localswim work-plan model policy
 
-Effective 2026-10-19, Terry explicitly authorizes GPT-6 Astra (`gpt-6-astra`)
-with Medium reasoning (`medium`) on every turn until work-plan #0112 is completed
-or Terry revokes this authorization.
+Effective 2026-10-19, Terry revoked the former Astra / Medium authorization
+for work-plan #0112 because of its budget cost. Use GPT-6.1 Sol
+(`gpt-6.1-sol`) with High reasoning (`high`) instead for the plan's substantive
+reviews and fresh independent report validation.
 
-- Use as many Astra / Medium subagents as the authorized work needs, within the
-  four-active-subagent limit below. Do not ask for repeated per-turn approval.
-- Scope covers the localswim plan and authorized work in its maintained schedule.
-  It does not extend to unrelated projects or tasks.
+- No standing Astra authorization remains for this plan. Historical approval
+  records, including Completed #0057, do not authorize new Astra work.
+- Apply Sol / High to the remaining plan and its maintained schedule; this does
+  not authorize unrelated work or implementation of unapproved recommendations.
 - At most four direct subagents may be active concurrently, excluding the parent.
   This plan-specific ceiling supersedes the global 16; depth remains 1, with no
   grandchildren. Finished agents' slots may be reused during the same turn.
@@ -208,10 +209,10 @@ or Terry revokes this authorization.
   do not reserve idle author/reviewer pairs. Review-only turns may start four
   independent reviewers.
 - Preserve independent review, required verification, and Terry's control of
-  Completed. Authorization does not expand the approved work scope.
+  Completed. Keep historical comments and completed review evidence unchanged.
 
-After this plan is complete, the default requirement for fresh per-turn Astra
-approval applies again outside any other explicit standing authorization.
+Outside this plan, the existing role-based model policy and requirement for
+fresh per-turn owner approval before any Astra use remain unchanged.
 
 ## Code conventions
 
