@@ -105,7 +105,18 @@ class Workspace:
         self.publisher = gateway_publish.GatewayPublisher(self.settings)
         self._children: dict[pathlib.Path, subprocess.Popen[bytes]] = {}
         self._launch_ids: dict[pathlib.Path, str] = {}
-        self._lock = threading.RLock()
+        self._bookkeeping_lock = threading.Lock()
+        self._board_locks: dict[pathlib.Path, threading.Lock] = {}
+        self._closed = False
+
+    def _board_lock(self, path: pathlib.Path) -> threading.Lock:
+        # Never acquire a board lock while holding bookkeeping. Once acquired,
+        # a board lock may briefly take bookkeeping to register/snapshot children.
+        with self._bookkeeping_lock:
+            if self._closed:
+                msg = "workspace is closed"
+                raise OSError(msg)
+            return self._board_locks.setdefault(path, threading.Lock())
 
     def _paths(self) -> dict[str, pathlib.Path]:
         found: dict[str, pathlib.Path] = {}
@@ -299,7 +310,11 @@ class Workspace:
             msg = "board is outside the workspace"
             raise ValueError(msg)
         board_state.load(path)
-        with self._lock:
+        with self._board_lock(path):
+            with self._bookkeeping_lock:
+                if self._closed:
+                    msg = "workspace is closed"
+                    raise OSError(msg)
             while True:
                 try:
                     return self._endpoint_under_gate(path)
@@ -331,8 +346,9 @@ class Workspace:
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 env=environment,
             )
-            self._children[path] = child
-            self._launch_ids[path] = launch_id
+            with self._bookkeeping_lock:
+                self._children[path] = child
+                self._launch_ids[path] = launch_id
             deadline = time.monotonic() + START_WAIT_SECONDS
             while time.monotonic() < deadline:
                 try:
@@ -366,41 +382,62 @@ class Workspace:
 
     def close(self) -> None:
         """Explicitly stop only children launched here; normal gateway exit leaves writers live."""
-        for path, child in self._children.items():
-            try:
-                raw = cast(
-                    "board_state.JsonObject",
-                    json.loads(
-                        board_state.service_descriptor_path(path).read_text(encoding="utf-8")
-                    ),
-                )
-                port, token = raw.get("port"), raw.get("token")
-                if (
-                    isinstance(port, int)
-                    and isinstance(token, str)
-                    and raw.get("workspaceLaunch") == self._launch_ids[path]
-                    and self._existing(path)
-                ):
-                    connection = http.client.HTTPConnection(
-                        api_endpoint.HOST, port, timeout=REQUEST_TIMEOUT
-                    )
-                    try:
-                        connection.request(
-                            "POST",
-                            board_state.API_PREFIX + "/shutdown",
-                            headers={"Authorization": "Bearer " + token},
-                        )
-                        connection.getresponse().read()
-                    finally:
-                        connection.close()
-                self._wait_child_stopped(path, child)
-            except OSError, ValueError, http.client.HTTPException, subprocess.TimeoutExpired:
-                child.terminate()
-                child.wait(timeout=REQUEST_TIMEOUT)
-        self._children.clear()
-        self._launch_ids.clear()
+        with self._bookkeeping_lock:
+            self._closed = True
+            boards = tuple(self._board_locks.items())
+        for path, lock in boards:
+            # An in-flight acquisition may still be registering its child. Wait
+            # without bookkeeping held, then retain ownership until cleanup succeeds.
+            with lock:
+                with self._bookkeeping_lock:
+                    child = self._children.get(path)
+                    launch_id = self._launch_ids.get(path)
+                if child is not None and launch_id is not None:
+                    self._close_child(path, child, launch_id)
+                    with self._bookkeeping_lock:
+                        if (
+                            self._children.get(path) is child
+                            and self._launch_ids.get(path) == launch_id
+                        ):
+                            del self._children[path]
+                            del self._launch_ids[path]
 
-    def _wait_child_stopped(self, path: pathlib.Path, child: subprocess.Popen[bytes]) -> None:
+    def _close_child(
+        self, path: pathlib.Path, child: subprocess.Popen[bytes], launch_id: str
+    ) -> None:
+        """Clean up one stable ownership snapshot without holding bookkeeping."""
+        try:
+            raw = cast(
+                "board_state.JsonObject",
+                json.loads(board_state.service_descriptor_path(path).read_text(encoding="utf-8")),
+            )
+            port, token = raw.get("port"), raw.get("token")
+            if (
+                isinstance(port, int)
+                and isinstance(token, str)
+                and raw.get("workspaceLaunch") == launch_id
+                and self._existing(path)
+            ):
+                connection = http.client.HTTPConnection(
+                    api_endpoint.HOST, port, timeout=REQUEST_TIMEOUT
+                )
+                try:
+                    connection.request(
+                        "POST",
+                        board_state.API_PREFIX + "/shutdown",
+                        headers={"Authorization": "Bearer " + token},
+                    )
+                    connection.getresponse().read()
+                finally:
+                    connection.close()
+            self._wait_child_stopped(path, child, launch_id)
+        except OSError, ValueError, http.client.HTTPException, subprocess.TimeoutExpired:
+            child.terminate()
+            child.wait(timeout=REQUEST_TIMEOUT)
+
+    def _wait_child_stopped(
+        self, path: pathlib.Path, child: subprocess.Popen[bytes], launch_id: str
+    ) -> None:
         child.wait(timeout=REQUEST_TIMEOUT)
         deadline = time.monotonic() + REQUEST_TIMEOUT
         descriptor = board_state.service_descriptor_path(path)
@@ -411,7 +448,7 @@ class Workspace:
                 )
             except OSError, ValueError:
                 return
-            if raw.get("workspaceLaunch") != self._launch_ids[path]:
+            if raw.get("workspaceLaunch") != launch_id:
                 return
             time.sleep(START_POLL_SECONDS)
         msg = "owned board service did not release its descriptor"

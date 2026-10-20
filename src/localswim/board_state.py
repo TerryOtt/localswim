@@ -205,7 +205,7 @@ class User:
     color: str
 
 
-def as_actor(value: str) -> Actor:
+def as_actor(value: str, users: tuple[User, ...] | None = None) -> Actor:
     """Turn a caller-supplied string into a known actor, or refuse it. Card #0013's
     side finding.
 
@@ -228,10 +228,12 @@ def as_actor(value: str) -> Actor:
     and the board never stores two spellings of one person.
     """
     name = value.strip().lower()
-    for user in USERS:
+    selected_users = USERS if users is None else users
+    for user in selected_users:
         if user.id == name:
             return user.id
-    raise BoardError(f"unknown actor {value!r}; want one of {', '.join(ACTORS)}")
+    choices = ACTORS if users is None else tuple(user.id for user in selected_users)
+    raise BoardError(f"unknown actor {value!r}; want one of {', '.join(choices)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1122,8 +1124,10 @@ def install_users(  # noqa: PLR0913, PLR0917 -- one complete user configuration
     default_owner: str,
     where: str,
     policy: TransitionPolicy | None = None,
+    *,
+    publish: bool = True,
 ) -> None:
-    """Bind the cast, and check `rules.json` only names people this board knows.
+    """Validate the cast against policy, optionally publishing legacy ambient context.
 
     **Card #0083. This is where the two config files meet.** Lanes and edges are the
     TOOL's behavior and stay beside the code; the people are the DEPLOYMENT's and live
@@ -1143,6 +1147,8 @@ def install_users(  # noqa: PLR0913, PLR0917 -- one complete user configuration
 
     active = policy or _POLICY
     active.validate_actors({u.id for u in users}, where, configured_edge_actors)
+    if not publish:
+        return
 
     USERS = users
     ACTORS = tuple(u.id for u in users)
@@ -2500,8 +2506,13 @@ class Board:
         raw: JsonValue,
         where: str,
         policy: TransitionPolicy | None = None,
+        *,
+        install_context: bool = True,
     ) -> Self:
-        """Validate and build. **The ONLY place a malformed board can enter.**
+        """Structurally validate and build; callers separately verify audit invariants.
+
+        ``install_context=False`` keeps isolated live candidates from publishing
+        legacy ambient actor defaults. The returned board owns its policy and users.
 
         **It refuses rather than repairs.** Silently normalizing an unknown state or a
         duplicate id would hide a bug in whatever wrote it, which is exactly how the
@@ -2533,7 +2544,15 @@ class Board:
         default_owner = raw.get("defaultOwner") or cli_user
         if default_owner not in {u.id for u in users}:
             raise BoardError(f"{where}: defaultOwner names unknown user {default_owner!r}")
-        install_users(users, browser_user, cli_user, str(default_owner), where, active_policy)
+        install_users(
+            users,
+            browser_user,
+            cli_user,
+            str(default_owner),
+            where,
+            active_policy,
+            publish=install_context,
+        )
 
         items: list[Item] = []
         seen: set[str] = set()
@@ -3500,10 +3519,21 @@ class Board:
         return made, missing
 
 
-def load(path: pathlib.Path, policy: TransitionPolicy | None = None) -> Board:
-    """Read, parse and VALIDATE a board file."""
+def load(
+    path: pathlib.Path,
+    policy: TransitionPolicy | None = None,
+    *,
+    install_context: bool = True,
+) -> Board:
+    """Read and structurally validate a board without replaying audit invariants.
+
+    Offline callers may inspect problems separately with ``verify``. Live
+    BoardStore admission disables ambient actor installation and also verifies
+    before publishing a disk snapshot. Legacy offline context installation is
+    retained by default.
+    """
     raw = _read_json(pathlib.Path(path))
-    return Board.from_json(raw, str(path), policy)
+    return Board.from_json(raw, str(path), policy, install_context=install_context)
 
 
 def service_descriptor_path(path: pathlib.Path) -> pathlib.Path:
@@ -3582,6 +3612,8 @@ def locked(path: pathlib.Path) -> Generator[None]:
 def edit(
     path: pathlib.Path,
     policy: TransitionPolicy | None = None,
+    *,
+    install_context: bool = True,
 ) -> Generator[Board]:
     """Load, hand over the board, then save -- all under one lock.
 
@@ -3593,7 +3625,7 @@ def edit(
     save lands.
     """
     with locked(path):
-        board = load(path, policy)
+        board = load(path, policy, install_context=install_context)
         yield board
         save(board, path)
 

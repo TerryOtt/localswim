@@ -1035,7 +1035,7 @@ class RevisionConflict(board_state.BoardError):
 
 
 class BoardStore:
-    """Serialize board commands and publish only snapshots that reached disk."""
+    """Serialize commands and publish only completely admitted disk snapshots."""
 
     def __init__(
         self,
@@ -1045,29 +1045,75 @@ class BoardStore:
         self.path = path
         self._external_policy = policy is not None
         self._mutex = threading.RLock()
-        self._board = board_state.load(path, policy)
+        self.admission_error: str | None = None
+        self._board = self._admit(policy)
         self.policy = self._board.policy
-        self._reconcile_dependency_priorities()
+        self._policy_observation = self.policy
 
-    def _reconcile_dependency_priorities(self) -> None:
-        """Adopt the new rule through one audited, revision-checked transaction."""
-        if not self._board.dependency_priority_promotions():
-            return
+    @staticmethod
+    def _verify_candidate(candidate: board_state.Board) -> bool:
+        """Verify isolated admission after only the supported audited promotions.
 
-        def reconcile(board: board_state.Board) -> str:
-            promoted = board.enforce_dependency_priorities(board.cli_user)
-            return f"promoted {len(promoted)} blocker(s)"
+        Reconciliation stays in memory until all audit checks pass. Thus an audit
+        defect combined with a priority floor never causes a repair write.
+        """
+        promoted = candidate.enforce_dependency_priorities(candidate.cli_user)
+        if problems := candidate.verify():
+            raise board_state.BoardError("disk snapshot rejected: " + "; ".join(problems))
+        return bool(promoted)
 
-        self.execute(self._board.revision, reconcile)
+    def _reconcile_candidate(
+        self, policy: board_state.TransitionPolicy | None, expected_revision: int
+    ) -> board_state.Board:
+        """Re-read policy and audits inside the revision-checked writer transaction."""
+        with board_state.edit(self.path, policy, install_context=False) as current:
+            if current.revision != expected_revision:
+                raise RevisionConflict("disk snapshot changed during admission")
+            if not self._verify_candidate(current):
+                raise RevisionConflict("disk snapshot no longer needs reconciliation")
+            current.revision += 1
+        return current
+
+    def _read_admitted(self, policy: board_state.TransitionPolicy | None) -> board_state.Board:
+        """Retry boundedly when reconciliation meets a concurrent revision change."""
+        for _attempt in range(3):
+            candidate = board_state.load(self.path, policy, install_context=False)
+            if not self._verify_candidate(candidate):
+                return candidate
+            try:
+                return self._reconcile_candidate(policy, candidate.revision)
+            except RevisionConflict:
+                continue
+        raise board_state.BoardError("disk snapshot kept changing during admission; retry")
+
+    def _admit(self, policy: board_state.TransitionPolicy | None) -> board_state.Board:
+        """Parse, verify, and transactionally reconcile before publication."""
+        try:
+            admitted = self._read_admitted(policy)
+        except (OSError, board_state.BoardError, ValueError) as exc:
+            retained = (
+                "; retaining last accepted board and policy" if hasattr(self, "_board") else ""
+            )
+            self.admission_error = f"disk admission failed: {exc}{retained}"
+            raise board_state.BoardError(self.admission_error) from exc
+        self.admission_error = None
+        return admitted
 
     def snapshot(self) -> board_state.Board:
-        """Return an isolated current snapshot, refreshing valid external edits."""
+        """Return an admitted snapshot, or report rejected disk state.
+
+        Retained accepted memory never counts as a successful disk health read.
+        """
         with self._mutex:
-            board = board_state.load(self.path, self.policy if self._external_policy else None)
-            self.policy = board.policy
+            board = self._admit(self.policy if self._external_policy else None)
             self._board = board
-            self._reconcile_dependency_priorities()
-            return copy.deepcopy(self._board)
+            self.policy = board.policy
+            return copy.deepcopy(board)
+
+    def credential_actor(self, *, browser: bool) -> str:
+        """Resolve service credentials from this store's accepted cast."""
+        with self._mutex:
+            return self._board.browser_user if browser else self._board.cli_user
 
     def execute(
         self, expected_revision: int, command: Callable[[board_state.Board], str]
@@ -1075,7 +1121,7 @@ class BoardStore:
         """Apply one command under the file lock and commit one new revision."""
         with self._mutex:
             active = self.policy if self._external_policy else None
-            with board_state.edit(self.path, active) as candidate:
+            with board_state.edit(self.path, active, install_context=False) as candidate:
                 if candidate.revision != expected_revision:
                     raise RevisionConflict(
                         f"board revision is {candidate.revision}, not "
@@ -1149,19 +1195,28 @@ class BoardStore:
         return result, revision, file
 
     def reload_policy_if_changed(self) -> str | None:
-        """Adopt a complete embedded policy edit without changing other stores."""
+        """Admit the board and policy together; keep accepted state on refusal."""
         with self._mutex:
+            message = None
+            policy = None
             if self._external_policy:
-                self._board = board_state.load(self.path, self.policy)
                 actors = {user.id for user in self._board.users}
                 configured = frozenset((self._board.browser_user, self._board.cli_user))
-                self.policy, message = self.policy.reload_if_changed(actors, configured)
-                self._board.policy = self.policy
-                return message
-            fresh = board_state.load(self.path)
+                policy, message = self._policy_observation.reload_if_changed(actors, configured)
+                if policy.to_json() == self.policy.to_json():
+                    # Track a refused standalone-file stamp separately from accepted
+                    # board/policy publication, including while the disk board is bad.
+                    self._policy_observation = policy
+            try:
+                fresh = self._admit(policy)
+            except board_state.BoardError:
+                return f"{message}; {self.admission_error}" if message else self.admission_error
             changed = fresh.policy.to_json() != self.policy.to_json()
             self._board = fresh
             self.policy = fresh.policy
+            if self._external_policy:
+                self._policy_observation = self.policy
+                return message
             return f"embedded policy reloaded: {len(self.policy.states)} lanes" if changed else None
 
 
@@ -1394,7 +1449,7 @@ def readable_on_white(color: str) -> str:
     return "#000000"
 
 
-def user_css() -> str:
+def user_css(board: board_state.Board | None = None) -> str:
     """One color variable and four rules per configured user. **Card #0072.**
 
     **The stylesheet named `terry` and `claude` in nine places until this card**, so a
@@ -1410,16 +1465,18 @@ def user_css() -> str:
     today; the whole point of the card is that it stops being a fixed number.
     """
     lines: list[str] = []
-    for u in board_state.USERS:
+    users = board.users if board is not None else board_state.USERS
+    browser_user = board.browser_user if board is not None else board_state.BROWSER_USER
+    for u in users:
         lines.append(f"  --user-{u.id}: {u.color};")
         # **A second variable per user, card #0089.** The accent paints borders and
         # fills, where a light color is fine. The ink paints NAMES on white, where it
         # is not. See `readable_on_white`.
         lines.append(f"  --user-{u.id}-ink: {readable_on_white(u.color)};")
-    lines.append(f"  --accent: var(--user-{board_state.BROWSER_USER});")
+    lines.append(f"  --accent: var(--user-{browser_user});")
     out: list[str] = [":root {", *lines, "}"]
 
-    for u in board_state.USERS:
+    for u in users:
         var = f"var(--user-{u.id})"
         ink = f"var(--user-{u.id}-ink)"
         out += [
@@ -4415,6 +4472,13 @@ def _report_rule_gaps(policy: board_state.TransitionPolicy) -> None:
     print("      Why may THIS actor make THIS move? Each row answers for itself.")
 
 
+def live_snapshot() -> board_state.Board:
+    """Require the initialized store; HTTP never falls back to structural parsing."""
+    if STORE is None:
+        raise board_state.BoardError("board store is not initialized")
+    return STORE.snapshot()
+
+
 def payload() -> bytes:
     """The board as JSON for the page, or an `error` the page renders as a banner.
 
@@ -4422,7 +4486,7 @@ def payload() -> bytes:
     because a blank tab and a broken parser look identical and one of them is a lie.
     """
     try:
-        board = STORE.snapshot() if STORE is not None else board_state.load(BOARD_PATH)
+        board = live_snapshot()
     except (board_state.BoardError, OSError, json.JSONDecodeError) as exc:
         return json.dumps({"lanes": [], "edges": [], "counts": {}, "error": str(exc)}).encode(
             "utf-8"
@@ -4717,7 +4781,7 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
             actor,
             priority=str(body.get("priority") or policy.default_priority),
             detail=str(body.get("detail") or ""),
-            owner=board_state.as_actor(str(body.get("owner") or board_state.DEFAULT_OWNER)),
+            owner=board_state.as_actor(str(body.get("owner") or board.default_owner), board.users),
         )
         for kind, other in relationships:
             board.link(item_id, kind, other, actor)
@@ -4739,7 +4803,7 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
     if action == "comment":
         return board.comment(ref, str(body["text"]), actor)
     if action == "assign":
-        return board.assign(ref, board_state.as_actor(str(body["owner"])), actor)
+        return board.assign(ref, board_state.as_actor(str(body["owner"]), board.users), actor)
     if action == "priority":
         return board.set_priority(ref, str(body["priority"]).upper(), actor)
     if action == "subject":
@@ -4927,9 +4991,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Map a bearer credential to a configured actor; never trust body data."""
         auth = self.headers.get("Authorization", "")
         if auth == f"Bearer {BROWSER_TOKEN}":
-            return board_state.BROWSER_USER
+            return STORE.credential_actor(browser=True) if STORE is not None else None
         if auth == f"Bearer {CLI_TOKEN}":
-            return board_state.CLI_USER
+            return STORE.credential_actor(browser=False) if STORE is not None else None
         return None
 
     def _expected_revision(self) -> int | None:
@@ -4950,7 +5014,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
-            board = STORE.snapshot() if STORE is not None else board_state.load(BOARD_PATH)
+            board = live_snapshot()
             item = board.find(command[1])
             file = next(file for file in item.attachments if file.id == command[3])
             blob = attachments.read_blob(BOARD_PATH, item.ticket, file)
@@ -5006,10 +5070,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         try:
             mtime = BOARD_PATH.stat().st_mtime
-            if STORE is not None:
-                STORE.snapshot()
-            else:
-                board_state.load(BOARD_PATH)
+            live_snapshot()
         except (OSError, board_state.BoardError, json.JSONDecodeError) as exc:
             # **`build` rides on the FAILURE path too.** An unreadable board and a
             # stale tab are independent problems, and the page must be able to tell
@@ -5041,12 +5102,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif route == API_PREFIX + "/status":
             self._status_get()
         elif route == API_PREFIX + "/browser-session":
-            if STORE is not None:
-                STORE.snapshot()
+            board = live_snapshot()
             self._json(
                 {
                     "token": BROWSER_TOKEN,
-                    "userCSS": user_css(),
+                    "userCSS": user_css(board),
                     "boardIdentity": hashlib.sha256(
                         str(BOARD_PATH.resolve()).casefold().encode("utf-8")
                     ).hexdigest(),
@@ -5085,8 +5145,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # **A broken board still serves its page.** The title falls back and
             # `/api/v001/board` carries the real error to the banner.
             title = "Work board"
+            css = ""
             with contextlib.suppress(board_state.BoardError, OSError, json.JSONDecodeError):
-                title = board_state.load(BOARD_PATH).project or title
+                board = live_snapshot()
+                title = board.project or title
+                css = user_css(board)
             # **`%BUILD%` is baked into the page at request time**, so the constant the
             # JavaScript holds describes the code THIS tab loaded -- which is the whole
             # comparison. Fetching it later would just re-read the server and always agree.
@@ -5102,7 +5165,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("%BRANDURI%", brand_data_uri())
                 # **Built per request, not once at import**, so a board cast change
                 # reaches the next page load without a restart.
-                .replace("%USERCSS%", user_css())
+                .replace("%USERCSS%", css)
                 .replace("%TITLE%", html.escape(title))
             )
             self._send(page.encode("utf-8"), "text/html; charset=utf-8")
@@ -5247,10 +5310,9 @@ def _serve_owned_board(args: argparse.Namespace, lease: service_ownership.Writer
 
     port = board_state.DEFAULT_PORT if args.port is None else args.port
     print(f"Serving {BOARD_PATH}")
-    board: board_state.Board | None = None
     try:
-        board = board_state.load(BOARD_PATH)
         STORE = BoardStore(BOARD_PATH)
+        board = STORE.snapshot()
         if args.port is None:
             port = board.port
         print(f"  project   : {board.project or '(unnamed)'}")
@@ -5264,12 +5326,10 @@ def _serve_owned_board(args: argparse.Namespace, lease: service_ownership.Writer
                 print(f"      {problem}")
         _report_rule_gaps(board.policy)
     except (board_state.BoardError, OSError, json.JSONDecodeError) as exc:
-        # **Loud, and it still serves.** The page renders the same message, so the
-        # failure is visible in both places rather than as an empty board.
-        print(f"  WARNING: {exc}")
-        print("  The page will say so rather than look empty.")
+        STORE = None
+        raise SystemExit(f"ERROR: board admission failed: {exc}") from exc
 
-    bad_edges = board.policy.check_edges() if board is not None else []
+    bad_edges = board.policy.check_edges()
     if bad_edges:
         print(f"  PERMISSION TABLE INCONSISTENT, {len(bad_edges)} problem(s):")
         for problem in bad_edges:
@@ -5282,8 +5342,9 @@ def _serve_owned_board(args: argparse.Namespace, lease: service_ownership.Writer
 
     print(f"  view      : http://{HOST}:{port}/")
     print(f"  polling   : every {POLL_MS} ms, repaints only when the file changes")
-    print(f"  {board_state.USER_LABEL[board_state.BROWSER_USER]} may drag:")
-    for a, b in sorted(board_state.BROWSER_EDGES):
+    browser = next(user for user in board.users if user.id == board.browser_user)
+    print(f"  {browser.label} may drag:")
+    for a, b in board.policy.edges_for(board.browser_user):
         print(f"      {a} -> {b}")
     # **A DAEMON thread, so Ctrl+C still stops the server.** A push in flight is a
     # `git` subprocess that finishes on its own; the worst case at shutdown is a commit

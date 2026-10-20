@@ -63,6 +63,11 @@ native board monitoring is an optional extra.
 - Treat each schema-4 board's embedded policy as executable permission data, not UI
   decoration. Initialization resolves lane and actor display names once into stable
   IDs; runtime authorization uses only those persisted IDs.
+  Live admission must verify a complete isolated candidate before publishing its board
+  and policy; invalid audits must not trigger reconciliation writes. Preserve accepted
+  memory on refusal without claiming disk health, fail startup before serving invalid
+  state, and resolve HTTP actors/owners from the accepted store context. Keep ordinary
+  offline structural parsing and supported legacy audit allowances distinct.
 - Generate a lane ID once from its initial display name, reject collisions, and never
   regenerate it after a label rename. Use the distinct offline label-rename and lane-ID
   migration operations for those different intents.
@@ -134,6 +139,10 @@ native board monitoring is an optional extra.
   treat a temporary restart gap as permission to launch another writer or stop a foreign
   listener. A released crash lease permits recovery. Legacy writers without the lease
   require one-time consolidation; overwritten descriptors cannot identify all old writers.
+  Serialize endpoint recovery per canonical board. Keep child/launch-ID bookkeeping
+  brief; never wait for board acquisition, network, process startup or cleanup under
+  that shared lock. Explicit close freezes new acquisitions and retains each exact
+  owned pair until cleanup succeeds, so failures remain retryable.
   New gateways default to publishing disabled; `--autopush` persists true in the gateway
   configuration and applies to newly owned children. Retain that setting across restarts
   without the flag. Existing services retain their own publishing policy. Publish only

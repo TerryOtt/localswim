@@ -6,8 +6,10 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
-from typing import TYPE_CHECKING
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -215,3 +217,237 @@ def test_gateway_owns_actual_writer_process_and_termination_releases_lease(
         descriptor_path.unlink(missing_ok=True)
     finally:
         instance.close()
+
+
+def test_busy_board_recovery_does_not_block_another_healthy_board(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = tmp_path / "first.json", tmp_path / "second.json"
+    make_board(first, "Busy")
+    make_board(second, "Healthy")
+    instance = workspace.Workspace(tmp_path)
+    waiting, release = threading.Event(), threading.Event()
+    expected = workspace.Endpoint(12345, "browser", "")
+
+    def existing(path: pathlib.Path) -> workspace.Endpoint | None:
+        if path == first:
+            if not waiting.is_set():
+                waiting.set()
+                return None
+            assert release.wait(5), "busy recovery was not released"
+        return expected
+
+    monkeypatch.setattr(instance, "_existing", existing)
+    monkeypatch.setattr(subprocess, "Popen", reject_spawn)
+    with ThreadPoolExecutor(max_workers=2) as pool, service_ownership.writer_claim(first):
+        blocked = pool.submit(instance.endpoint, first)
+        try:
+            assert waiting.wait(5)
+            healthy = pool.submit(instance.endpoint, second)
+            assert healthy.result(timeout=5) == expected
+            assert not blocked.done()
+        finally:
+            release.set()
+        assert blocked.result(timeout=5) == expected
+    instance.close()
+
+
+def test_equivalent_board_requests_share_one_owned_launch(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "One launch")
+    instance = workspace.Workspace(tmp_path)
+    spawning, release, second_acquiring = (threading.Event() for _ in range(3))
+    expected = workspace.Endpoint(12345, "browser", "")
+    launches = 0
+    calls = 0
+    original = instance._board_lock
+
+    class Child:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    def spawn(*_args: object, **_kwargs: object) -> Child:
+        nonlocal launches
+        launches += 1
+        spawning.set()
+        assert release.wait(5)
+        return Child()
+
+    def lock_for(board: pathlib.Path) -> threading.Lock:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            second_acquiring.set()
+        return original(board)
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint | None:
+        return expected if release.is_set() else None
+
+    def clean(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(instance, "_board_lock", lock_for)
+    monkeypatch.setattr(instance, "_existing", existing)
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(instance, "_close_child", clean)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(instance.endpoint, path)
+        try:
+            assert spawning.wait(5)
+            second = pool.submit(instance.endpoint, tmp_path / "unused" / ".." / "board.json")
+            assert second_acquiring.wait(5)
+            assert not second.done()
+            assert launches == 1
+        finally:
+            release.set()
+        assert first.result(timeout=5) == second.result(timeout=5) == expected
+    assert len(instance._children) == len(instance._launch_ids) == 1
+    instance.close()
+    assert not instance._children
+    assert not instance._launch_ids
+
+
+def test_close_waits_for_child_registration_without_holding_bookkeeping(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Closing launch")
+    instance = workspace.Workspace(tmp_path)
+    spawning, release, closing, cleanup = (threading.Event() for _ in range(4))
+    board_lock = threading.Lock()
+    expected = workspace.Endpoint(12345, "browser", "")
+    cleaned: list[str] = []
+
+    class ObservedLock:
+        def __enter__(self) -> None:
+            if spawning.is_set():
+                closing.set()
+            board_lock.acquire()
+
+        def __exit__(self, *_args: object) -> None:
+            board_lock.release()
+
+    class Child:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    def spawn(*_args: object, **_kwargs: object) -> Child:
+        spawning.set()
+        assert release.wait(5)
+        return Child()
+
+    def clean(_path: pathlib.Path, _child: object, launch_id: str) -> None:
+        assert instance._bookkeeping_lock.acquire(blocking=False)
+        instance._bookkeeping_lock.release()
+        cleaned.append(launch_id)
+        cleanup.set()
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint | None:
+        return expected if release.is_set() else None
+
+    instance._board_locks[path.resolve()] = cast("threading.Lock", ObservedLock())
+    monkeypatch.setattr(instance, "_existing", existing)
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(instance, "_close_child", clean)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        acquisition = pool.submit(instance.endpoint, path)
+        try:
+            assert spawning.wait(5)
+            shutdown = pool.submit(instance.close)
+            assert closing.wait(5)
+            assert not shutdown.done()
+            assert instance._bookkeeping_lock.acquire(blocking=False)
+            instance._bookkeeping_lock.release()
+        finally:
+            release.set()
+        assert acquisition.result(timeout=5) == expected
+        shutdown.result(timeout=5)
+    assert cleanup.is_set()
+    assert len(cleaned) == 1
+    assert not instance._children
+    assert not instance._launch_ids
+    with pytest.raises(OSError, match="closed"):
+        instance.endpoint(path)
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_close_preserves_replacement_service_and_bounds_owned_child_cleanup(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, timeout: bool
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Replacement writer")
+    instance = workspace.Workspace(tmp_path)
+    instance._board_lock(path.resolve())
+    descriptor = board_state.service_descriptor_path(path)
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    document = {"port": 12345, "token": "replacement-token", "workspaceLaunch": "replacement"}
+    descriptor.write_text(json.dumps(document), encoding="utf-8")
+    waits: list[float] = []
+    terminations: list[bool] = []
+
+    class Child:
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            waits.append(timeout)
+            if len(waits) == 1 and timeout_child:
+                raise subprocess.TimeoutExpired("owned-child", timeout)
+            return 0
+
+        @staticmethod
+        def terminate() -> None:
+            terminations.append(True)
+
+    timeout_child = timeout
+    instance._children[path.resolve()] = cast("subprocess.Popen[bytes]", Child())
+    instance._launch_ids[path.resolve()] = "original"
+    monkeypatch.setattr(instance, "_existing", reject_spawn)
+    monkeypatch.setattr(workspace.http.client, "HTTPConnection", reject_spawn)
+    instance.close()
+    assert json.loads(descriptor.read_text(encoding="utf-8")) == document
+    assert waits == [workspace.REQUEST_TIMEOUT] * (2 if timeout else 1)
+    assert terminations == ([True] if timeout else [])
+    assert not instance._children
+    assert not instance._launch_ids
+
+
+def test_close_retains_owned_pair_after_cleanup_failure_for_retry(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Retry cleanup")
+    instance = workspace.Workspace(tmp_path)
+    instance._board_lock(path.resolve())
+    attempts: list[str] = []
+
+    class Child:
+        @staticmethod
+        def terminate() -> None:
+            assert instance._bookkeeping_lock.acquire(blocking=False)
+            instance._bookkeeping_lock.release()
+            attempts.append("terminate")
+            if len(attempts) == 1:
+                msg = "controlled transient termination failure"
+                raise PermissionError(msg)
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == workspace.REQUEST_TIMEOUT
+            return 0
+
+    child = cast("subprocess.Popen[bytes]", Child())
+    instance._children[path.resolve()] = child
+    instance._launch_ids[path.resolve()] = "original"
+    with pytest.raises(PermissionError, match="controlled transient"):
+        instance.close()
+    assert instance._children[path.resolve()] is child
+    assert instance._launch_ids[path.resolve()] == "original"
+    with pytest.raises(OSError, match="closed"):
+        instance.endpoint(path)
+    instance.close()
+    assert attempts == ["terminate", "terminate"]
+    assert not instance._children
+    assert not instance._launch_ids

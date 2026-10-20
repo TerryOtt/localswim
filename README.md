@@ -36,6 +36,11 @@ The boards/ directory is ignored by Git and is the only permitted location for b
 files kept inside this public checkout. A board may instead live in a separate
 repository or directory.
 
+Live services verify a snapshot's existing audit rules before exposing its board and
+policy. Rejected external edits retain the last accepted memory but report a failed
+disk read; they do not produce a healthy status or silently repair invalid history.
+A later valid snapshot can be admitted normally.
+
 ## Multiple boards in one workspace
 
 Start localswim with the directory containing your private boards:
@@ -49,6 +54,9 @@ workspace defaults to **http://127.0.0.1:8810/**. It discovers schema-4 boards b
 directory and presents one active board at a time. Existing healthy board services are
 reused; absent services start on available loopback ports. If a writer is restarting,
 the gateway waits for its rendezvous to recover instead of starting another writer.
+Recovery is serialized separately for each canonical board, so one waiting board does
+not hold up another healthy board. Explicit workspace cleanup closes new acquisitions;
+an owned child whose cleanup fails remains available for a later cleanup retry.
 The CLI continues to use each board's JSON path and its own service descriptor.
 
 The Attention sidebar gives every project three fixed count columns: **Blocked** (red),

@@ -37,6 +37,25 @@ The important boundary is `BoardStore.execute()`: every live mutation is seriali
 checked against the revision the caller saw, applied to an isolated candidate, audited,
 saved, and only then published as the current in-memory snapshot.
 
+Live reads also have an admission boundary. `BoardStore` initialization, snapshots,
+and policy reload parse an isolated candidate without installing ambient actors,
+apply only the existing audited dependency promotions in memory, and verify existing
+audit invariants before publishing board and policy together. A candidate needing
+promotions is read and verified again inside a revision-checked transaction before
+one saved revision is adopted. An invalid audit never triggers a repair write.
+
+Rejected disk state leaves accepted memory intact but raises a read error and records
+`admission_error`; retained memory cannot make status healthy. Startup refuses before
+serving an unadmitted board, and HTTP reads have no structural-load fallback. Credential
+actors, owner normalization, user styles and page metadata use the accepted store
+context. Existing once-only standalone-policy refusal diagnostics remain observable,
+including when the board is rejected at the same time.
+
+Offline `load()` and `Board.from_json()` remain structural parsing operations, with
+verification intentionally separate and legacy ambient installation enabled by default.
+The live path explicitly uses `install_context=False`; this does not implement a pure
+domain extraction, new audit rules, a generation protocol or supported backup restore.
+
 ## Repository map
 
 | Path | Responsibility |
@@ -99,6 +118,16 @@ hot restarts. Missing or refused rendezvous while the writer lease is busy trigg
 bounded recovery wait (15 seconds), never a duplicate writer. Healthy matching legacy
 services are reused even when they predate the lease. A crash releases the OS lease so a new
 child can start; an unrelated listener is never terminated or adopted.
+
+Each canonical board has its own acquisition lock for endpoint recovery and startup.
+A separate short bookkeeping lock protects the persistent lock map and child/launch-ID
+pairs. Never wait for a board lock, probe the network, spawn, wait for, or clean up a
+child while holding bookkeeping. Acquire board ownership before briefly entering
+bookkeeping, never the reverse. Unrelated boards can therefore recover independently.
+Explicit `Workspace.close()` closes new acquisitions, waits outside bookkeeping for
+in-flight registration, and removes an owned pair only after its cleanup succeeds.
+A failed cleanup remains retryable; replacement identities are never shut down.
+
 When no writer owns the board, it starts a child on an ephemeral loopback port;
 that child publishes its actual port in the usual descriptor, so existing CLI mutations
 still reach the same sole writer. The gateway never writes board JSON or attachment
@@ -739,11 +768,11 @@ The suite spans these boundaries:
 | `test_archiving.py` | Reversible visibility, archive persistence and audit, intact relationships, and filtered queries. |
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |
 | `test_policy.py` | Policy immutability, strict edge parsing, actor matching, isolation, and reload. |
-| `test_store.py` | Transactionality, revision races, board placement, and autopush integration. |
+| `test_store.py` | Verified startup/read/reload admission, invalid-audit refusal, accepted actor context, policy diagnostics, transactionality, revision races, board placement, and autopush integration. |
 | `test_api.py` | Real threaded loopback routes, auth, revisions, redirects, and code restart. |
 | `test_workspace.py` | Gateway discovery/proxying, child publishing policy, and workspace UI contracts. |
 | `test_service_ownership.py` | Exclusive lifetime leases, one-use launch handoff, real restart port preservation, shutdown precedence, and failed replacement cleanup. |
-| `test_workspace_ownership.py` | Busy-lease rendezvous recovery, stale-service replacement, and shared launch coordination. |
+| `test_workspace_ownership.py` | Per-board recovery independence, canonical same-board serialization, close/registration and cleanup retry, replacement identity, busy-lease rendezvous, and shared launch coordination. |
 | `test_gateway_preferences_api.py` | Gateway preference routes, authentication, independent revisions, and persisted settings. |
 | `test_gateway_publish.py` | Configuration-only commits, unrelated staged-file exclusion, shared locking, and push recovery. |
 | `test_workspace_config.py` | Preference validation, atomic cross-process revisions, legacy initialization, and safe storage paths. |
