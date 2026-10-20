@@ -53,6 +53,44 @@ if(input.mode==='normalize'){
 }else if(input.mode==='route'){
   vm.runInContext(section(input.workspaceSource,'  function route(', '\n  function '),context);
   process.stdout.write(JSON.stringify(vm.runInContext('route("beta/board")',context)));
+}else if(input.mode==='roundtrip'){
+  // A Node VM checks shipped state plumbing; these DOM seams are not a browser.
+  const helpers=section(input.page,'function saveStaleReloadState()',
+    '// **Terry specified this bar himself:');
+  vm.runInContext(helpers,context);
+  Object.assign(context,{drafts:{'other-card':'other unsent comment'},openId:'card-17',
+    editing:'detail',query:'urgent café',unhideOld:true,mkOpen:'ready_for_work'});
+  for(const [id,value] of Object.entries({'say':'unsent comment\nsecond line',
+    'p-detail-text':'unsaved **detail**','mk-subject':'new draft subject',
+    'mk-detail':'new draft detail\nwith newline','mk-priority':'P3','mk-owner':'bot'}))
+    element(id).value=value;
+  vm.runInContext('saveStaleReloadState();',context);
+  const saved=JSON.parse(stored.saved), freshElements=new Map(), storageCalls=[];
+  function freshElement(id){
+    if(!freshElements.has(id))freshElements.set(id,{value:''});
+    return freshElements.get(id);
+  }
+  // No saved-value globals cross the reload boundary. The shipped reader and
+  // declarations must populate drafts, query and completed visibility themselves.
+  const fresh=vm.createContext({document:{getElementById:freshElement},
+    sessionStorage:{getItem(key){storageCalls.push(['get',key]);
+      return input.emptyStored?null:stored.saved},
+      removeItem(key){storageCalls.push(['remove',key])}}});
+  vm.runInContext(section(input.page,"const STALE_RELOAD_STATE_KEY =",
+    '// **Card #0072.'),fresh);
+  vm.runInContext(section(input.page,'let query =','const HAY ='),fresh);
+  vm.runInContext(`let openId=null,editing=null,mkOpen=null;
+    data.lanes=[{state:'ready_for_work'}];
+    function itemById(id){return id==='card-17'?{id}:null}
+    function openCard(id){openId=id;document.getElementById('say').value=drafts[id]||''}
+    function startDetailEdit(){editing='detail'}
+    function startSubjectEdit(){editing='subject'}
+    function openMake(lane){mkOpen=lane.state}`,fresh);
+  vm.runInContext(helpers+'\nrestoreStaleReloadState();',fresh);
+  const restored=vm.runInContext(
+    '({drafts,query,unhideOld,openId,editing,mkOpen,staleReloadState})',fresh);
+  process.stdout.write(JSON.stringify({saved,restored,storageCalls,
+    fields:Object.fromEntries([...freshElements].map(([key,value])=>[key,value.value]))}));
 }else{
   const helpers=section(input.page,'function saveStaleReloadState()',
     '// **Terry specified this bar himself:');
@@ -116,6 +154,63 @@ def test_gateway_upgrade_reloads_once_and_preserves_failed_proof() -> None:
     assert result["staleShown"]
     assert "AUTO-RELOAD FAILED" in result["stale"]
     assert "saved" in result["stored"]
+
+
+def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm() -> None:
+    """Node VM evidence only: DOM opening/rendering is represented by narrow stubs."""
+    result = browser_helpers(mode="roundtrip")
+    assert result["saved"] == {
+        "drafts": {"other-card": "other unsent comment", "card-17": "unsent comment\nsecond line"},
+        "openId": "card-17",
+        "editing": "detail",
+        "editValue": "unsaved **detail**",
+        "query": "urgent café",
+        "unhideOld": True,
+        "make": {
+            "state": "ready_for_work",
+            "subject": "new draft subject",
+            "detail": "new draft detail\nwith newline",
+            "priority": "P3",
+            "owner": "bot",
+        },
+    }
+    assert result["restored"] == {
+        "drafts": result["saved"]["drafts"],
+        "query": "urgent café",
+        "unhideOld": True,
+        "openId": "card-17",
+        "editing": "detail",
+        "mkOpen": "ready_for_work",
+        "staleReloadState": None,
+    }
+    assert result["fields"] == {
+        "find": "urgent café",
+        "say": "unsent comment\nsecond line",
+        "p-detail-text": "unsaved **detail**",
+        "mk-subject": "new draft subject",
+        "mk-detail": "new draft detail\nwith newline",
+        "mk-priority": "P3",
+        "mk-owner": "bot",
+    }
+    assert result["storageCalls"] == [
+        ["get", "localswim-stale-reload-state-v1"],
+        ["remove", "localswim-stale-reload-state-v1"],
+    ]
+
+
+def test_reload_state_empty_storage_control_cannot_restore_seeded_drafts() -> None:
+    result = browser_helpers(mode="roundtrip", emptyStored=True)
+    assert result["saved"]["openId"] == "card-17"
+    assert result["restored"] == {
+        "drafts": {},
+        "query": "",
+        "unhideOld": False,
+        "openId": None,
+        "editing": None,
+        "mkOpen": None,
+        "staleReloadState": None,
+    }
+    assert result["fields"] == {}
 
 
 def test_matching_gateway_clears_completed_reload_proof() -> None:

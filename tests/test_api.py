@@ -3,6 +3,7 @@
 # ruff: noqa: SLF001 -- restart lifecycle tests intentionally inspect private state
 
 import json
+import pathlib
 import re
 import threading
 import time
@@ -17,7 +18,6 @@ from localswim import api_endpoint, board_state
 from tests.support import USERS
 
 if TYPE_CHECKING:
-    import pathlib
     from collections.abc import Iterator
 
 API = api_endpoint.API_PREFIX
@@ -189,27 +189,56 @@ def test_priority_badges_have_enhanced_text_contrast(api: RunningApi) -> None:
 def test_dirty_build_id_includes_source_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    replies = iter(
-        [
-            api_endpoint.subprocess.CompletedProcess([], 0, stdout="deadbee\n", stderr=""),
-            api_endpoint.subprocess.CompletedProcess(
-                [], 0, stdout=" M api_endpoint.py\n", stderr=""
-            ),
-        ]
-    )
-
     def next_reply(
-        *_args: object, **_kwargs: object
+        args: list[str], **_kwargs: object
     ) -> api_endpoint.subprocess.CompletedProcess[str]:
-        return next(replies)
+        assert args[:2] == ["git", "-C"]
+        reply = "deadbee\n" if "rev-parse" in args else " M api_endpoint.py\n"
+        return api_endpoint.subprocess.CompletedProcess(args, 0, stdout=reply, stderr="")
+
+    sources = {
+        name: f"known source bytes: {name}\n".encode()
+        for name in (
+            "api_endpoint.py",
+            "board_state.py",
+            "attachments.py",
+            "workspace.py",
+            "workspace_config.py",
+            "gateway_publish.py",
+            "service_ownership.py",
+            "workspace.js",
+            "workspace.css",
+        )
+    }
+
+    def source_bytes(path: pathlib.Path) -> bytes:
+        return sources[path.name]
 
     monkeypatch.setattr(api_endpoint.subprocess, "run", next_reply)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", source_bytes)
 
     ident = api_endpoint.build_id()
 
     assert ident.startswith("deadbee-")
     assert ident.endswith("-dirty")
     assert len(ident.removeprefix("deadbee-").removesuffix("-dirty")) == 8
+    assert api_endpoint.build_id() == ident
+
+    for name in ("api_endpoint.py", "workspace.js", "workspace.css"):
+        original = sources[name]
+        sources[name] = original + b"changed bytes\n"
+        changed = api_endpoint.build_id()
+        assert re.fullmatch(r"deadbee-[0-9a-f]{8}-dirty", changed)
+        assert changed != ident, name
+        assert api_endpoint.build_id() == changed
+        sources[name] = original
+        assert api_endpoint.build_id() == ident
+
+    def unreadable_source(_path: pathlib.Path) -> bytes:
+        raise OSError("controlled unreadable source")
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", unreadable_source)
+    assert api_endpoint.build_id() == "deadbee-dirty"
 
 
 def test_dirty_build_refreshes_after_clean_commit_when_loaded_sources_match(

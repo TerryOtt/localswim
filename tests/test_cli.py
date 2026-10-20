@@ -8,10 +8,12 @@ import subprocess
 import sys
 import threading
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
+import click
 import pytest
 
-from localswim import api_endpoint, board_state
+from localswim import api_endpoint, board_state, cli
 from tests.support import USERS
 
 if TYPE_CHECKING:
@@ -72,46 +74,65 @@ def assert_cli(path: pathlib.Path, *arguments: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        (),
-        ("activity",),
-        ("activity", "between"),
-        ("activity", "since"),
-        ("board",),
-        ("board", "embed-policy"),
-        ("board", "init"),
-        ("board", "set-project"),
-        ("board", "show"),
-        ("board", "shutdown"),
-        ("board", "verify"),
-        ("card",),
-        ("card", "archive"),
-        ("card", "assign"),
-        ("card", "clear-parent"),
-        ("card", "comment"),
-        ("card", "create"),
-        ("card", "link"),
-        ("card", "move"),
-        ("card", "next"),
-        ("card", "search"),
-        ("card", "set-detail"),
-        ("card", "set-parent"),
-        ("card", "set-priority"),
-        ("card", "set-subject"),
-        ("card", "show"),
-        ("card", "unlink"),
-        ("card", "unarchive"),
-        ("comments",),
-        ("comments", "newest"),
-        ("lane",),
-        ("lane", "add"),
-        ("lane", "migrate"),
-        ("lane", "migrate-id"),
-        ("lane", "rename-label"),
-    ],
-)
+HELP_PATHS = [
+    (),
+    ("activity",),
+    ("activity", "between"),
+    ("activity", "since"),
+    ("board",),
+    ("board", "embed-policy"),
+    ("board", "init"),
+    ("board", "grant-permissions"),
+    ("board", "set-project"),
+    ("board", "show"),
+    ("board", "shutdown"),
+    ("board", "verify"),
+    ("card",),
+    ("card", "archive"),
+    ("card", "assign"),
+    ("card", "attachment"),
+    ("card", "attachment", "add"),
+    ("card", "attachment", "list"),
+    ("card", "attachment", "remove"),
+    ("card", "attachment", "cover"),
+    ("card", "clear-parent"),
+    ("card", "comment"),
+    ("card", "create"),
+    ("card", "link"),
+    ("card", "move"),
+    ("card", "next"),
+    ("card", "search"),
+    ("card", "set-detail"),
+    ("card", "set-parent"),
+    ("card", "set-priority"),
+    ("card", "set-subject"),
+    ("card", "show"),
+    ("card", "unlink"),
+    ("card", "unarchive"),
+    ("comments",),
+    ("comments", "newest"),
+    ("lane",),
+    ("lane", "add"),
+    ("lane", "migrate"),
+    ("lane", "migrate-id"),
+    ("lane", "rename-label"),
+]
+
+
+def test_help_matrix_matches_registered_tree() -> None:
+    """The batch-priority sibling supplies its stronger dedicated help oracle."""
+
+    def paths(command: click.Command, prefix: tuple[str, ...]) -> set[tuple[str, ...]]:
+        result = {prefix}
+        if isinstance(command, click.Group):
+            for name, child in command.commands.items():
+                result.update(paths(child, (*prefix, name)))
+        return result
+
+    assert set(HELP_PATHS) | {("card", "set-priorities")} == paths(cli.cli, ())
+
+
+@pytest.mark.parametrize("command", HELP_PATHS)
 def test_every_command_level_has_help(
     tmp_path: pathlib.Path,
     command: tuple[str, ...],
@@ -175,7 +196,41 @@ def initialization_inputs(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib
     return description_path, permissions_path
 
 
-def test_every_cli_mutation_uses_service(served_board: pathlib.Path) -> None:
+def test_listed_cli_mutations_roundtrip_through_sole_writer(served_board: pathlib.Path) -> None:
+    routes: list[str] = []
+    original = api_endpoint.Handler.do_POST
+
+    def observe(handler: api_endpoint.Handler) -> None:
+        routes.append(handler.path)
+        original(handler)
+
+    store = api_endpoint.STORE
+    assert store is not None
+    with (
+        patch.object(api_endpoint.Handler, "do_POST", observe),
+        patch.object(store, "execute", wraps=store.execute) as execute,
+    ):
+        listed_cli_mutations(served_board)
+    assert routes == [
+        "/api/v001/cards",
+        "/api/v001/cards",
+        "/api/v001/cards/a/comment",
+        "/api/v001/cards/a/assign",
+        "/api/v001/cards/a/priority",
+        "/api/v001/cards/a/detail",
+        "/api/v001/cards/a/subject",
+        "/api/v001/cards/a/link",
+        "/api/v001/cards/b/parent",
+        "/api/v001/board/project",
+        "/api/v001/cards/a/link",
+        "/api/v001/cards/b/parent",
+    ]
+    assert execute.call_count == 12
+    assert [call.args[0] for call in execute.call_args_list] == list(range(12))
+
+
+def listed_cli_mutations(served_board: pathlib.Path) -> None:
+    """Persist exactly the twelve command invocations observed by the boundary test."""
     assert_cli(served_board, "card", "create", "a", "Alpha", "--state", "backlog")
     assert_cli(served_board, "card", "create", "b", "Beta", "--state", "backlog")
     assert_cli(served_board, "card", "comment", "a", "hello")
@@ -682,18 +737,20 @@ def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
     assert [item["id"] for item in id_items] == ["blocker"]
 
 
+@pytest.mark.parametrize("needle", ["focused detail", "focused comment"])
 def test_search_details_and_comments_require_explicit_request(
     tmp_path: pathlib.Path,
+    needle: str,
 ) -> None:
     path = tmp_path / "board.json"
     inspection_board(path)
 
-    safe = run_cli(path, "card", "search", "private focused")
+    safe = run_cli(path, "card", "search", needle)
     with_comments = run_cli(
         path,
         "card",
         "search",
-        "PRIVATE FOCUSED",
+        needle.upper(),
         "--include-comments",
         "--json",
     )
@@ -709,6 +766,58 @@ def test_search_details_and_comments_require_explicit_request(
     assert items[0]["detail"] == "Private focused detail"
     comments = cast("list[dict[str, Any]]", items[0]["comments"])
     assert comments[0]["text"] == "Private focused comment"
+    unrelated = run_cli(path, "card", "search", "unrelated needle", "--include-comments", "--json")
+    assert unrelated.returncode == 0, unrelated.stderr
+    assert json.loads(unrelated.stdout)["items"] == []
+    for private in ("Private focused detail", "Private focused comment"):
+        assert private not in safe.stdout
+
+
+def test_lane_filters_exclude_higher_rank_before_next_limit(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+    board = board_state.load(path)
+    board.create("excluded", "Excluded subject", "ready_for_work", "bot", priority="P0")
+    board.move("excluded", "in_progress", "bot")
+    board.link("excluded", "blocks", "blocker", "bot")
+    board_state.save(board, path)
+    for arguments, expected in [
+        (("next", "2"), ["blocker", "focus"]),
+        (("search", "subject"), ["blocker", "focus", "parent", "child"]),
+    ]:
+        result = run_cli(
+            path, "card", *arguments, "--lane", "backlog", "--lane", "ready_for_work", "--json"
+        )
+        assert result.returncode == 0, result.stderr
+        assert [item["id"] for item in json.loads(result.stdout)["items"]] == expected
+    unfiltered = run_cli(path, "card", "search", "subject", "--json")
+    assert unfiltered.returncode == 0, unfiltered.stderr
+    assert json.loads(unfiltered.stdout)["items"][0]["id"] == "excluded"
+
+
+@pytest.mark.parametrize("limit", [2, 3])
+def test_newest_comments_equal_time_uses_ticket_then_sequence(
+    tmp_path: pathlib.Path,
+    limit: int,
+) -> None:
+    path = tmp_path / "board.json"
+    newest_comments_board(path)
+    board = board_state.load(path)
+    for card, text in [
+        ("alpha", "Alpha tie first"),
+        ("alpha", "Alpha tie last"),
+        ("beta", "Beta higher ticket tie"),
+    ]:
+        board.comment(card, text, "bot")
+        board.find(card).comments[-1].at = "2026-08-23T13:00:00Z"
+    board_state.save(board, path)
+    result = run_cli(path, "comments", "newest", str(limit), "--json")
+    assert result.returncode == 0, result.stderr
+    assert [entry["text"] for entry in json.loads(result.stdout)["comments"]] == [
+        "Beta higher ticket tie",
+        "Alpha tie last",
+        "Alpha tie first",
+    ][:limit]
 
 
 def test_search_refuses_audit_drift(tmp_path: pathlib.Path) -> None:
@@ -939,6 +1048,36 @@ def test_activity_since_json_is_composable_and_omits_comment_text(
             "parentToId": None,
         },
     ]
+
+
+@pytest.mark.parametrize("command", ["since", "between"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_activity_queries_refuse_audit_drift_without_event_output(
+    tmp_path: pathlib.Path,
+    command: str,
+    *,
+    as_json: bool,
+) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+    bounds = ["2026-08-23T10:00:00Z"]
+    if command == "between":
+        bounds.append("2026-08-23T10:10:00Z")
+    arguments = ["activity", command, *bounds, *(["--json"] if as_json else [])]
+    valid = run_cli(path, *arguments)
+    assert valid.returncode == 0, valid.stderr
+    assert valid.stdout
+    board = board_state.load(path)
+    board.find("alpha").state = "completed"
+    board_state.save(board, path)
+    result = run_cli(path, *arguments)
+    assert result.returncode != 0
+    assert "audit-trail problem" in result.stderr
+    assert "activity" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+    assert "private board words" not in result.stderr
+    assert "Private renamed subject" not in result.stderr
 
 
 def test_activity_between_includes_only_rename_at_exact_bounds(tmp_path: pathlib.Path) -> None:

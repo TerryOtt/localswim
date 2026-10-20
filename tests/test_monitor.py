@@ -116,6 +116,105 @@ def test_missing_cli_and_failed_cli_alert(
     assert not watcher.bot_only_activity(config, pending)
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        ('[{"by": "terry"}]', 0, 1),
+        ('[{"by": "bot"}, {"by": "terry"}]', 0, 1),
+        ("[{}]", 0, 1),
+        ("[]", 0, 1),
+        ('[{"by": "bot"}]', 1, 1),
+        ('[{"by": "bot"}]', 0, 0),
+    ],
+)
+def test_flush_dispatches_fail_open_activity_once(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    case: tuple[str, int, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="localswim-cli"))
+    output, exit_code, expected_queues = case
+    query = Mock(return_value=subprocess.CompletedProcess([], exit_code, output, ""))
+    monkeypatch.setattr(watcher.subprocess, "run", query)
+    order: list[str] = []
+
+    def record_queue(*_arguments: object) -> None:
+        order.append("queue")
+
+    queue = Mock(side_effect=record_queue)
+    timestamp = Mock(side_effect=lambda: (order.append("timestamp"), "success-time")[1])
+    monkeypatch.setattr(watcher, "queue_alert", queue)
+    monkeypatch.setattr(watcher, "now", timestamp)
+    result = watcher.flush_pending_alert(config, "mock-codex", pending)
+    query.assert_called_once()
+    assert queue.call_count == expected_queues
+    assert order == (["queue", "timestamp"] if expected_queues else [])
+    assert result == ("success-time" if expected_queues else None)
+    if expected_queues:
+        queue.assert_called_once_with(config, "mock-codex", pending)
+
+
+def test_flush_failed_queue_cannot_record_success(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(watcher, "bot_only_activity", Mock(return_value=False))
+    queue = Mock(side_effect=RuntimeError("queue unavailable"))
+    timestamp = Mock()
+    monkeypatch.setattr(watcher, "queue_alert", queue)
+    monkeypatch.setattr(watcher, "now", timestamp)
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        watcher.flush_pending_alert(config, "mock-codex", pending)
+    queue.assert_called_once_with(config, "mock-codex", pending)
+    timestamp.assert_not_called()
+    assert "Queued" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_queue_alert_targets_registered_thread_and_sanitizes_payload(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    exit_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target_thread = str(uuid.uuid4())
+    prose = "PRIVATE_CARD_PROSE_SENTINEL"
+    credential = "PRIVATE_CREDENTIAL_SENTINEL"
+    target = Mock(
+        return_value={
+            "schema": 1,
+            "threadId": target_thread,
+            "prose": prose,
+            "credential": credential,
+        }
+    )
+    transport = Mock(return_value=subprocess.CompletedProcess([], exit_code, prose, credential))
+    monkeypatch.setattr(watcher, "read_json", target)
+    monkeypatch.setattr(watcher.subprocess, "run", transport)
+    if exit_code:
+        with pytest.raises(RuntimeError, match="exit status 7"):
+            watcher.queue_alert(config, "mock-codex", pending)
+    else:
+        watcher.queue_alert(config, "mock-codex", pending)
+    target.assert_called_once_with(config.target_path)
+    transport.assert_called_once()
+    arguments = transport.call_args.args[0]
+    assert arguments[:5] == ["mock-codex", "queue", "--thread", target_thread, "--message"]
+    message = arguments[5]
+    assert "activity between 2026-10-16T10:34:46.990571-04:00 " in message
+    assert "2026-10-16T10:37:13.308249-04:00" in message
+    assert "5 board writes were coalesced" in message
+    assert config.board_label in message
+    assert "automation actor bot" in message
+    captured = capsys.readouterr()
+    for private_marker in (prose, credential):
+        assert private_marker not in message + captured.out + captured.err
+
+
 def test_quiet_window_is_trailing_edge(pending: watcher.PendingAlert) -> None:
     extended = watcher.note_board_write(
         pending,

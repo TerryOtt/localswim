@@ -5,8 +5,13 @@ import pathlib
 import shutil
 import subprocess
 
+import pytest
 
-def test_commit_hook_clears_git_context_before_running_gate(tmp_path: pathlib.Path) -> None:
+
+@pytest.mark.parametrize("gate_exit", [0, 37], ids=["successful-gate", "failed-gate"])
+def test_commit_hook_clears_git_context_and_propagates_gate_exit(
+    tmp_path: pathlib.Path, gate_exit: int
+) -> None:
     git = shutil.which("git")
     assert git is not None
     shell = shutil.which("sh")
@@ -47,7 +52,11 @@ def test_commit_hook_clears_git_context_before_running_gate(tmp_path: pathlib.Pa
     fake_uv.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        '[ "$*" = "run --frozen python check.py" ]\n'
+        '[ "$#" -eq 4 ]\n'
+        '[ "$1" = "run" ]\n'
+        '[ "$2" = "--frozen" ]\n'
+        '[ "$3" = "python" ]\n'
+        '[ "$4" = "check.py" ]\n'
         "for variable in $EXPECTED_LOCAL_VARIABLES; do\n"
         '    if printenv "$variable" >/dev/null; then\n'
         '        echo "repository context leaked: $variable" >&2\n'
@@ -57,7 +66,8 @@ def test_commit_hook_clears_git_context_before_running_gate(tmp_path: pathlib.Pa
         'git rev-parse --absolute-git-dir > "$SOURCE_RESULT"\n'
         'git init --quiet "$FOREIGN_REPOSITORY"\n'
         'git -C "$FOREIGN_REPOSITORY" config hook.regression isolated\n'
-        'git -C "$FOREIGN_REPOSITORY" rev-parse --absolute-git-dir > "$GATE_RESULT"\n',
+        'git -C "$FOREIGN_REPOSITORY" rev-parse --absolute-git-dir > "$GATE_RESULT"\n'
+        'exit "$FAKE_GATE_EXIT"\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -76,16 +86,18 @@ def test_commit_hook_clears_git_context_before_running_gate(tmp_path: pathlib.Pa
         FOREIGN_REPOSITORY=foreign.as_posix(),
         GATE_RESULT=result.as_posix(),
         SOURCE_RESULT=source_result.as_posix(),
+        FAKE_GATE_EXIT=str(gate_exit),
     )
-    subprocess.run(
+    completed = subprocess.run(
         [shell, str(hook)],
         cwd=repository,
         env=environment,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=10,
     )
+    assert completed.returncode == gate_exit, completed.stderr
     assert (
         pathlib.Path(result.read_text(encoding="utf-8").strip()).resolve()
         == (foreign / ".git").resolve()
