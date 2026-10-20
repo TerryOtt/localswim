@@ -1,5 +1,6 @@
 """Additive exact-ID model grants and their live CLI command boundary."""
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -17,8 +18,13 @@ def test_grants_preserve_cards_and_other_policy_fields(board: board_state.Board)
     board.comment("synthetic", "Synthetic comment", "terry")
     board.set_archived("synthetic", archived=True, by="bot")
     before = board.to_json()
-    original_policy = board.policy.to_json()
-    previous_edges = board.policy.edges_for("bot")
+    expected_policy = deepcopy(board.policy.to_json())
+    lanes = cast("list[board_state.JsonObject]", expected_policy["lanes"])
+    target = next(lane for lane in lanes if lane["id"] == "in_progress")
+    target["create"] = ["bot", "terry"]
+    edges = cast("dict[str, list[board_state.JsonValue]]", expected_policy["edges"])
+    edges["bot"].append({"from": "backlog", "to": "completed"})
+    edges["terry"].append({"from": "backlog", "to": "completed"})
 
     board.grant_permissions(["bot", "terry"], ["in_progress"], [("backlog", "completed")], "bot")
 
@@ -26,28 +32,32 @@ def test_grants_preserve_cards_and_other_policy_fields(board: board_state.Board)
     after.pop("policy")
     before.pop("policy")
     assert after == before
-    assert board.policy.may_create("bot", "in_progress")
-    assert board.policy.may_create("terry", "in_progress")
-    assert previous_edges <= board.policy.edges_for("bot")
-    assert board.policy.may_move("bot", "backlog", "completed")
-    assert board.policy.may_move("terry", "backlog", "completed")
-    policy = board.policy.to_json()
-    for key in original_policy.keys() - {"lanes", "edges"}:
-        assert policy[key] == original_policy[key]
-    original_lanes = cast("list[board_state.JsonObject]", original_policy["lanes"])
-    updated_lanes = cast("list[board_state.JsonObject]", policy["lanes"])
-    for original, updated in zip(original_lanes, updated_lanes, strict=True):
-        assert {key: value for key, value in updated.items() if key != "create"} == {
-            key: value for key, value in original.items() if key != "create"
-        }
-        assert set(cast("list[str]", original["create"])) <= set(
-            cast("list[str]", updated["create"])
-        )
-    original_edges = cast("dict[str, list[board_state.JsonValue]]", original_policy["edges"])
-    updated_edges = cast("dict[str, list[board_state.JsonValue]]", policy["edges"])
-    assert original_edges.keys() == updated_edges.keys()
-    for actor, edges in original_edges.items():
-        assert updated_edges[actor][: len(edges)] == edges
+    assert board.policy.to_json() == expected_policy
+    assert board.verify() == []
+
+
+@pytest.mark.parametrize("actor", ["bot", "terry"])
+@pytest.mark.parametrize("kind", ["create", "move", "combined"])
+def test_single_actor_grants_change_only_requested_permissions(
+    board: board_state.Board, actor: str, kind: str
+) -> None:
+    before = deepcopy(board.to_json())
+    expected_policy = deepcopy(board.policy.to_json())
+    create = ["in_progress"] if kind in {"create", "combined"} else []
+    moves = [("backlog", "completed")] if kind in {"move", "combined"} else []
+    if create:
+        lanes = cast("list[board_state.JsonObject]", expected_policy["lanes"])
+        target = next(lane for lane in lanes if lane["id"] == "in_progress")
+        assert target["create"] == []
+        target["create"] = [actor]
+    if moves:
+        edges = cast("dict[str, list[board_state.JsonValue]]", expected_policy["edges"])
+        edges[actor].append({"from": "backlog", "to": "completed"})
+    before["policy"] = expected_policy
+
+    board.grant_permissions([actor], create, moves, "bot")
+
+    assert board.to_json() == before
     assert board.verify() == []
 
 

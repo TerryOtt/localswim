@@ -483,6 +483,9 @@ def test_save_failure_does_not_publish_candidate(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
+    accepted = store._board  # noqa: SLF001 -- observe cache before snapshot refresh
+    accepted_policy = store.policy
+    persisted = path.read_bytes()
 
     def fail_save(_board: board_state.Board, _path: pathlib.Path) -> None:
         raise OSError("injected save failure")
@@ -491,6 +494,11 @@ def test_save_failure_does_not_publish_candidate(
     with pytest.raises(OSError, match="injected"):
         store.execute(0, create_alpha)
 
+    assert store._board is accepted, "failed save published cache"  # noqa: SLF001 -- before refresh
+    assert store.policy is accepted_policy
+    assert accepted.revision == 0
+    assert accepted.items == []
+    assert path.read_bytes() == persisted
     monkeypatch.undo()
     assert store.snapshot().revision == 0
     assert store.snapshot().items == []
@@ -631,6 +639,7 @@ def test_repository_push_lock_serializes_separate_processes(tmp_path: pathlib.Pa
     first_ready = tmp_path / "first-ready"
     release_first = tmp_path / "release-first"
     second_ready = tmp_path / "second-ready"
+    second_denied = tmp_path / "second-denied"
     first_code = """
 import pathlib
 import sys
@@ -652,6 +661,16 @@ from localswim import api_endpoint
 
 repo = pathlib.Path(sys.argv[1])
 ready = pathlib.Path(sys.argv[2])
+denied = pathlib.Path(sys.argv[3])
+original_try_lock = api_endpoint.try_process_lock
+
+def observed_try_lock(fd):
+    acquired = original_try_lock(fd)
+    if not acquired:
+        denied.write_text("denied", encoding="utf-8")
+    return acquired
+
+api_endpoint.try_process_lock = observed_try_lock
 with api_endpoint._repository_push_locked(repo):
     ready.write_text("ready", encoding="utf-8")
 """
@@ -665,14 +684,17 @@ with api_endpoint._repository_push_locked(repo):
     try:
         wait_for_file(first_ready)
         second = subprocess.Popen(
-            [sys.executable, "-c", second_code, str(repo), str(second_ready)],
+            [sys.executable, "-c", second_code, str(repo), str(second_ready), str(second_denied)],
             cwd=repo,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
         try:
-            time.sleep(0.2)
+            wait_for_file(second_denied)
+            assert second_denied.read_text(encoding="utf-8") == "denied"
+            assert first.poll() is None
+            assert not release_first.exists()
             assert not second_ready.exists()
             release_first.write_text("release", encoding="utf-8")
             first_stdout, first_stderr = first.communicate(timeout=5)
@@ -737,19 +759,23 @@ def test_autopush_loop_retries_failure_without_another_board_write(
     board.write_text("{}\n", encoding="utf-8")
     clock = 0.0
     outcomes = iter([(False, "push failed"), (True, "repository synchronized")])
-    calls: list[pathlib.Path] = []
+    calls: list[tuple[pathlib.Path, float]] = []
+    sleeps: list[float] = []
+    original_bytes = board.read_bytes()
+    original_mtime = board.stat().st_mtime_ns
 
     def fake_time() -> float:
         return clock
 
     def fake_sleep(_seconds: float) -> None:
         nonlocal clock
-        clock += 1.0
-        if clock > 3.0:
+        clock += 0.5
+        sleeps.append(clock)
+        if clock > 5.0:
             raise StopLoopError
 
     def fake_push(path: pathlib.Path) -> tuple[bool, str]:
-        calls.append(path)
+        calls.append((path, clock))
         return next(outcomes)
 
     def push_is_available(_path: pathlib.Path) -> str:
@@ -765,7 +791,11 @@ def test_autopush_loop_retries_failure_without_another_board_write(
     with pytest.raises(StopLoopError):
         api_endpoint._push_loop(board)  # noqa: SLF001 -- exercise daemon retry scheduling
 
-    assert calls == [board, board]
+    assert calls == [(board, 0.5), (board, 2.5)], "retry deadline or recovery quiescence changed"
+    assert [instant for instant in sleeps if 0.5 < instant < 2.5] == [1.0, 1.5, 2.0]
+    assert sleeps[-1] == 5.5
+    assert board.read_bytes() == original_bytes
+    assert board.stat().st_mtime_ns == original_mtime
 
 
 def test_autopush_is_disabled_unless_explicitly_enabled(

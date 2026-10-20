@@ -333,8 +333,10 @@ Unfinished blockers outside the selection still impose floors, so the structured
 reports selected effective priorities and every actual ticket-ordered change, including
 unselected cascades. The actor receives one history entry per actual change; a no-op
 adds no history and follows the ordinary store revision policy. No refresh or retry is
-performed after a conflict. A mutation timeout has an unknown outcome and requires
-inspection before retry.
+performed after a conflict. A mutation timeout or a successful response that cannot
+be decoded as a JSON object has an unknown outcome and requires inspection before
+retry. The client does not replay the mutation automatically; read-only response
+diagnostics remain separate.
 
 Item history, relationship history, parent history, and comments are separate. All
 three histories are machine-written and append-only; comments are human/bot prose.

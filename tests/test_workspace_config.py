@@ -208,6 +208,57 @@ def test_atomic_failure_retains_existing_and_cleans_temp(
     ]
 
 
+def test_replace_failure_preserves_preferences_and_next_write_recovers(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = workspace_config.GatewayConfigStore(tmp_path, autopush=True)
+    previous = store.apply(0, {"action": "pin", "key": "beta"}, KEYS)
+    original = store.path.read_bytes()
+    expected = workspace_config.GatewayPreferences(
+        revision=previous.revision + 1,
+        autopush=True,
+        pins_initialized=True,
+        pinned_boards=("beta", "gamma"),
+    )
+    prepared: list[pathlib.Path] = []
+
+    def fail_replace(source: os.PathLike[str], target: os.PathLike[str]) -> None:
+        temporary = tmp_path / os.fspath(source)
+        assert tmp_path / os.fspath(target) == store.path
+        assert temporary.parent == tmp_path
+        assert temporary.name.startswith(f".{workspace_config.CONFIG_FILENAME}.")
+        assert temporary != store.path
+        assert json.loads(temporary.read_bytes()) == expected.to_json()
+        prepared.append(temporary)
+        raise OSError("simulated final replacement failure")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError, match="simulated final replacement failure"):
+            store.apply(previous.revision, {"action": "pin", "key": "gamma"}, KEYS)
+
+    assert len(prepared) == 1
+    assert store.path.read_bytes() == original
+    assert store.snapshot() == previous
+    assert workspace_config.GatewayConfigStore(tmp_path).snapshot() == previous
+    assert not prepared[0].exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        f".{workspace_config.CONFIG_FILENAME}.lock",
+        workspace_config.CONFIG_FILENAME,
+    ]
+
+    recovered = store.apply(previous.revision, {"action": "pin", "key": "gamma"}, KEYS)
+    assert recovered == expected
+    assert store.snapshot() == expected
+    assert store.path.read_bytes() != original
+    assert workspace_config.GatewayConfigStore(tmp_path).snapshot() == expected
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        f".{workspace_config.CONFIG_FILENAME}.lock",
+        workspace_config.CONFIG_FILENAME,
+    ]
+
+
 def test_symlink_configuration_rejected_without_touching_target(tmp_path: pathlib.Path) -> None:
     target = tmp_path / "target"
     target.write_text("private", encoding="utf-8")

@@ -4263,7 +4263,10 @@ def _service_json(
         )
         raise BoardError(f"could not reach board service; {outcome}: {exc}") from exc
     if not isinstance(raw, dict):
-        raise BoardError("board service returned a non-object response")
+        outcome = (
+            "; mutation outcome is unknown; inspect before retrying" if body is not None else ""
+        )
+        raise BoardError(f"board service returned a non-object response{outcome}")
     return raw
 
 

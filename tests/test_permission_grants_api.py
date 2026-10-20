@@ -4,7 +4,8 @@
 
 import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING, Any
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -146,21 +147,28 @@ def test_permission_grants_persist_and_publish_without_card_changes(api: Running
         body={"id": "existing", "subject": "Existing", "state": "backlog", "detail": "Keep"},
     )
     assert code == 200
-    before = board_state.load(api.path).to_json()
+    before = deepcopy(board_state.load(api.path).to_json())
+    expected_policy = deepcopy(cast("board_state.JsonObject", before["policy"]))
+    lanes = cast("list[board_state.JsonObject]", expected_policy["lanes"])
+    target = next(lane for lane in lanes if lane["id"] == "in_progress")
+    assert target["create"] == []
+    target["create"] = ["bot", "terry"]
+    edges = cast("dict[str, list[board_state.JsonValue]]", expected_policy["edges"])
+    edges["bot"].append({"from": "backlog", "to": "completed"})
+    edges["terry"].append({"from": "backlog", "to": "completed"})
     code, response = grant(api, revision=1)
     assert code == 200, response
     assert response["revision"] == 2
     store = api_endpoint.STORE
     assert store is not None
-    assert store.policy.may_create("bot", "in_progress")
-    assert store.policy.may_move("bot", "backlog", "completed")
+    assert store.policy.to_json() == expected_policy
     assert store.policy.check_edges() == []
     persisted = board_state.load(api.path)
     after = persisted.to_json()
     assert {key: value for key, value in after.items() if key not in {"policy", "revision"}} == {
         key: value for key, value in before.items() if key not in {"policy", "revision"}
     }
-    assert persisted.policy.to_json() == store.policy.to_json()
+    assert persisted.policy.to_json() == expected_policy
     assert persisted.verify() == []
     # Immediate subsequent commands use the committed grants for both credential roles.
     code, response = request_json(

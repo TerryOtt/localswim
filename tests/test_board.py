@@ -1,5 +1,6 @@
 """Board behavior at the domain-model boundary."""
 
+import copy
 import re
 
 import pytest
@@ -218,6 +219,75 @@ def test_link_is_stored_once_and_inverse_is_derived(board: board_state.Board) ->
         kind="blocked_by",
         to="alpha",
     )
+
+
+@pytest.mark.parametrize(
+    ("kind", "repeat_from", "repeat_kind", "repeat_to"),
+    [
+        ("blocks", "beta", "blocked_by", "alpha"),
+        ("relates_to", "beta", "relates_to", "alpha"),
+    ],
+    ids=["inverse-blocks", "reversed-relates-to"],
+)
+def test_repeated_canonical_link_preserves_serialization_and_history(
+    board: board_state.Board, kind: str, repeat_from: str, repeat_kind: str, repeat_to: str
+) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("beta", "Beta", "backlog", "bot")
+    board.link("alpha", kind, "beta", "bot")
+    expected_links = [board_state.Link(frm="alpha", kind=kind, to="beta")]
+    assert board.links == expected_links
+    original = copy.deepcopy(board.to_json())
+    original_history = list(board.relationship_history)
+
+    board.link(repeat_from, repeat_kind, repeat_to, "terry")
+
+    assert board.links == expected_links
+    assert board.relationship_history == original_history
+    assert board.to_json() == original
+
+
+def test_same_kind_link_replacement_preserves_serialization_and_history(
+    board: board_state.Board,
+) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("beta", "Beta", "backlog", "bot")
+    board.link("alpha", "blocks", "beta", "bot")
+    expected_links = [board_state.Link(frm="alpha", kind="blocks", to="beta")]
+    assert board.links == expected_links
+    original = copy.deepcopy(board.to_json())
+    original_history = list(board.relationship_history)
+
+    board.replace_link("alpha", "blocks", "blocks", "beta", "terry")
+
+    assert board.links == expected_links
+    assert board.relationship_history == original_history
+    assert board.to_json() == original
+
+
+def test_occupied_target_link_replacement_refuses_without_changes(
+    board: board_state.Board,
+) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("beta", "Beta", "backlog", "bot")
+    board.link("alpha", "blocks", "beta", "bot")
+    board.link("beta", "relates_to", "alpha", "terry")
+    expected_links = [
+        board_state.Link(frm="alpha", kind="blocks", to="beta"),
+        board_state.Link(frm="beta", kind="relates_to", to="alpha"),
+    ]
+    assert board.links == expected_links
+    original = copy.deepcopy(board.to_json())
+    original_history = list(board.relationship_history)
+
+    with pytest.raises(board_state.BoardError, match="already relates_to"):
+        board.replace_link("alpha", "blocks", "relates_to", "beta", "bot")
+
+    assert board.links == expected_links
+    assert board.links_for("alpha") == [("blocks", "beta"), ("relates_to", "beta")]
+    assert board.links_for("beta") == [("blocked_by", "alpha"), ("relates_to", "alpha")]
+    assert board.relationship_history == original_history
+    assert board.to_json() == original
 
 
 def test_replace_link_changes_both_derived_directions_together(board: board_state.Board) -> None:

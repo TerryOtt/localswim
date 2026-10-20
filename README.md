@@ -466,8 +466,9 @@ Audit entries are written once per changed card, in ticket order, under the real
 credential actor. A no-op writes no audit entries but follows the store's normal
 revision policy. Supply `--expected-revision` to require a specific revision; without
 it, the CLI fetches once and submits once. It does not refresh or retry after a conflict.
-If a mutation request times out, its outcome is unknown; inspect the board before
-retrying. `--json` prints the structured result.
+If a mutation request times out or its successful response cannot be decoded as a
+JSON object, its outcome is unknown; inspect the board before retrying. The CLI does
+not replay the mutation automatically. `--json` prints the structured result.
 
 The live service reconciles older boards on startup, and reconciles valid externally
 replaced snapshots when reading them, through audited, revision-checked transactions

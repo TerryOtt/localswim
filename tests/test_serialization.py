@@ -315,6 +315,117 @@ def test_edit_locks_load_mutate_save_as_one_operation(tmp_path: pathlib.Path) ->
     assert board_state.load(path).project == "Committed"
 
 
+def test_save_retries_transient_permission_errors_and_commits_snapshot(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    changed = saved_board(path)
+    previous = path.read_bytes()
+    changed.project = "Retried snapshot"
+    expected = (json.dumps(changed.to_json(), indent=2, ensure_ascii=False) + "\n").encode()
+    attempts: list[pathlib.Path] = []
+    sleeps: list[float] = []
+    replace = board_state.pathlib.Path.replace
+
+    def transient_replace(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+        attempts.append(source)
+        assert target == path
+        assert path.read_bytes() == previous
+        assert source.read_bytes() == expected
+        if len(attempts) < 3:
+            raise PermissionError("injected transient refusal")
+        return replace(source, target)
+
+    monkeypatch.setattr(board_state, "RENAME_TRIES", 3)
+    monkeypatch.setattr(board_state, "RENAME_PAUSE", 0.125)
+    monkeypatch.setattr(board_state.time, "sleep", sleeps.append)
+    monkeypatch.setattr(board_state.pathlib.Path, "replace", transient_replace)
+
+    board_state.save(changed, path)
+
+    assert len(attempts) == 3
+    assert len(set(attempts)) == 1
+    assert sleeps == [0.125, 0.125]
+    assert path.read_bytes() == expected
+    assert board_state.load(path).to_json() == changed.to_json()
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_attempts", "expected_sleeps"),
+    [
+        (PermissionError("injected persistent refusal"), 3, [0.125, 0.125]),
+        (OSError("injected non-permission refusal"), 1, []),
+    ],
+    ids=["permission-exhaustion", "other-oserror-immediate"],
+)
+def test_save_real_replace_refusal_preserves_bytes_and_removes_temporary_file(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: OSError,
+    expected_attempts: int,
+    expected_sleeps: list[float],
+) -> None:
+    path = tmp_path / "board.json"
+    changed = saved_board(path)
+    previous = path.read_bytes()
+    changed.project = "Refused snapshot"
+    attempts: list[pathlib.Path] = []
+    sleeps: list[float] = []
+
+    def refuse_replace(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+        attempts.append(source)
+        assert target == path
+        assert source.is_file()
+        assert path.read_bytes() == previous
+        raise failure
+
+    monkeypatch.setattr(board_state, "RENAME_TRIES", 3)
+    monkeypatch.setattr(board_state, "RENAME_PAUSE", 0.125)
+    monkeypatch.setattr(board_state.time, "sleep", sleeps.append)
+    monkeypatch.setattr(board_state.pathlib.Path, "replace", refuse_replace)
+
+    with pytest.raises(type(failure), match="injected") as caught:
+        board_state.save(changed, path)
+
+    assert caught.value is failure
+    assert len(attempts) == expected_attempts
+    assert len(set(attempts)) == 1
+    assert sleeps == expected_sleeps
+    assert path.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_save_fsync_failure_preserves_bytes_without_attempting_replace(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    changed = saved_board(path)
+    previous = path.read_bytes()
+    changed.project = "Unflushed snapshot"
+    synced: list[int] = []
+    replacements: list[pathlib.Path] = []
+
+    def fail_fsync(descriptor: int) -> None:
+        synced.append(descriptor)
+        raise OSError("injected fsync failure")
+
+    def track_replace(source: pathlib.Path, _target: pathlib.Path) -> pathlib.Path:
+        replacements.append(source)
+        return source
+
+    monkeypatch.setattr(board_state.os, "fsync", fail_fsync)
+    monkeypatch.setattr(board_state.pathlib.Path, "replace", track_replace)
+
+    with pytest.raises(OSError, match="injected fsync failure"):
+        board_state.save(changed, path)
+
+    assert len(synced) == 1
+    assert replacements == []
+    assert path.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [path]
+
+
 def test_check_edges_reports_no_inconsistent_permissions() -> None:
     assert board_state.check_edges() == []
 

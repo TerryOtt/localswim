@@ -130,6 +130,9 @@ native board monitoring is an optional extra.
   plus every actual change. Reject selected Completed cards and canonical duplicate
   references; archived unfinished cards remain eligible. Keep no-op audit behavior and
   timeout-unknown semantics explicit in user documentation. Never edit board JSON.
+  A successful mutation response that cannot be decoded as a JSON object also has
+  an unknown outcome: require inspection before retry, never automatic replay, and
+  preserve the separate read-only response diagnostics.
 
 - Workspace mode must proxy each mutation to the board's existing sole writer with
   that board's browser actor credential and `If-Match`. Never write snapshots directly,

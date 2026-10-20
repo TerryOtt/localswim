@@ -694,11 +694,34 @@ def test_missing_credential_returns_401(api: RunningApi) -> None:
     assert "credential" in response["error"]
 
 
-def test_shutdown_requires_cli_credential(api: RunningApi) -> None:
-    code, response = request_json(api.base + API + "/shutdown", body={})
+@pytest.mark.parametrize("credential", ["missing", "invalid", "browser"])
+def test_shutdown_requires_cli_credential(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch, credential: str
+) -> None:
+    flushed: list[pathlib.Path] = []
+    dispatched: list[object] = []
+
+    def flush(path: pathlib.Path) -> tuple[bool, str]:
+        flushed.append(path)
+        return True, "unexpected flush"
+
+    def dispatch(server: object) -> tuple[bool, str]:
+        dispatched.append(server)
+        return True, "unexpected shutdown dispatch"
+
+    monkeypatch.setattr(api_endpoint, "flush_autopush_for_shutdown", flush)
+    monkeypatch.setattr(api_endpoint, "request_service_shutdown", dispatch)
+    token = {
+        "missing": None,
+        "invalid": "arbitrary-invalid-shutdown-credential",
+        "browser": api_endpoint.BROWSER_TOKEN,
+    }[credential]
+    code, response = request_json(api.base + API + "/shutdown", token=token, body={})
 
     assert code == 401
     assert "credential" in response["error"]
+    assert flushed == []
+    assert dispatched == []
     assert not api_endpoint._shutdown_requested.is_set()
 
 

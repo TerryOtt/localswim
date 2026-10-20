@@ -241,13 +241,24 @@ def test_snapshot_failure_rolls_back_uploaded_bytes(
     assert store.snapshot().find("card").attachments == []
 
 
-def test_missing_or_changed_bytes_are_not_served(api: RunningApi) -> None:
+@pytest.mark.parametrize("damage", ["size", "digest", "missing"])
+def test_missing_or_changed_bytes_are_not_served(api: RunningApi, damage: str) -> None:
     create_card(api)
     aid = upload(api, 1)
     path = api.path.parent / "attachments" / "0001" / f"{aid}.png"
-    path.write_bytes(b"tampered")
+    url = api.base + api_endpoint.attachment_url("card", aid)
+    with urllib.request.urlopen(url, timeout=5) as response:
+        assert response.read() == PNG
+    if damage == "missing":
+        path.unlink()
+    elif damage == "digest":
+        changed = bytes([PNG[0] ^ 1]) + PNG[1:]
+        assert len(changed) == len(PNG)
+        path.write_bytes(changed)
+    else:
+        path.write_bytes(b"tampered")
     with pytest.raises(urllib.error.HTTPError) as refusal:
-        urllib.request.urlopen(api.base + api_endpoint.attachment_url("card", aid), timeout=5)
+        urllib.request.urlopen(url, timeout=5)
     with refusal.value:
         assert refusal.value.code == 404
 
@@ -295,7 +306,11 @@ def test_cli_add_list_cover_remove_and_size_refusal(
     assert file["by"] == "bot"
     assert_cli(served_board, "card", "attachment", "cover", "1", file["id"])
     assert board_state.load(served_board).find("card").cover_attachment == file["id"]
+    attached = board_state.load(served_board).find("card").attachments
     assert_cli(served_board, "card", "attachment", "cover", "1", "--clear")
+    cleared = board_state.load(served_board).find("card")
+    assert cleared.cover_attachment is None
+    assert cleared.attachments == attached
     assert_cli(served_board, "card", "attachment", "cover", "1", file["id"])
     assert_cli(served_board, "card", "attachment", "remove", "1", file["id"])
     assert board_state.load(served_board).find("card").attachments == []

@@ -1,6 +1,9 @@
 """Atomic priority selection through the public CLI boundary."""
 
 import json
+import urllib.error
+import urllib.request
+from io import BytesIO
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,6 +16,8 @@ __all__ = ["served_board"]
 
 if TYPE_CHECKING:
     import pathlib
+
+    from click.testing import Result
 
 
 def create_card(path: pathlib.Path, reference: str, priority: str = "P2") -> None:
@@ -204,3 +209,122 @@ def test_cli_batch_missing_service_is_a_clear_error(tmp_path: pathlib.Path) -> N
     assert result.returncode != 0
     assert "service" in result.stderr.lower()
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize(
+    "reply",
+    [b"[]", b"[1]", b"null", b'"reply"', b"23", b"1.5", b"true", b"false", b"{", None],
+    ids=[
+        "empty-array",
+        "array",
+        "null",
+        "string",
+        "integer",
+        "float",
+        "true",
+        "false",
+        "malformed",
+        "timeout",
+    ],
+)
+def test_cli_batch_transport_uncertain_reply_never_replays(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reply: bytes | None,
+    *,
+    structured: bool,
+) -> None:
+    result, requests = invoke_batch_transport(tmp_path, monkeypatch, reply, structured=structured)
+    assert_batch_post(requests)
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "mutation outcome is unknown" in result.stderr
+    assert "inspect before retrying" in result.stderr
+    assert "nothing changed" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["text", "json"])
+def test_cli_batch_transport_valid_object_reports_success(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, structured: bool
+) -> None:
+    message = "Selected 1 card(s); 1 actual priority change(s)"
+    payload = {
+        "result": message,
+        "revision": 8,
+        "priorities": {"alpha": "P3"},
+        "changes": [{"id": "alpha", "from": "P2", "to": "P3"}],
+    }
+    result, requests = invoke_batch_transport(
+        tmp_path, monkeypatch, json.dumps(payload).encode(), structured=structured
+    )
+    assert_batch_post(requests)
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    if structured:
+        assert json.loads(result.stdout) == payload
+    else:
+        assert message in result.stdout
+
+
+def invoke_batch_transport(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reply: bytes | None,
+    *,
+    structured: bool,
+) -> tuple[Result, list[urllib.request.Request]]:
+    path = tmp_path / "absent.json"
+    board_state.service_descriptor_path(path).write_text(
+        json.dumps({"schema": 1, "host": "127.0.0.1", "port": 12345, "token": "synthetic"}),
+        encoding="utf-8",
+    )
+    requests: list[urllib.request.Request] = []
+
+    def respond(request: urllib.request.Request, *, timeout: float) -> BytesIO:
+        requests.append(request)
+        assert timeout > 0
+        if request.get_method() == "GET":
+            # Identity metadata reads may be added independently; revision-fetch reads may not.
+            assert request.full_url != "http://127.0.0.1:12345/api/v001/board"
+            return BytesIO(json.dumps({"boardPath": str(path.resolve())}).encode())
+        if reply is None:
+            raise urllib.error.URLError(TimeoutError("synthetic timeout"))
+        return BytesIO(reply)
+
+    monkeypatch.setattr(urllib.request, "urlopen", respond)
+    arguments = [str(path), "card", "set-priorities", "P3", "alpha", "--expected-revision", "7"]
+    if structured:
+        arguments.append("--json")
+    return CliRunner().invoke(cli.cli, arguments), requests
+
+
+def assert_batch_post(requests: list[urllib.request.Request]) -> None:
+    mutations = [request for request in requests if request.get_method() != "GET"]
+    assert len(mutations) == 1
+    request = mutations[0]
+    assert request.get_method() == "POST"
+    assert request.full_url == "http://127.0.0.1:12345/api/v001/cards/priorities"
+    assert request.get_header("Authorization") == "Bearer synthetic"
+    assert request.get_header("If-match") == '"revision-7"'
+    assert isinstance(request.data, bytes)
+    assert json.loads(request.data) == {"cards": ["alpha"], "priority": "P3"}
+
+
+@pytest.mark.parametrize("reply", [b"[]", b"null", b"23", b"true"])
+def test_service_json_nonobject_get_preserves_error(
+    monkeypatch: pytest.MonkeyPatch, reply: bytes
+) -> None:
+    def respond(request: urllib.request.Request, *, timeout: float) -> BytesIO:
+        assert request.get_method() == "GET"
+        assert timeout > 0
+        return BytesIO(reply)
+
+    monkeypatch.setattr(urllib.request, "urlopen", respond)
+    with pytest.raises(
+        board_state.BoardError, match=r"^board service returned a non-object response$"
+    ):
+        board_state._service_json(  # noqa: SLF001 -- preserve the shared GET response boundary
+            "http://127.0.0.1:12345/api/v001/board", "synthetic"
+        )
