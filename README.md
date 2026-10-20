@@ -205,6 +205,12 @@ The important fields are:
 | nextTicket | Next display number; start an empty board at 1. |
 | items | Cards; start an empty board with an empty list. |
 
+Every user requires nonempty string `id`, `label`, `class` and `color` fields; class
+must be `human` or `bot`. Numeric, Boolean, null and container values are refused with
+the offending field path. Exact duplicate IDs are refused. Accepted strings retain
+their case and contents: loading and initialization never trim, coerce or repair them.
+This does not impose a new color format.
+
 User IDs are case-sensitive. The embedded policy's two transition actors MUST exactly
 match browserUser and cliUser. Malformed JSON, ambiguous names, slug collisions, and
 invalid fields fail with a path, line, or field-specific explanation.
@@ -658,6 +664,14 @@ service descriptor; they are not stored in the board. The shutdown route accepts
 the CLI credential and does not change the board revision.
 
 ## Live code updates
+
+The status endpoint reports snapshot health separately from source and publishing
+diagnostics. Each poll makes one protected admission attempt. Expected disk-read,
+parse (including excessive JSON nesting), validation or timestamp failures return
+HTTP 200 with `ok: false`, an
+`unreadable` stamp and an error; source/build/restart and push metadata remain present.
+Retained valid memory does not make failed disk admission healthy. Restoring a valid
+snapshot allows a later poll to accept its state and policy without restarting.
 
 The server watches its installed Python modules and workspace JavaScript/CSS assets. A valid
 change is debounced, preflighted in a child Python process and applied by gracefully

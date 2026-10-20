@@ -39,6 +39,83 @@ def test_save_load_round_trip(tmp_path: pathlib.Path) -> None:
     assert board_state.load(path).to_json() == original.to_json()
 
 
+@pytest.mark.parametrize("field", ["id", "label", "class", "color"])
+@pytest.mark.parametrize("value", [1, 1.5, True, False, None, [], {}, ""])
+def test_malformed_user_fields_are_refused_without_rewriting(
+    tmp_path: pathlib.Path, field: str, value: object
+) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    raw["users"][0][field] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    previous = path.read_bytes()
+
+    with pytest.raises(
+        board_state.BoardError, match=rf"users\[0\]\.{field} must be a nonempty string"
+    ):
+        board_state.load(path)
+
+    assert path.read_bytes() == previous
+
+
+@pytest.mark.parametrize("field", ["id", "label", "class", "color"])
+def test_missing_user_fields_are_refused(tmp_path: pathlib.Path, field: str) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    del raw["users"][0][field]
+
+    with pytest.raises(
+        board_state.BoardError, match=rf"users\[0\]\.{field} must be a nonempty string"
+    ):
+        board_state.Board.from_json(raw, str(path))
+
+
+@pytest.mark.parametrize("duplicate", ["terry", 1])
+def test_duplicate_and_mixed_type_user_ids_are_refused(
+    tmp_path: pathlib.Path, duplicate: object
+) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    if duplicate == 1:
+        raw["users"].append({"id": "1", "label": "String", "class": "bot", "color": "blue"})
+    raw["users"].append({"id": duplicate, "label": "Additional", "class": "bot", "color": "green"})
+    index = len(raw["users"]) - 1
+    message = "must be a nonempty string" if duplicate == 1 else "repeats id 'terry'"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    previous = path.read_bytes()
+
+    with pytest.raises(board_state.BoardError, match=rf"users\[{index}\]\.id {message}"):
+        board_state.load(path)
+
+    assert path.read_bytes() == previous
+
+
+@pytest.mark.parametrize("user_class", ["human ", "BOT", "unknown"])
+def test_unknown_user_class_is_refused(tmp_path: pathlib.Path, user_class: str) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    raw["users"][0]["class"] = user_class
+
+    with pytest.raises(board_state.BoardError, match=r"users\[0\]\.class .*want one of"):
+        board_state.Board.from_json(raw, str(path))
+
+
+def test_user_strings_preserve_exact_contents_and_distinct_ids(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    raw["users"] += [
+        {"id": user_id, "label": f" Label {user_id} ", "class": "bot", "color": " blue "}
+        for user_id in ("Terry", " terry ", "1", " ")
+    ]
+    raw["defaultOwner"] = "1"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = board_state.load(path)
+
+    assert loaded.to_json()["users"] == raw["users"]
+    assert (loaded.browser_user, loaded.cli_user, loaded.default_owner) == ("terry", "bot", "1")
+
+
 def test_relationship_history_round_trips_after_link_is_removed(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     board = saved_board(path)

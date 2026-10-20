@@ -1221,7 +1221,7 @@ class BoardStore:
         """Parse, verify, and transactionally reconcile before publication."""
         try:
             admitted = self._read_admitted(policy)
-        except (OSError, board_state.BoardError, ValueError) as exc:
+        except (OSError, board_state.BoardError, ValueError, RecursionError) as exc:
             retained = (
                 "; retaining last accepted board and policy" if hasattr(self, "_board") else ""
             )
@@ -1325,8 +1325,8 @@ class BoardStore:
                 raise
         return result, revision, file
 
-    def reload_policy_if_changed(self) -> str | None:
-        """Admit the board and policy together; keep accepted state on refusal."""
+    def reload_policy_if_changed(self, *, raise_on_error: bool = False) -> str | None:
+        """Admit board and policy once; optionally raise the same refusal for health."""
         with self._mutex:
             message = None
             policy = None
@@ -1340,8 +1340,11 @@ class BoardStore:
                     self._policy_observation = policy
             try:
                 fresh = self._admit(policy)
-            except board_state.BoardError:
-                return f"{message}; {self.admission_error}" if message else self.admission_error
+            except board_state.BoardError as exc:
+                refusal = f"{message}; {self.admission_error}" if message else self.admission_error
+                if raise_on_error:
+                    raise board_state.BoardError(refusal) from exc
+                return refusal
             changed = fresh.policy.to_json() != self.policy.to_json()
             self._board = fresh
             self.policy = fresh.policy
@@ -5200,7 +5203,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(blob)
 
     def _status_get(self) -> None:
-        """Read the current board and report service, source, and snapshot health."""
+        """Report one protected disk admission with independent service diagnostics."""
         # **THE GREEN CIRCLE MEANS "PYTHON READ THAT FILE JUST NOW", so this
         # route actually reads it.** Terry set the bar: *"green circle means
         # python has actively polled and read that file within last 5 seconds."*
@@ -5217,20 +5220,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # that a tool able to detect its own staleness resolves it. Schema 4 keeps
         # lane labels, IDs, and permissions in the same snapshot as the state, so
         # one validated board read refreshes them together.
-        reloaded = (
-            STORE.reload_policy_if_changed()
-            if STORE is not None
-            else board_state.reload_rules_if_changed()
-        )
-        if reloaded:
-            print(f"  {reloaded}", flush=True)
-
         code_meta = source_status(self.server)
 
         try:
+            if STORE is not None:
+                reloaded = STORE.reload_policy_if_changed(raise_on_error=True)
+            else:
+                reloaded = board_state.reload_rules_if_changed()
+                live_snapshot()
+            if reloaded:
+                print(f"  {reloaded}", flush=True)
             mtime = BOARD_PATH.stat().st_mtime
-            live_snapshot()
-        except (OSError, board_state.BoardError, json.JSONDecodeError) as exc:
+            stamp = dt.datetime.fromtimestamp(mtime, tz=dt.UTC).astimezone().strftime("%H:%M:%S")
+        except (OSError, board_state.BoardError, ValueError, RecursionError) as exc:
             # **`build` rides on the FAILURE path too.** An unreadable board and a
             # stale tab are independent problems, and the page must be able to tell
             # them apart while one of them is happening.
@@ -5245,7 +5247,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }
             )
             return
-        stamp = dt.datetime.fromtimestamp(mtime, tz=dt.UTC).astimezone().strftime("%H:%M:%S")
         # **`codeStale` rides on BOTH paths, like `build` and for the same
         # reason.** An unreadable board and a stale process are independent
         # failures, and either can be true while the other is.

@@ -674,9 +674,10 @@ class Rules:
 def _parse_users(doc: JsonObject, path: pathlib.Path) -> tuple[User, ...]:
     """Read and validate the `users` block. **Card #0072.**
 
-    **Every field is mandatory and none is defaulted.** A user with no class would make
-    card #0073's auto-link gate silently pick a side, and a user with no color would
-    paint as whatever the browser inherits -- both are the reassuring-but-wrong shape
+    **Every field is a required nonempty string and none is coerced or defaulted.**
+    Preserve accepted contents exactly, including case and whitespace. A user with no
+    class would make card #0073's auto-link gate silently pick a side, and a user with
+    no color would paint as whatever the browser inherits -- both are the reassuring-but-wrong shape
     this repository keeps refusing.
     """
     raw = doc.get("users")
@@ -688,23 +689,26 @@ def _parse_users(doc: JsonObject, path: pathlib.Path) -> tuple[User, ...]:
         spot = f"users[{index}]"
         if not isinstance(entry, dict):
             raise BoardError(f"{path}: {spot} is not an object")
-        missing = [k for k in ("id", "label", "class", "color") if not entry.get(k)]
-        if missing:
-            raise BoardError(f"{path}: {spot} is missing {', '.join(missing)}")
-        if entry["class"] not in USER_CLASSES:
+        fields: dict[str, str] = {}
+        for key in ("id", "label", "class", "color"):
+            value = entry.get(key)
+            if not isinstance(value, str) or not value:
+                raise BoardError(f"{path}: {spot}.{key} must be a nonempty string")
+            fields[key] = value
+        if fields["class"] not in USER_CLASSES:
             raise BoardError(
-                f"{path}: {spot} class {entry['class']!r}; want one of {', '.join(USER_CLASSES)}"
+                f"{path}: {spot}.class {fields['class']!r}; want one of {', '.join(USER_CLASSES)}"
             )
         # **Ids are the key everything else joins on**, so a duplicate would make one
         # user's permissions silently shadow the other's.
-        if any(u.id == entry["id"] for u in users):
-            raise BoardError(f"{path}: {spot} repeats id {entry['id']!r}")
+        if any(u.id == fields["id"] for u in users):
+            raise BoardError(f"{path}: {spot}.id repeats id {fields['id']!r}")
         users.append(
             User(
-                id=str(entry["id"]),
-                label=str(entry["label"]),
-                user_class=str(entry["class"]),
-                color=str(entry["color"]),
+                id=fields["id"],
+                label=fields["label"],
+                user_class=fields["class"],
+                color=fields["color"],
             )
         )
     return tuple(users)

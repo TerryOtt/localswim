@@ -51,6 +51,22 @@ actors, owner normalization, user styles and page metadata use the accepted stor
 context. Existing once-only standalone-policy refusal diagnostics remain observable,
 including when the board is rejected at the same time.
 
+`Handler._status_get()` makes one protected policy/board admission attempt through
+`BoardStore.reload_policy_if_changed(raise_on_error=True)`. Its default mode still
+returns refusal diagnostics for existing callers. Status does not reload a second
+independent candidate through `live_snapshot()`. Read/parse/admission failures and
+the following file timestamp lookup share the status error boundary: HTTP 200,
+`ok: false`, `mtime: 0`, `stamp: "unreadable"` and `error`, alongside independent
+source/build/restart and push metadata. Decoder/policy nesting `RecursionError` is
+treated as an expected input refusal, including recorded store admission diagnostics.
+A later valid candidate restores healthy
+status and refreshes accepted state/policy without a process restart.
+
+An admission needing existing audited dependency promotions may still re-read under
+the store's revision-checked transaction; this is not a promise of one filesystem
+read or an atomic timestamp/content pair. Other unexpected programming exceptions,
+such as `RuntimeError` and `TypeError`, are not blanket-caught as disk health errors.
+
 Offline `load()` and `Board.from_json()` remain structural parsing operations, with
 verification intentionally separate and legacy ambient installation enabled by default.
 The live path explicitly uses `install_context=False`; this does not implement a pure
@@ -275,6 +291,14 @@ The board owns all deployment-specific state and resolved behavior:
 actors, and those IDs must exactly match the configured browser and CLI users. A board
 may list additional users as owners, but only the browser and CLI identities are
 authenticated mutation actors.
+
+The shared `_parse_users()` validates persisted snapshots and initialization inputs.
+Each user requires nonempty string `id`, `label`, `class` and `color` values. Types
+are checked before class membership and exact duplicate-ID detection, with errors
+such as `users[2].id`. Class is exactly `human` or `bot`; accepted strings otherwise
+retain their original contents. No trimming, case folding, string coercion, identity
+repair or new color syntax validation occurs. Invalid initialization does not create
+or replace its target, and parsing invalid persisted users does not rewrite bytes.
 
 User and policy IDs join case-sensitively. Keep IDs lower-case: request values passed
 through `as_actor()` are trimmed and lowercased before matching, while configured IDs

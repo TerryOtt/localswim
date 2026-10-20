@@ -1301,6 +1301,120 @@ def test_cli_initializes_stable_slugs_and_resolves_name_permissions(
     assert board.items == []
 
 
+@pytest.mark.parametrize("field", ["id", "label", "class", "color"])
+@pytest.mark.parametrize(
+    "bad_value",
+    [1, True, None, [], {}, ""],
+    ids=["number", "boolean", "null", "list", "object", "empty"],
+)
+def test_cli_initializer_rejects_malformed_user_fields(
+    tmp_path: pathlib.Path, field: str, bad_value: object
+) -> None:
+    path = tmp_path / "board.json"
+    description_path, permissions = initialization_inputs(tmp_path)
+    description = json.loads(description_path.read_text(encoding="utf-8"))
+    owner = {"id": "owner", "label": "Owner", "class": "human", "color": "#2266AA"}
+    description["users"].append({**owner, field: bad_value})
+    description_path.write_text(json.dumps(description), encoding="utf-8")
+
+    result = run_cli(path, "board", "init", str(description_path), str(permissions))
+
+    assert result.returncode != 0
+    assert f"users[2].{field}" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("field", ["id", "label", "class", "color"])
+def test_cli_initializer_rejects_omitted_user_fields(tmp_path: pathlib.Path, field: str) -> None:
+    path = tmp_path / "board.json"
+    description_path, permissions = initialization_inputs(tmp_path)
+    description = json.loads(description_path.read_text(encoding="utf-8"))
+    del description["users"][0][field]
+    description_path.write_text(json.dumps(description), encoding="utf-8")
+
+    result = run_cli(path, "board", "init", str(description_path), str(permissions))
+
+    assert result.returncode != 0
+    assert f"users[0].{field}" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("second_id", ["1", 1], ids=["exact-duplicate", "mixed-numeric"])
+def test_cli_initializer_rejects_duplicate_or_coerced_user_ids(
+    tmp_path: pathlib.Path, second_id: str | int
+) -> None:
+    path = tmp_path / "board.json"
+    description_path, permissions = initialization_inputs(tmp_path)
+    description = json.loads(description_path.read_text(encoding="utf-8"))
+    description["users"].extend(
+        [
+            {"id": "1", "label": "String owner", "class": "human", "color": "blue"},
+            {"id": second_id, "label": "Other owner", "class": "human", "color": "blue"},
+        ]
+    )
+    description_path.write_text(json.dumps(description), encoding="utf-8")
+
+    result = run_cli(path, "board", "init", str(description_path), str(permissions))
+
+    assert result.returncode != 0
+    assert "users[3].id" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not path.exists()
+
+
+def test_cli_invalid_initializer_preserves_existing_target(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    before = b"existing target must not be replaced\n"
+    path.write_bytes(before)
+    description_path, permissions = initialization_inputs(tmp_path)
+    description = json.loads(description_path.read_text(encoding="utf-8"))
+    description["users"][0]["id"] = True
+    description_path.write_text(json.dumps(description), encoding="utf-8")
+
+    result = run_cli(path, "board", "init", str(description_path), str(permissions))
+
+    assert result.returncode != 0
+    assert "refusing to overwrite" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("example", ["example", "terry-workflow"])
+def test_cli_initializer_preserves_exact_users_and_roles(
+    tmp_path: pathlib.Path, example: str
+) -> None:
+    path = tmp_path / "board.json"
+    description_path, permissions = initialization_inputs(tmp_path)
+    port = json.loads(description_path.read_text(encoding="utf-8"))["port"]
+    examples = pathlib.Path(__file__).resolve().parents[1] / "examples"
+    description = json.loads(
+        (examples / f"board-description.{example}.json").read_text(encoding="utf-8")
+    )
+    description["port"] = port
+    permissions.write_bytes((examples / f"permissions.{example}.json").read_bytes())
+    description["users"].extend(
+        [
+            {"id": value, "label": f" Owner {index} ", "class": "human", "color": " raw-color "}
+            for index, value in enumerate(("Mixed", "mixed", "  kept  ", "1"))
+        ]
+    )
+    description["defaultOwner"] = "Mixed"
+    description_path.write_text(json.dumps(description), encoding="utf-8")
+
+    result = run_cli(path, "board", "init", str(description_path), str(permissions))
+
+    assert result.returncode == 0, result.stderr
+    board = board_state.load(path)
+    assert board.to_json()["users"] == description["users"]
+    assert board.browser_user == description["browserUser"]
+    assert board.cli_user == description["cliUser"]
+    assert board.default_owner == "Mixed"
+    assert board.policy.rules.edge_actors == frozenset({board.browser_user, board.cli_user})
+    assert board.verify() == []
+
+
 def test_cli_initializer_rejects_slug_collisions(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     description_path, permissions = initialization_inputs(tmp_path)

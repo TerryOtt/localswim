@@ -81,6 +81,14 @@ native board monitoring is an optional extra.
 - Keep policy input, public document exposure and serialized output detached from
   canonical policy state, including nested metadata. Compiled grants and subsequent
   serialization must not change when a caller mutates any returned dictionary/list.
+- Validate canonical user id/label/class/color as nonempty strings before enum or
+  duplicate checks. Keep exact case/content; never coerce, trim or repair identities.
+  Use the same parser for load and initialization, with field-specific refusals and
+  no target replacement or snapshot rewrite on invalid input.
+- Status health uses one protected policy/board admission attempt, with expected
+  read/parse/admission/timestamp errors contained in structured HTTP 200 responses.
+  Preserve independent source/restart/push metadata, truthful failed disk health and
+  recovery on later valid input; do not reload another candidate outside that boundary.
 - Keep durable product identifiers agent-neutral. Do not put a human assistant,
   automation product, model, or vendor name into lane, field, or protocol IDs.
 - Board-specific working agreements decide how an allowed transition is used. In the

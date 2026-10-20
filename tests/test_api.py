@@ -22,6 +22,7 @@ from localswim import api_endpoint, attachments, board_state
 from tests.support import USERS
 
 if TYPE_CHECKING:
+    import os
     from collections.abc import Iterator
 
 API = api_endpoint.API_PREFIX
@@ -118,6 +119,212 @@ def test_board_and_status_reads(api: RunningApi) -> None:
     assert health_code == 200
     assert health["ok"] is True
     assert health["restarting"] is False
+
+
+@pytest.fixture
+def status_loads(monkeypatch: pytest.MonkeyPatch) -> list[pathlib.Path]:
+    """Count actual admission loads without substituting their validation."""
+    original = board_state.load
+    calls: list[pathlib.Path] = []
+
+    def counted(
+        path: pathlib.Path,
+        policy: board_state.TransitionPolicy | None = None,
+        *,
+        install_context: bool = True,
+    ) -> board_state.Board:
+        calls.append(path)
+        return original(path, policy, install_context=install_context)
+
+    monkeypatch.setattr(board_state, "load", counted)
+    return calls
+
+
+def break_status_disk(api: RunningApi, fault: str, patch: pytest.MonkeyPatch) -> None:
+    """Damage only the synthetic snapshot or deterministically refuse its I/O."""
+    original_stat = pathlib.Path.stat
+
+    def failed_read(_path: pathlib.Path) -> board_state.JsonObject:
+        if fault == "decoder_recursion":
+            raise RecursionError("injected snapshot decoder nesting failure")
+        raise OSError("injected snapshot read failure")
+
+    def failed_stat(path: pathlib.Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path == api.path:
+            raise OSError("injected snapshot stat failure")
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    if fault == "missing":
+        api.path.unlink()
+    elif fault in {"read", "decoder_recursion"}:
+        patch.setattr(board_state, "_read_json", failed_read)
+    elif fault == "stat":
+        patch.setattr(pathlib.Path, "stat", failed_stat)
+    elif fault == "malformed":
+        api.path.write_text("{", encoding="utf-8")
+    else:
+        candidate = board_state.load(api.path, install_context=False)
+        candidate.create("invalid", "Invalid audit", "backlog", "bot")
+        candidate.find("invalid").archived = True
+        board_state.save(candidate, api.path)
+        assert candidate.verify()
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "read", "stat", "malformed", "audit", "decoder_recursion"]
+)
+def test_status_contains_disk_failure_and_recovers(
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+    status_loads: list[pathlib.Path],
+    fault: str,
+) -> None:
+    store = api_endpoint.STORE
+    assert store is not None
+    accepted = store._board.to_json()
+    restored = board_state.Board.from_json(accepted, "recovery", install_context=False)
+    policy_doc = restored.policy.to_json()
+    policy_doc["defaultPriority"] = "P4"
+    restored.policy = board_state.TransitionPolicy.from_json(policy_doc, "recovery policy")
+    restored.project = "Recovered disk"
+
+    def refused_restart(_server: api_endpoint.BoardHttpServer) -> tuple[bool, str | None]:
+        return False, "refused"
+
+    monkeypatch.setattr(api_endpoint, "code_is_stale", lambda: True)
+    monkeypatch.setattr(api_endpoint, "BUILD", "stale-build")
+    monkeypatch.setattr(api_endpoint, "request_code_restart", refused_restart)
+    monkeypatch.setattr(api_endpoint, "push_status", lambda: {"enabled": True, "error": "push"})
+    with monkeypatch.context() as broken:
+        break_status_disk(api, fault, broken)
+        status_loads.clear()
+        code, health = request_json(api.base + API + "/status")
+    assert code == 200
+    assert health["ok"] is False
+    assert health["mtime"] == 0
+    assert health["stamp"] == "unreadable"
+    assert health["error"]
+    assert health["build"] == "stale-build"
+    assert health["codeStale"] is True
+    assert health["restarting"] is False
+    assert health["restartProblem"] == "refused"
+    assert health["push"] == {"enabled": True, "error": "push"}
+    assert status_loads == [api.path]
+    assert store._board.to_json() == accepted
+    if fault == "decoder_recursion":
+        assert "snapshot decoder nesting failure" in str(store.admission_error)
+        assert "retaining last accepted board and policy" in health["error"]
+
+    board_state.save(restored, api.path)
+    code, health = request_json(api.base + API + "/status")
+    assert code == 200
+    assert health["ok"] is True
+    assert health["mtime"] == api.path.stat().st_mtime
+    assert health["stamp"] != "unreadable"
+    assert "error" not in health
+    assert status_loads == [api.path, api.path]
+    assert store._board.project == "Recovered disk"
+    assert store.policy.default_priority == "P4"
+    assert store.admission_error is None
+
+
+def test_status_uses_one_candidate_for_policy_and_health(
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+    status_loads: list[pathlib.Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = api_endpoint.STORE
+    assert store is not None
+    candidate = board_state.Board.from_json(store._board.to_json(), "first", install_context=False)
+    policy_doc = candidate.policy.to_json()
+    policy_doc["defaultPriority"] = "P4"
+    candidate.policy = board_state.TransitionPolicy.from_json(policy_doc, "first policy")
+    board_state.save(candidate, api.path)
+    original = board_state.load
+
+    def replace_after_read(
+        path: pathlib.Path,
+        policy: board_state.TransitionPolicy | None = None,
+        *,
+        install_context: bool = True,
+    ) -> board_state.Board:
+        loaded = original(path, policy, install_context=install_context)
+        path.write_text("{", encoding="utf-8")
+        return loaded
+
+    monkeypatch.setattr(board_state, "load", replace_after_read)
+    code, health = request_json(api.base + API + "/status")
+    assert code == 200
+    assert health["ok"] is True
+    assert status_loads == [api.path]
+    assert store.policy.default_priority == "P4"
+    assert "embedded policy reloaded" in capsys.readouterr().out
+
+    # The next request must reject the new disk bytes, not trust retained memory.
+    code, health = request_json(api.base + API + "/status")
+    assert code == 200
+    assert health["ok"] is False
+    assert status_loads == [api.path, api.path]
+    assert store.policy.default_priority == "P4"
+    assert "embedded policy reloaded" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("error_type", [OSError, RecursionError])
+def test_status_contains_policy_reload_failure(
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+    status_loads: list[pathlib.Path],
+    error_type: type[Exception],
+) -> None:
+    store = api_endpoint.STORE
+    assert store is not None
+    store._external_policy = True
+    accepted_policy = store.policy
+    accepted_board = store._board.to_json()
+
+    def refused_policy(
+        _self: board_state.TransitionPolicy,
+        _actors: set[str],
+        _configured: frozenset[str],
+    ) -> tuple[board_state.TransitionPolicy, str | None]:
+        raise error_type("injected policy reload failure")
+
+    with monkeypatch.context() as broken:
+        broken.setattr(board_state.TransitionPolicy, "reload_if_changed", refused_policy)
+        code, health = request_json(api.base + API + "/status")
+    assert code == 200
+    assert health["ok"] is False
+    assert health["error"] == "injected policy reload failure"
+    assert health["mtime"] == 0
+    assert health["stamp"] == "unreadable"
+    assert "build" in health
+    assert "codeStale" in health
+    assert "restarting" in health
+    assert "push" in health
+    assert status_loads == []
+    assert store.policy is accepted_policy
+    assert store._board.to_json() == accepted_board
+    assert request_json(api.base + API + "/status")[1]["ok"] is True
+    assert status_loads == [api.path]
+
+
+def test_admission_does_not_normalize_unexpected_runtime_error(
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = api_endpoint.STORE
+    assert store is not None
+    assert store.path == api.path
+    accepted = store._board.to_json()
+
+    def unexpected_failure(_path: pathlib.Path) -> board_state.JsonObject:
+        raise RuntimeError("unexpected implementation failure")
+
+    monkeypatch.setattr(board_state, "_read_json", unexpected_failure)
+    with pytest.raises(RuntimeError, match="unexpected implementation failure"):
+        store.snapshot()
+    assert store._board.to_json() == accepted
 
 
 def test_page_contains_guarded_auto_reload_and_state_restore(api: RunningApi) -> None:
