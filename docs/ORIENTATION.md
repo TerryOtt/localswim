@@ -99,6 +99,21 @@ schema-4 snapshots recursively, excluding hidden directories, Git metadata, atta
 storage, and symbolic-link escapes. Nonboard JSON is ignored; malformed schema-4 boards
 remain visible as unavailable entries with an error instead of being partially loaded.
 
+Each regular candidate has an 8 MiB (8,388,608-byte) discovery ceiling, with a
+limit-plus-one read to detect growth beyond it. The ceiling is about 4.8 times the
+largest representative snapshot measured when introduced. Unreadable, oversized,
+invalid JSON, excessive JSON nesting and non-envelope files are omitted. A recognized
+schema-4 envelope that fails board validation, including validation recursion, stays
+in the catalog with an error. API and attachment limits are separate; discovery does
+not promise a bound on total traversal or file count.
+
+A proxy request resolves its board with one discovery scan. Its private candidate
+retains file identity only for that request; it is neither a persistent cache nor
+caller-supplied authorization. Direct path/endpoint calls perform their own safe
+discovery. Before consumption and after waiting for board acquisition, containment,
+symlink/junction membership and file identity are checked again. Removal or replacement
+produces a controlled refusal; a later request may retry discovery.
+
 A board key is its relative POSIX path without `.json`. For example,
 `localswim/localswim.json` becomes `localswim/localswim`, with a readable
 `/board/localswim/localswim` deep link. Project-label edits do not change that key.
@@ -280,6 +295,16 @@ explicit lane ID exists for controlled imports. Label renames never regenerate I
 the separate lane-ID migration rewrites policy endpoints, current states, and audit
 history atomically. [ADR 0002](decisions/0002-stable-generated-lane-slugs.md) records the
 approved identity model and rejected alternatives.
+
+Stable ID `completed` carries terminal semantics independently of its display label.
+Lane-ID migration refuses it as either source or destination before reading or
+rewriting a snapshot; label rename remains available for presentation changes.
+
+`Rules` owns its canonical policy document independently of the caller's dictionaries
+and lists. Public `document` and `TransitionPolicy.to_json()` results are detached
+copies, including nested metadata. Their mutation cannot change later serialization
+or the compiled permission grants. Immutable policy copies may safely share compiled
+state; parsing and serialization retain the existing document shape and metadata.
 
 ## Cards, identity, and audit
 
@@ -497,6 +522,21 @@ only the launch gate; it must still acquire the writer lease. Explicit shutdown 
 over a pending restart. Failed replacement stops its owned child and releases ownership
 and launch admission, leaving recovery to a later start. Gateway-only re-exec does not
 own a board lease.
+
+`BoardHttpServer` tracks accepted sockets that are still reading input. Ordinary
+input inactivity is limited to 30 seconds. HTTP server shutdown or close fixes one
+absolute two-second incomplete-input deadline; repeated shutdown calls and trickled bytes do
+not reset it. A 100 ms raw-read poll observes expiration on Windows without poisoning
+the buffered reader. A timer also shuts down sockets still in that read phase.
+Admission atomically leaves the phase under its transport lock; response writes
+restore the ordinary socket-operation timeout, including early refusals and downloads.
+Short or expired bodies never enter command execution.
+
+Non-daemon request workers are still joined before publisher shutdown, listener
+handoff and writer-lease release. An admitted command retains that ownership through
+save even if sending its response fails. The read budget adds a poll/scheduling
+tolerance; it does not bound arbitrary command, disk or Git/publisher work, including
+any publisher preflush before HTTP shutdown begins.
 
 Legacy services started before lifetime ownership may need one-time consolidation during
 upgrade. A previously overwritten descriptor cannot enumerate unknown older writers;

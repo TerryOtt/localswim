@@ -54,6 +54,11 @@ native board monitoring is an optional extra.
   Use explicit child-process handoff on Windows; do not assume byte locks are inherited.
   Keep the old descriptor until replacement publication, preserve workspace launch identity,
   and rotate bearer credentials normally.
+  Bound incomplete HTTP input during drain with one absolute two-second budget,
+  observed within a 100 ms read poll plus scheduling; trickling must not reset it.
+  Preserve 30-second ordinary inactivity/response timeouts and non-daemon joins.
+  Transport expiry must never release ownership while an admitted command can save;
+  it does not impose a duration bound on command, disk or publisher work.
 - Board files can contain private identities, descriptions, comments, and history.
   Keep local boards under ignored `boards/` or outside this public checkout; never add
   real board data, credentials, or service descriptors to source control.
@@ -71,6 +76,11 @@ native board monitoring is an optional extra.
 - Generate a lane ID once from its initial display name, reject collisions, and never
   regenerate it after a label rename. Use the distinct offline label-rename and lane-ID
   migration operations for those different intents.
+  Reserve `completed` as both source and destination of identity migration; change
+  its display text only through label rename. Keep its terminal semantics intact.
+- Keep policy input, public document exposure and serialized output detached from
+  canonical policy state, including nested metadata. Compiled grants and subsequent
+  serialization must not change when a caller mutates any returned dictionary/list.
 - Keep durable product identifiers agent-neutral. Do not put a human assistant,
   automation product, model, or vendor name into lane, field, or protocol IDs.
 - Board-specific working agreements decide how an allowed transition is used. In the
@@ -184,6 +194,10 @@ native board monitoring is an optional extra.
 - Workspace discovery excludes hidden/Git/attachment directories and symbolic-link
   escapes. Serve assets locally. Source watching includes workspace assets, but Python
   syntax preflight must never treat JavaScript or CSS as Python input.
+  Discovery candidates use an 8 MiB ceiling plus one detection byte; isolate bad
+  candidates without hiding recognized board validation errors. Use request-local
+  private resolutions for one proxy scan, rechecking containment and file identity;
+  never accept caller mappings as discovery authority or introduce a durable cache.
 - Bound workspace reads and keep one poll in flight per navigation epoch. Show clear
   recovery and Retry for failed loads; never leave Loading indefinitely or lose queued
   retries. Advance the snapshot marker only after rendering/restoration succeeds.

@@ -1,5 +1,6 @@
 """TransitionPolicy ownership, isolation, and live reload behavior."""
 
+import copy
 import json
 import os
 from typing import TYPE_CHECKING, Any, cast
@@ -63,6 +64,80 @@ def test_transition_policy_cannot_be_mutated(tmp_path: pathlib.Path) -> None:
 
     with pytest.raises(TypeError):
         cast("Any", policy.table["backlog"].outbound)["completed"] = frozenset({"bot"})
+
+
+def policy_grants(policy: board_state.TransitionPolicy) -> dict[tuple[str, ...], bool]:
+    """Enumerate allowed and denied creation/move cases, including unknown IDs."""
+    actors = (*sorted(policy.rules.edge_actors), "unknown_actor")
+    states = (*policy.states, "unknown_lane")
+    creates = {
+        ("create", actor, state): policy.may_create(actor, state)
+        for actor in actors
+        for state in states
+    }
+    moves = {
+        ("move", actor, source, destination): policy.may_move(actor, source, destination)
+        for actor in actors
+        for source in states
+        for destination in states
+    }
+    return creates | moves
+
+
+@pytest.mark.parametrize("exposure", ["input", "document", "to_json"])
+def test_nested_policy_documents_are_detached(tmp_path: pathlib.Path, exposure: str) -> None:
+    document = policy_doc(policy_file(tmp_path, "rules.json"))
+    document["lanes"][0]["note"] = "Lane metadata must survive"
+    document["edges"]["terry"][0]["description"] = "Edge metadata must survive"
+    document["metadata"] = {"nested": [{"names": ["original"]}]}
+    original = copy.deepcopy(document)
+    policy = board_state.TransitionPolicy.from_json(document, "embedded test")
+    grants = policy_grants(policy)
+    if exposure == "document":
+        exposed = cast("dict[str, Any]", policy.rules.document)
+    elif exposure == "to_json":
+        exposed = cast("dict[str, Any]", policy.to_json())
+    else:
+        exposed = document
+
+    exposed["lanes"][0]["create"].clear()
+    exposed["lanes"][0]["note"] = "Changed lane metadata"
+    exposed["edges"]["terry"][0]["description"] = "Changed edge metadata"
+    exposed["edges"]["bot"].append({"from": "backlog", "to": "completed"})
+    exposed["metadata"]["nested"][0]["names"].append("changed")
+    exposed["priorities"][0]["label"] = "Changed priority label"
+
+    assert policy.to_json() == original
+    assert policy.rules.document == original
+    assert policy_grants(policy) == grants
+    reconstructed = board_state.TransitionPolicy.from_json(policy.to_json(), "round trip")
+    assert reconstructed.to_json() == original
+    assert policy_grants(reconstructed) == grants
+    assert reconstructed.lanes == policy.lanes
+    assert reconstructed.priorities == policy.priorities
+    assert reconstructed.priority_label == policy.priority_label
+    assert reconstructed.default_priority == policy.default_priority
+    # A real grant mutation must change the oracle when explicitly reconstructed.
+    changed = board_state.TransitionPolicy.from_json(exposed, "changed detached document")
+    assert policy_grants(changed) != grants
+    assert changed.may_move("bot", "backlog", "completed")
+    assert not policy.may_move("bot", "backlog", "completed")
+
+
+def test_deepcopy_policy_sharing_keeps_documents_isolated(tmp_path: pathlib.Path) -> None:
+    policy = board_state.TransitionPolicy.load(policy_file(tmp_path, "rules.json"))
+    original = policy.to_json()
+
+    shared = copy.deepcopy(policy)
+    assert shared is policy
+    exposed = cast("dict[str, Any]", shared.rules.document)
+    exposed["edges"]["bot"].clear()
+    exposed["lanes"].clear()
+
+    assert shared.to_json() == original
+    assert policy.to_json() == original
+    reconstructed = board_state.TransitionPolicy.from_json(shared.to_json(), "shared policy")
+    assert policy_grants(reconstructed) == policy_grants(policy)
 
 
 def test_edge_description_is_optional(tmp_path: pathlib.Path) -> None:

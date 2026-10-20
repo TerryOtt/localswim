@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -35,6 +36,9 @@ PREFIX = board_state.API_PREFIX + "/workspace"
 BOARD_PREFIX = PREFIX + "/boards/"
 PREFERENCES_ROUTE = PREFIX + "/preferences"
 MAX_PREFERENCES_BYTES = 64 * 1024
+# Discovery only: roughly five times the largest representative 1.7 MB snapshot.
+# This is not a board-service payload or attachment limit.
+MAX_CANDIDATE_BYTES = 8 * 1024 * 1024
 START_WAIT_SECONDS = 15.0
 START_POLL_SECONDS = 0.1
 REQUEST_TIMEOUT = 5.0
@@ -90,6 +94,40 @@ class Endpoint:
     user_css: str
 
 
+@dataclass(frozen=True)
+class _Candidate:
+    """One request's discovered file identity, never a durable authorization."""
+
+    path: pathlib.Path
+    identity: os.stat_result
+
+
+def _read_candidate(path: pathlib.Path) -> _Candidate | None:
+    """Read at most the ceiling plus one byte, and isolate each bad candidate."""
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            return None
+        # Nonblocking open also avoids waiting on a POSIX FIFO swapped in after stat.
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            identity = os.fstat(stream.fileno())
+            if not stat.S_ISREG(identity.st_mode) or identity.st_size > MAX_CANDIDATE_BYTES:
+                return None
+            blob = stream.read(MAX_CANDIDATE_BYTES + 1)
+        if len(blob) > MAX_CANDIDATE_BYTES:
+            return None
+        raw = cast("board_state.JsonValue", json.loads(blob.decode("utf-8")))
+        if (
+            isinstance(raw, dict)
+            and raw.get("schema") == board_state.SCHEMA
+            and all(field in raw for field in ("project", "items", "policy"))
+        ):
+            return _Candidate(path, identity)
+    except OSError, ValueError, RecursionError:
+        pass
+    return None
+
+
 class Workspace:
     """Discover boards and acquire their independently owned service endpoints."""
 
@@ -118,8 +156,8 @@ class Workspace:
                 raise OSError(msg)
             return self._board_locks.setdefault(path, threading.Lock())
 
-    def _paths(self) -> dict[str, pathlib.Path]:
-        found: dict[str, pathlib.Path] = {}
+    def _paths(self) -> dict[str, _Candidate]:
+        found: dict[str, _Candidate] = {}
         for directory, names, filenames in os.walk(self.root, followlinks=False):
             parent = pathlib.Path(directory)
             names[:] = sorted(
@@ -141,33 +179,51 @@ class Workspace:
                     continue
                 if path.is_symlink() or not path.resolve().is_relative_to(self.root):
                     continue
-                try:
-                    raw = cast(
-                        "board_state.JsonValue", json.loads(path.read_text(encoding="utf-8"))
-                    )
-                except OSError, ValueError:
-                    continue
-                if (
-                    isinstance(raw, dict)
-                    and raw.get("schema") == board_state.SCHEMA
-                    and all(field in raw for field in ("project", "items", "policy"))
-                ):
+                if candidate := _read_candidate(path):
                     key = path.relative_to(self.root).with_suffix("").as_posix()
-                    found[key] = path.resolve()
+                    found[key] = candidate
         return found
+
+    def _checked_path(self, candidate: _Candidate) -> pathlib.Path:
+        """Recheck containment and file identity immediately before consuming a scan."""
+        path = candidate.path
+        canonical = path.resolve(strict=True)
+        if not canonical.is_relative_to(self.root):
+            raise ValueError("board is outside the workspace")
+        for part in (path, *path.parents):
+            if part == self.root:
+                break
+            if part.is_symlink() or part.is_junction():
+                raise ValueError("workspace board path changed")
+        current = path.stat()
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if not stat.S_ISREG(current.st_mode) or any(
+            getattr(current, field) != getattr(candidate.identity, field) for field in fields
+        ):
+            raise ValueError("workspace board changed during discovery; retry")
+        return canonical
+
+    def _resolve(self, key: str) -> _Candidate:
+        candidate = self._paths().get(key)
+        if candidate is None:
+            raise ValueError("unknown workspace board")
+        return candidate
 
     def board_path(self, key: str) -> pathlib.Path:
         """Resolve only a discovered board, including after filesystem changes."""
-        path = self._paths().get(key)
-        if path is None:
-            msg = "unknown workspace board"
-            raise ValueError(msg)
-        return path
+        return self._checked_path(self._resolve(key))
+
+    def resolve_endpoint(self, key: str) -> tuple[pathlib.Path, Endpoint]:
+        """Resolve and acquire a scoped endpoint using one request-local scan."""
+        candidate = self._resolve(key)
+        path = self._checked_path(candidate)
+        return path, self._endpoint(candidate)
 
     def catalog(self) -> board_state.JsonObject:
         """Read attention counts without starting services or changing snapshots."""
         boards: list[board_state.JsonValue] = []
-        for key, path in self._paths().items():
+        for key, candidate in self._paths().items():
+            path = candidate.path
             counts: board_state.JsonObject = {"blocked": 0, "needsHuman": 0, "review": 0}
             entry: board_state.JsonObject = {
                 "key": key,
@@ -176,6 +232,7 @@ class Workspace:
                 "lastCardEditMs": None,
             }
             try:
+                path = self._checked_path(candidate)
                 board = board_state.load(path)
                 entry["project"] = board.project or path.stem
                 entry["lastCardEditMs"] = last_card_edit_ms(board)
@@ -196,7 +253,7 @@ class Workspace:
                         ),
                     }
                 )
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, RecursionError) as exc:
                 entry["error"] = str(exc)
             boards.append(entry)
         return {
@@ -279,19 +336,22 @@ class Workspace:
             connection.close()
 
     def _await_existing(
-        self, path: pathlib.Path, *, wait_for_upgrade: bool = True
+        self, candidate: _Candidate, *, wait_for_upgrade: bool = True
     ) -> Endpoint | None:
         deadline = time.monotonic() + START_WAIT_SECONDS
         while True:
+            path = self._checked_path(candidate)
             upgrading = False
             try:
                 if endpoint := self._existing(path):
+                    self._checked_path(candidate)
                     return endpoint
             except ServiceUpgradePendingError:
                 if not wait_for_upgrade:
                     raise
                 upgrading = True
             if not upgrading and not service_ownership.writer_busy(path):
+                self._checked_path(candidate)
                 return None
             if time.monotonic() >= deadline:
                 msg = "existing board writer did not publish a healthy endpoint before timeout"
@@ -306,28 +366,43 @@ class Workspace:
     def endpoint(self, path: pathlib.Path) -> Endpoint:
         """Reuse a matching live writer, otherwise launch one on an ephemeral port."""
         path = path.resolve()
-        if path not in self._paths().values():
+        candidate = next(
+            (candidate for candidate in self._paths().values() if candidate.path == path), None
+        )
+        if candidate is None:
             msg = "board is outside the workspace"
             raise ValueError(msg)
-        board_state.load(path)
+        return self._endpoint(candidate)
+
+    def _endpoint(self, candidate: _Candidate) -> Endpoint:
+        path = self._checked_path(candidate)
+        try:
+            board_state.load(path)
+        except RecursionError as exc:
+            raise ValueError("workspace board nesting is too deep") from exc
         with self._board_lock(path):
+            self._checked_path(candidate)
             with self._bookkeeping_lock:
                 if self._closed:
                     msg = "workspace is closed"
                     raise OSError(msg)
             while True:
+                self._checked_path(candidate)
                 try:
-                    return self._endpoint_under_gate(path)
+                    return self._endpoint_under_gate(candidate)
                 except ServiceUpgradePendingError:
                     # The old writer takes this same gate before its restart.
                     # Release it before waiting for the replacement to become ready.
-                    if endpoint := self._await_existing(path):
+                    if endpoint := self._await_existing(candidate):
                         return endpoint
 
-    def _endpoint_under_gate(self, path: pathlib.Path) -> Endpoint:
+    def _endpoint_under_gate(self, candidate: _Candidate) -> Endpoint:
+        path = self._checked_path(candidate)
         with self._launch_locked(path) as gate:
-            if endpoint := self._await_existing(path, wait_for_upgrade=False):
+            self._checked_path(candidate)
+            if endpoint := self._await_existing(candidate, wait_for_upgrade=False):
                 return endpoint
+            self._checked_path(candidate)
             arguments = ["-m", "localswim.api_endpoint", str(path), "--port", "0"]
             if self.settings.snapshot().autopush:
                 arguments.append("--autopush")
@@ -351,8 +426,10 @@ class Workspace:
                 self._launch_ids[path] = launch_id
             deadline = time.monotonic() + START_WAIT_SECONDS
             while time.monotonic() < deadline:
+                self._checked_path(candidate)
                 try:
                     if endpoint := self._existing(path):
+                        self._checked_path(candidate)
                         return endpoint
                 except ServiceUpgradePendingError:
                     pass
@@ -523,7 +600,7 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             try:
                 board = board_state.load(self.workspace.board_path(key))
                 title = board.project or title
-            except OSError, ValueError:
+            except OSError, ValueError, RecursionError:
                 pass
         page = (
             api_endpoint.PAGE.replace("%POLL%", str(api_endpoint.POLL_MS))
@@ -572,8 +649,7 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
                 return
             body = self.rfile.read(size)
         try:
-            path = self.workspace.board_path(urllib.parse.unquote(encoded_key))
-            endpoint = self.workspace.endpoint(path)
+            path, endpoint = self.workspace.resolve_endpoint(urllib.parse.unquote(encoded_key))
             if tail == "browser-session":
                 self._json(
                     {

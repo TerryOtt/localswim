@@ -15,6 +15,7 @@ import pytest
 
 from localswim import api_endpoint, board_state, cli
 from tests.support import USERS
+from tests.test_completed_dependencies import complete
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1388,6 +1389,9 @@ def test_cli_migrates_embedded_lane_id_atomically(tmp_path: pathlib.Path) -> Non
     assert run_cli(path, "board", "init", str(description), str(permissions)).returncode == 0
     board = board_state.load(path)
     board.create("alpha", "Alpha", "ready_for_work", "bot")
+    board.move("alpha", "in_progress", "bot")
+    board.create("beta", "Beta", "ready_for_work", "bot")
+    board.revision = 4
     board_state.save(board, path)
 
     result = run_cli(path, "lane", "migrate-id", "ready_for_work", "selected_work")
@@ -1395,11 +1399,125 @@ def test_cli_migrates_embedded_lane_id_atomically(tmp_path: pathlib.Path) -> Non
     assert result.returncode == 0, result.stderr
     migrated = board_state.load(path)
     assert "ready_for_work" not in json.dumps(migrated.to_json())
-    assert migrated.find("alpha").state == "selected_work"
-    assert migrated.find("alpha").replayed_state() == "selected_work"
+    assert migrated.find("alpha").state == "in_progress"
+    assert migrated.find("alpha").replayed_state() == "in_progress"
+    assert migrated.find("alpha").history[0].to == "selected_work"
+    assert migrated.find("alpha").history[1].frm == "selected_work"
+    assert migrated.find("beta").state == "selected_work"
+    assert migrated.find("beta").replayed_state() == "selected_work"
     assert migrated.policy.may_move("terry", "selected_work", "in_progress")
     assert migrated.verify() == []
-    assert migrated.revision == 1
+    assert migrated.revision == board.revision + 1
+
+
+def completed_lane_board(path: pathlib.Path) -> board_state.Board:
+    """Keep an accepted intermediate card outside dependency priority propagation."""
+    with socket.socket() as candidate:
+        candidate.bind(("127.0.0.1", 0))
+        port = candidate.getsockname()[1]
+    board = board_state.Board(
+        project="Completed migration",
+        port=port,
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
+    )
+    board.create("root", "Root", "backlog", "bot", priority="P0")
+    board.create("done", "Accepted", "ready_for_work", "bot", priority="P2")
+    complete(board, "done")
+    board.create("leaf", "Leaf", "backlog", "bot", priority="P3")
+    board.link("root", "blocks", "done", "bot")
+    board.link("done", "blocks", "leaf", "bot")
+    board.revision = 7
+    assert board.verify() == []
+    board_state.save(board, path)
+    return board
+
+
+def assert_completed_semantics(board: board_state.Board) -> None:
+    """Check both terminal priority exemption and atomic batch-selection protection."""
+    before = board.to_json()
+    assert board.find("done").state == "completed"
+    assert board.find("done").replayed_state() == "completed"
+    assert board.find("done").priority == "P2"
+    assert board.find("leaf").priority == "P3"
+    assert board.dependency_priority_promotions() == {}
+    with pytest.raises(board_state.BoardError, match="Completed"):
+        board.set_priorities(["leaf", "done"], "P5", "bot")
+    assert board.to_json() == before
+    assert board.verify() == []
+
+
+def test_cli_refuses_migration_from_completed_without_changing_snapshot(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    original = completed_lane_board(path)
+    before = path.read_bytes()
+
+    result = run_cli(path, "lane", "migrate-id", "completed", "done")
+
+    assert result.returncode != 0
+    assert "reserved lane ID 'completed'" in result.stderr
+    assert "rename-label" in result.stderr
+    assert path.read_bytes() == before
+    unchanged = board_state.load(path)
+    assert unchanged.to_json() == original.to_json()
+    assert_completed_semantics(unchanged)
+
+
+def test_cli_refuses_migration_into_absent_completed_lane(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    description, permissions = initialization_inputs(tmp_path)
+    assert_cli(path, "board", "init", str(description), str(permissions))
+    raw = board_state.load(path).to_json()
+    policy = raw["policy"]
+    assert isinstance(policy, dict)
+    lanes = policy["lanes"]
+    assert isinstance(lanes, list)
+    policy["lanes"] = [
+        lane for lane in lanes if isinstance(lane, dict) and lane["id"] != "completed"
+    ]
+    edges = policy["edges"]
+    assert isinstance(edges, dict)
+    for actor, allowed in edges.items():
+        assert isinstance(allowed, list)
+        edges[actor] = [
+            edge
+            for edge in allowed
+            if isinstance(edge, dict) and "completed" not in (edge["from"], edge["to"])
+        ]
+    board = board_state.Board.from_json(raw, "no completed lane")
+    board.create("alpha", "Alpha", "ready_for_work", "bot")
+    assert "completed" not in board.policy.states
+    assert board.verify() == []
+    board_state.save(board, path)
+    before = path.read_bytes()
+
+    result = run_cli(path, "lane", "migrate-id", "ready_for_work", "completed")
+
+    assert result.returncode != 0
+    assert "reserved lane ID 'completed'" in result.stderr
+    assert "rename-label" in result.stderr
+    assert "already exists" not in result.stderr
+    assert path.read_bytes() == before
+
+
+def test_cli_completed_label_rename_preserves_terminal_semantics(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    original = completed_lane_board(path)
+
+    result = run_cli(path, "lane", "rename-label", "completed", "Accepted")
+
+    assert result.returncode == 0, result.stderr
+    renamed = board_state.load(path)
+    assert renamed.policy.lane_label["completed"] == "Accepted"
+    assert "accepted" not in renamed.policy.states
+    assert renamed.revision == original.revision + 1
+    assert [item.to_json() for item in renamed.items] == [item.to_json() for item in original.items]
+    assert [link.to_json() for link in renamed.links] == [link.to_json() for link in original.links]
+    assert_completed_semantics(renamed)
 
 
 def test_cli_embeds_policy_into_a_schema_three_board(tmp_path: pathlib.Path) -> None:

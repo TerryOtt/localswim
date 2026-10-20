@@ -5,6 +5,7 @@ import contextlib
 import datetime as dt
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from localswim import api_endpoint, attachments, board_state, workspace
+from localswim import api_endpoint, attachments, board_state, service_ownership, workspace
 from tests.support import USERS
 from tests.test_api import request_json
 from tests.test_attachments import PNG
@@ -114,6 +115,323 @@ def test_discovery_excludes_configuration_and_attachment_files(tmp_path: pathlib
         assert rows[0]["counts"] == {"blocked": 0, "needsHuman": 0, "review": 0}
     finally:
         instance.close()
+
+
+def test_discovery_isolates_nested_and_invalid_candidates(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Control")
+    depth = sys.getrecursionlimit() * 2
+    (tmp_path / "nested.json").write_text("[" * depth + "0" + "]" * depth, encoding="utf-8")
+    (tmp_path / "invalid.json").write_bytes(b"\xff")
+    (tmp_path / "syntax.json").write_text("{", encoding="utf-8")
+    (tmp_path / "unrelated.json").write_text('{"schema":4}', encoding="utf-8")
+    make_board(tmp_path / ".hidden" / "board.json", "Hidden")
+    make_board(tmp_path / ".git" / "board.json", "Git")
+    instance = workspace.Workspace(tmp_path)
+    expected = workspace.Endpoint(12345, "synthetic", "")
+
+    def endpoint(_candidate: workspace._Candidate) -> workspace.Endpoint:
+        return expected
+
+    monkeypatch.setattr(instance, "_endpoint_under_gate", endpoint)
+    assert [row["project"] for row in catalog_boards(instance)] == ["Control"]
+    assert instance.board_path("board") == path.resolve()
+    assert instance.resolve_endpoint("board") == (path.resolve(), expected)
+    result = instance.update_preferences(0, {"action": "pin", "key": "board"})
+    assert result.pinned_boards == ("board",)
+
+
+@pytest.mark.parametrize("extra", [-1, 0, 1])
+def test_discovery_candidate_exact_byte_boundary(tmp_path: pathlib.Path, extra: int) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Boundary")
+    original = path.read_bytes()
+    ceiling = workspace.MAX_CANDIDATE_BYTES
+    path.write_bytes(original + b" " * (ceiling + extra - len(original)))
+    rows = catalog_boards(workspace.Workspace(tmp_path))
+    assert len(rows) == (0 if extra > 0 else 1)
+    if rows:
+        assert rows[0]["project"] == "Boundary"
+
+
+def test_discovery_growth_read_is_limited_to_ceiling_plus_one(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "large.json"
+    path.write_bytes(b" " * 200)
+    monkeypatch.setattr(workspace, "MAX_CANDIDATE_BYTES", 100)
+    original_stat = os.fstat
+    reads: list[int] = []
+    original_fdopen = os.fdopen
+
+    def small_stat(fd: int) -> os.stat_result:
+        values = list(original_stat(fd))
+        values[6] = 1
+        return os.stat_result(values)
+
+    @contextlib.contextmanager
+    def recording_open(fd: int, mode: str) -> Generator[Any]:
+        with original_fdopen(fd, mode) as stream:
+
+            class Reader:
+                def fileno(self) -> int:
+                    return stream.fileno()
+
+                def read(self, size: int) -> bytes:
+                    reads.append(size)
+                    return stream.read(size)
+
+            yield Reader()
+
+    monkeypatch.setattr(os, "fstat", small_stat)
+    monkeypatch.setattr(os, "fdopen", recording_open)
+    assert workspace._read_candidate(path) is None  # noqa: SLF001 -- reader boundary probe
+    assert reads == [101]
+
+
+def test_proxy_resolution_scans_and_reads_each_candidate_once(
+    gateway: RunningWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scans: list[None] = []
+    reads: list[pathlib.Path] = []
+    original_paths = gateway.instance._paths  # noqa: SLF001 -- deterministic scan counter
+    original_reader = workspace._read_candidate  # noqa: SLF001 -- candidate read counter
+
+    def scan() -> dict[str, workspace._Candidate]:
+        scans.append(None)
+        return original_paths()
+
+    def read(path: pathlib.Path) -> workspace._Candidate | None:
+        reads.append(path)
+        return original_reader(path)
+
+    monkeypatch.setattr(gateway.instance, "_paths", scan)
+    monkeypatch.setattr(workspace, "_read_candidate", read)
+    status, _ = request_json(board_route(gateway.base, "alpha/board", "browser-session"))
+    assert status == 200
+    assert len(scans) == 1
+    assert sorted(reads) == sorted([gateway.first, gateway.second])
+
+
+@pytest.mark.parametrize("change", ["remove", "replace", "directory"])
+def test_request_resolution_refuses_changed_candidates(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before")
+    instance = workspace.Workspace(tmp_path)
+    original_paths = instance._paths  # noqa: SLF001 -- deterministic filesystem race
+
+    def scan_then_change() -> dict[str, workspace._Candidate]:
+        candidates = original_paths()
+        path.unlink()
+        if change == "replace":
+            make_board(path, "Replacement with a different size")
+        elif change == "directory":
+            path.mkdir()
+        return candidates
+
+    monkeypatch.setattr(instance, "_paths", scan_then_change)
+    with pytest.raises((ValueError, OSError)):
+        instance.resolve_endpoint("board")
+    assert not instance._children  # noqa: SLF001 -- refusal must precede child launch
+
+
+@pytest.mark.parametrize("change", ["none", "remove", "replace", "symlink"])
+def test_launch_gate_rechecks_candidate_before_reuse_or_launch(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    root = tmp_path / "root"
+    path = root / "board.json"
+    make_board(path, "Inside")
+    outside = tmp_path / "outside.json"
+    make_board(outside, "Outside")
+    instance = workspace.Workspace(root)
+    scans = 0
+    reuse_calls = 0
+    original_paths = instance._paths  # noqa: SLF001 -- no second scan after gate wait
+    expected = workspace.Endpoint(12345, "synthetic", "")
+
+    def scan() -> dict[str, workspace._Candidate]:
+        nonlocal scans
+        scans += 1
+        return original_paths()
+
+    @contextlib.contextmanager
+    def delayed_gate(target: pathlib.Path) -> Generator[object]:
+        if change != "none":
+            target.unlink()
+            if change == "replace":
+                target.write_text("{}", encoding="utf-8")
+            elif change == "symlink":
+                try:
+                    target.symlink_to(outside)
+                except OSError:
+                    pytest.skip("creating symlinks requires unavailable OS privilege")
+        yield object()
+
+    def reuse(_path: pathlib.Path) -> workspace.Endpoint:
+        nonlocal reuse_calls
+        reuse_calls += 1
+        return expected
+
+    def refuse_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("changed candidate reached process launch")
+
+    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_launch_locked", delayed_gate)
+    monkeypatch.setattr(instance, "_existing", reuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    if change == "none":
+        assert instance.resolve_endpoint("board") == (path.resolve(), expected)
+        assert reuse_calls == 1
+    else:
+        with pytest.raises((OSError, ValueError)):
+            instance.resolve_endpoint("board")
+        assert reuse_calls == 0
+    assert scans == 1
+
+
+@pytest.mark.parametrize("boundary", ["busy", "upgrade", "ready", "before_launch"])
+def test_endpoint_wait_paths_retain_candidate_identity(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before")
+    instance = workspace.Workspace(tmp_path)
+    attempts = 0
+
+    def replace() -> None:
+        path.unlink()
+        path.write_text("{}", encoding="utf-8")
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint | None:
+        nonlocal attempts
+        attempts += 1
+        if boundary == "upgrade":
+            replace()
+            raise workspace.ServiceUpgradePendingError("synthetic upgrade")
+        if boundary == "ready":
+            replace()
+            return workspace.Endpoint(12345, "synthetic", "")
+        return None
+
+    def busy(_path: pathlib.Path) -> bool:
+        replace()
+        return boundary == "busy"
+
+    def refuse_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("changed candidate reached process launch")
+
+    monkeypatch.setattr(instance, "_existing", existing)
+    monkeypatch.setattr(service_ownership, "writer_busy", busy)
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    monkeypatch.setattr(workspace, "START_POLL_SECONDS", 0)
+    with pytest.raises((OSError, ValueError)):
+        instance.resolve_endpoint("board")
+    assert attempts == 1
+
+
+def test_fresh_requests_observe_removal_and_replacement(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before")
+    instance = workspace.Workspace(tmp_path)
+    assert catalog_boards(instance)[0]["project"] == "Before"
+    path.unlink()
+    assert catalog_boards(instance) == []
+    with pytest.raises(ValueError, match="unknown"):
+        instance.board_path("board")
+    make_board(path, "After")
+    assert catalog_boards(instance)[0]["project"] == "After"
+
+
+def test_catalog_contains_recursion_in_recognized_board_validation(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Recognized")
+
+    def too_deep(_path: pathlib.Path) -> board_state.Board:
+        raise RecursionError("synthetic validation recursion")
+
+    monkeypatch.setattr(board_state, "load", too_deep)
+    instance = workspace.Workspace(tmp_path)
+    row = catalog_boards(instance)[0]
+    assert row["key"] == "board"
+    assert "error" in row
+    with pytest.raises(ValueError, match="nesting"):
+        instance.resolve_endpoint("board")
+
+
+def test_nonregular_candidates_are_not_opened(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "fifo.json"
+    path.touch()
+    original_stat = type(path).stat
+
+    def nonregular(target: pathlib.Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        values = list(original_stat(target, follow_symlinks=follow_symlinks))
+        if target == path:
+            values[0] = stat.S_IFIFO
+        return os.stat_result(values)
+
+    monkeypatch.setattr(type(path), "stat", nonregular)
+
+    def fail_open(*_args: object) -> int:
+        pytest.fail("nonregular file opened")
+
+    monkeypatch.setattr(os, "open", fail_open)
+    assert workspace._read_candidate(path) is None  # noqa: SLF001 -- reader boundary probe
+
+
+def test_direct_endpoint_rejects_undiscovered_and_outside_paths(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    make_board(outside, "Outside")
+    unrelated = root / "unrelated.json"
+    unrelated.write_text("{}", encoding="utf-8")
+    instance = workspace.Workspace(root)
+    for path in (outside, unrelated):
+        with pytest.raises(ValueError, match="outside"):
+            instance.endpoint(path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory junction behavior")
+def test_discovery_excludes_directory_junction_escape(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside" / "board.json"
+    make_board(outside, "Outside")
+    link = root / "junction"
+    command = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside.parent)],
+        capture_output=True,
+        check=False,
+    )
+    if command.returncode:
+        pytest.skip("creating directory junctions is unavailable")
+    assert link.is_junction()
+    assert catalog_boards(workspace.Workspace(root)) == []
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_discovery_omits_privileged_symlink_escapes(
+    tmp_path: pathlib.Path, *, directory: bool
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside" / "board.json"
+    make_board(outside, "Outside")
+    link = root / ("linked" if directory else "linked.json")
+    try:
+        link.symlink_to(outside.parent if directory else outside, target_is_directory=directory)
+    except OSError:
+        pytest.skip("creating symlinks requires unavailable OS privilege")
+    assert catalog_boards(workspace.Workspace(root)) == []
 
 
 def test_stable_keys_survive_label_changes_and_new_boards(tmp_path: pathlib.Path) -> None:

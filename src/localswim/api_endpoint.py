@@ -65,11 +65,13 @@ import errno
 import hashlib
 import html
 import http.server
+import io
 import json
 import os
 import pathlib
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
@@ -84,6 +86,8 @@ from . import attachments, board_state, service_ownership
 if TYPE_CHECKING:
     import socketserver
     from collections.abc import Callable, Generator
+
+    from _typeshed import WriteableBuffer
 
 HOST = "127.0.0.1"
 API_PREFIX = board_state.API_PREFIX
@@ -419,11 +423,138 @@ def source_status(server: socketserver.BaseServer) -> board_state.JsonObject:
     }
 
 
+# Local connections may pause between reads, including a maximum-size upload.
+# These are transport budgets, separate from startup/replacement readiness waits.
+# Thirty seconds tolerates local transfer pauses; two seconds allows an already
+# connected upload to finish on restart without letting incomplete input pin a
+# writer indefinitely. Expiration is observed within one poll plus scheduling.
+HTTP_IDLE_TIMEOUT_S = 30.0
+HTTP_INCOMPLETE_DRAIN_S = 2.0
+HTTP_READ_POLL_S = 0.1
+
+
+class _BoardRequestReader(io.RawIOBase):
+    """Retry read polls inside the raw stream, without poisoning BufferedReader.
+
+    On Windows, shutdown from another thread need not wake a timed socket's
+    select wait. Short recv polls make the absolute drain budget observable even
+    for a completely idle socket. Bytes received reset the ordinary idle budget.
+    """
+
+    def __init__(self, connection: socket.socket, server: BoardHttpServer) -> None:
+        super().__init__()
+        self.connection = connection
+        self.server = server
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: WriteableBuffer) -> int:
+        idle_deadline = time.monotonic() + HTTP_IDLE_TIMEOUT_S
+        while self.server.read_allowed(self.connection):
+            try:
+                self.connection.settimeout(HTTP_READ_POLL_S)
+                return self.connection.recv_into(buffer)
+            except TimeoutError:
+                if time.monotonic() >= idle_deadline:
+                    raise
+            except OSError:
+                if self.server.read_allowed(self.connection):
+                    raise
+                break
+        raise TimeoutError("incomplete board request expired during drain")
+
+
 class BoardHttpServer(http.server.ThreadingHTTPServer):
-    """Finish active mutations before the process replaces itself."""
+    """Bound incomplete transport reads, then join every admitted worker.
+
+    A drain timer closes only sockets still reading input. Its absolute deadline
+    also catches trickling input; socket inactivity timeouts alone cannot do so.
+    Executing commands keep their worker and writer ownership until completion.
+    Disk, Git/publisher work and command execution have no new duration bound.
+    """
 
     daemon_threads = False
     block_on_close = True
+
+    def __init__(self, server_address: tuple[str, int], handler: type[Handler]) -> None:
+        self._transport_lock = threading.Lock()
+        self._reading: set[socket.socket] = set()
+        self._drain_deadline: float | None = None
+        self._drain_timer: threading.Timer | None = None
+        super().__init__(server_address, handler)
+
+    def process_request(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        """Register before spawning, so a newly accepted idle socket is covered."""
+        if not isinstance(request, socket.socket):
+            raise TypeError("board HTTP requires a TCP socket")
+        request.settimeout(HTTP_READ_POLL_S)
+        with self._transport_lock:
+            if self._drain_deadline is not None:
+                self.shutdown_request(request)
+                return
+            self._reading.add(request)
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.finish_transport(request)
+            raise
+
+    def finish_transport(self, request: socket.socket) -> None:
+        """Forget completed/failed workers without affecting their normal close."""
+        with self._transport_lock:
+            self._reading.discard(request)
+
+    def read_allowed(self, request: socket.socket) -> bool:
+        with self._transport_lock:
+            return request in self._reading and (
+                self._drain_deadline is None or time.monotonic() < self._drain_deadline
+            )
+
+    def admit_request(self, request: socket.socket) -> bool:
+        """Atomically leave the read phase, or refuse input expired by drain."""
+        with self._transport_lock:
+            if request not in self._reading:
+                return False
+            if self._drain_deadline is not None and time.monotonic() >= self._drain_deadline:
+                return False
+            self._reading.remove(request)
+            request.settimeout(HTTP_IDLE_TIMEOUT_S)
+            return True
+
+    def _expire_incomplete(self) -> None:
+        with self._transport_lock:
+            for request in self._reading:
+                # Closing a socket object alone need not interrupt makefile reads.
+                with contextlib.suppress(OSError):
+                    request.shutdown(socket.SHUT_RDWR)
+            self._reading.clear()
+
+    def begin_drain(self) -> None:
+        """Start one total incomplete-input budget, even if shutdown repeats."""
+        with self._transport_lock:
+            if self._drain_deadline is not None:
+                return
+            self._drain_deadline = time.monotonic() + HTTP_INCOMPLETE_DRAIN_S
+            self._drain_timer = threading.Timer(HTTP_INCOMPLETE_DRAIN_S, self._expire_incomplete)
+            self._drain_timer.start()
+
+    def shutdown(self) -> None:
+        """Stop admissions and begin expiration before the serve loop stops."""
+        self.begin_drain()
+        super().shutdown()
+
+    def server_close(self) -> None:
+        """Preserve the non-daemon join before publisher/lease/restart handoff."""
+        self.begin_drain()
+        try:
+            super().server_close()
+        finally:
+            if self._drain_timer is not None:
+                self._drain_timer.cancel()
+                self._drain_timer.join()
 
 
 _shutdown_requested = threading.Event()
@@ -4944,6 +5075,31 @@ def _http_command_response(
 class Handler(http.server.BaseHTTPRequestHandler):
     """The page, the board, a timestamp to poll, the fonts, and three write routes."""
 
+    def setup(self) -> None:
+        super().setup()
+        if isinstance(self.server, BoardHttpServer):
+            self.rfile.close()
+            self.rfile = io.BufferedReader(_BoardRequestReader(self.connection, self.server))
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            if isinstance(self.server, BoardHttpServer):
+                self.server.finish_transport(self.connection)
+
+    def _admit_transport(self) -> bool:
+        if isinstance(self.server, BoardHttpServer):
+            return self.server.admit_request(self.connection)
+        return True
+
+    def end_headers(self) -> None:
+        # Read polling must never become a 100 ms response-write timeout,
+        # including refusals before command admission and parser errors.
+        if isinstance(self.server, BoardHttpServer):
+            self.connection.settimeout(HTTP_IDLE_TIMEOUT_S)
+        super().end_headers()
+
     def _send(self, body: bytes, ctype: str, code: int = 200) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -4973,7 +5129,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     413,
                 )
                 return None
-            raw = self.rfile.read(length) or b"{}"
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                return None
+            raw = raw or b"{}"
             body = cast(
                 "board_state.JsonValue",
                 json.loads(raw, object_pairs_hook=_unique_request_fields)
@@ -5093,6 +5252,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._json({"ok": True, "mtime": mtime, "stamp": stamp, **code_meta, "push": push_status()})
 
     def do_GET(self) -> None:
+        if not self._admit_transport():
+            return
         route = self.path.partition("?")[0]
         if route in ("/v1/status", "/mtime"):
             # A pre-upgrade page needs one successful poll to discover the new build
@@ -5174,6 +5335,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _shutdown_post(self) -> None:
         """Authenticate and schedule the existing graceful shutdown command."""
+        if not self._admit_transport():
+            return
         if self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
             self._json({"error": "missing or invalid service credential"}, 401)
             return
@@ -5216,6 +5379,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         with _command_gate:
+            if not self._admit_transport():
+                return
             if _shutdown_requested.is_set():
                 self._json({"error": "board service shutdown is in progress"}, 503)
                 return

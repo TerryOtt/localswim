@@ -408,7 +408,11 @@ def test_root_page_refuses_candidate_title_cast_and_context(
     def capture_page(body: bytes, _content_type: str) -> None:
         pages.append(body)
 
-    handler = cast("api_endpoint.Handler", SimpleNamespace(path="/", _send=capture_page))
+    # This page-admission probe starts after transport; socket tests cover that gate.
+    handler = cast(
+        "api_endpoint.Handler",
+        SimpleNamespace(path="/", _send=capture_page, _admit_transport=lambda: True),
+    )
     api_endpoint.Handler.do_GET(handler)
     assert before == board_state.ACTORS
     assert b"Rejected secret project" not in pages[0]

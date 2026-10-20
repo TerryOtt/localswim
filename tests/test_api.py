@@ -2,9 +2,13 @@
 
 # ruff: noqa: SLF001 -- restart lifecycle tests intentionally inspect private state
 
+import base64
+import contextlib
+import http.client
 import json
 import pathlib
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -14,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from localswim import api_endpoint, board_state
+from localswim import api_endpoint, attachments, board_state
 from tests.support import USERS
 
 if TYPE_CHECKING:
@@ -27,6 +31,7 @@ API = api_endpoint.API_PREFIX
 class RunningApi:
     base: str
     path: pathlib.Path
+    server: api_endpoint.BoardHttpServer
 
 
 @pytest.fixture
@@ -40,13 +45,11 @@ def api(tmp_path: pathlib.Path) -> Iterator[RunningApi]:
     api_endpoint.BOARD_PATH = path
     api_endpoint.STORE = api_endpoint.BoardStore(path)
     api_endpoint._shutdown_requested.clear()
-    server = api_endpoint.http.server.ThreadingHTTPServer(
-        (api_endpoint.HOST, 0), api_endpoint.Handler
-    )
+    server = api_endpoint.BoardHttpServer((api_endpoint.HOST, 0), api_endpoint.Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield RunningApi(f"http://127.0.0.1:{server.server_address[1]}", path)
+        yield RunningApi(f"http://127.0.0.1:{server.server_address[1]}", path, server)
     finally:
         if thread.is_alive():
             server.shutdown()
@@ -1098,3 +1101,177 @@ def test_shutdown_releases_writer_gate_for_final_attachment_snapshot(
     monkeypatch.setattr(api_endpoint, "flush_autopush_for_shutdown", flush)
     code, _ = request_json(api.base + API + "/shutdown", token=api_endpoint.CLI_TOKEN, body={})
     assert code == 200
+
+
+@pytest.mark.parametrize("mode", ["shutdown", "restart"])
+@pytest.mark.parametrize("phase", ["idle", "headers", "body", "trickle_headers", "trickle_body"])
+def test_incomplete_transport_drain_joins_workers(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch, mode: str, phase: str
+) -> None:
+    """The total drain deadline wins even while bytes keep arriving."""
+    monkeypatch.setattr(api_endpoint, "HTTP_INCOMPLETE_DRAIN_S", 0.15)
+    monkeypatch.setattr(api_endpoint, "HTTP_IDLE_TIMEOUT_S", 2.0)
+
+    def flush(_path: pathlib.Path) -> tuple[bool, str]:
+        return True, "disabled"
+
+    monkeypatch.setattr(api_endpoint, "flush_autopush_for_shutdown", flush)
+    entered, finished = threading.Event(), threading.Event()
+    workers: list[threading.Thread] = []
+    original = api_endpoint.Handler.handle
+
+    def observe(handler: api_endpoint.Handler) -> None:
+        workers.append(threading.current_thread())
+        entered.set()
+        try:
+            original(handler)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(api_endpoint.Handler, "handle", observe)
+    before = api.path.read_bytes()
+    with socket.create_connection((api_endpoint.HOST, api.server.server_port), timeout=2) as client:
+        assert entered.wait(2)
+        if "headers" in phase:
+            client.sendall(b"POST /api/v001/cards HTTP/1.0\r\nX-Trickle: ")
+        elif "body" in phase:
+            client.sendall(
+                b"POST /api/v001/cards HTTP/1.0\r\n"
+                + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
+                + b'If-Match: "revision-0"\r\nContent-Length: 10000\r\n\r\n{'
+            )
+        started = time.monotonic()
+        stopper: threading.Thread | None = None
+        try:
+            if mode == "shutdown":
+                assert api_endpoint.request_service_shutdown(api.server)[0]
+            else:
+                assert api_endpoint._reserve_board_restart(api.server)
+                stopper = threading.Thread(target=api.server.shutdown)
+                stopper.start()
+            if phase.startswith("trickle"):
+                while not finished.wait(0.015):
+                    api.server.begin_drain()  # Repeated drain requests cannot reset the deadline.
+                    with contextlib.suppress(OSError):
+                        client.sendall(b" ")
+                    assert time.monotonic() - started < 1.5
+            assert finished.wait(1.5)
+            assert time.monotonic() - started < 1.5
+            for worker in workers:
+                worker.join(timeout=1)
+                assert not worker.is_alive()
+            assert api.path.read_bytes() == before
+        finally:
+            if stopper is not None:
+                stopper.join(timeout=2)
+                assert not stopper.is_alive()
+            api_endpoint._release_restart_gate()
+
+
+def test_short_declared_body_never_admits_a_command(api: RunningApi) -> None:
+    """A valid JSON prefix followed by EOF must not bypass Content-Length."""
+    before = api.path.read_bytes()
+    body = b'{"id":"short","subject":"short","state":"backlog"}'
+    with socket.create_connection((api_endpoint.HOST, api.server.server_port), timeout=2) as client:
+        client.sendall(
+            b"POST /api/v001/cards HTTP/1.0\r\n"
+            + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
+            + f'If-Match: "revision-0"\r\nContent-Length: {len(body) + 1}\r\n\r\n'.encode()
+            + body
+        )
+        client.shutdown(socket.SHUT_WR)
+        assert client.recv(1024) == b""
+    assert api.path.read_bytes() == before
+
+
+def test_progressing_maximum_attachment_and_browser_reads(api: RunningApi) -> None:
+    """A full 10 MiB attachment retains the existing request-size contract."""
+    code, _ = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=0,
+        body={"id": "large", "subject": "large", "state": "backlog"},
+    )
+    assert code == 200
+    blob = b"x" * attachments.MAX_BYTES
+    body = json.dumps({"name": "large.bin", "data": base64.b64encode(blob).decode()}).encode()
+    connection = http.client.HTTPConnection(api_endpoint.HOST, api.server.server_port, timeout=5)
+    try:
+        connection.putrequest("POST", API + "/cards/large/attachment")
+        connection.putheader("Authorization", f"Bearer {api_endpoint.BROWSER_TOKEN}")
+        connection.putheader("If-Match", '"revision-1"')
+        connection.putheader("Content-Length", str(len(body)))
+        connection.endheaders()
+        for offset in range(0, len(body), 65536):
+            connection.send(body[offset : offset + 65536])
+            if offset == 0:
+                time.sleep(0.2)  # Progress may pause for longer than the 100 ms read poll.
+        response = connection.getresponse()
+        assert response.status == 200
+        uploaded = json.loads(response.read())
+    finally:
+        connection.close()
+    url = api.base + api_endpoint.attachment_url("large", uploaded["attachment"]["id"])
+    with urllib.request.urlopen(url, timeout=5) as response:
+        time.sleep(0.2)  # Response writes must restore the ordinary timeout after read admission.
+        chunks: list[bytes] = []
+        while chunk := response.read(65536):
+            chunks.append(chunk)
+        assert b"".join(chunks) == blob
+    assert request_json(api.base + API + "/status")[1]["ok"] is True
+    assert (
+        request_json(api.base + API + "/browser-session")[1]["token"] == api_endpoint.BROWSER_TOKEN
+    )
+
+
+def test_idle_transport_timeout_without_drain(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary idle limit is separate from the short receive polling interval."""
+    monkeypatch.setattr(api_endpoint, "HTTP_IDLE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api_endpoint, "HTTP_READ_POLL_S", 0.02)
+    workers: list[threading.Thread] = []
+    original = api_endpoint.Handler.handle
+
+    def observe(handler: api_endpoint.Handler) -> None:
+        workers.append(threading.current_thread())
+        original(handler)
+
+    monkeypatch.setattr(api_endpoint.Handler, "handle", observe)
+    before = api.path.read_bytes()
+    started = time.monotonic()
+    with socket.create_connection((api_endpoint.HOST, api.server.server_port), timeout=2) as client:
+        assert client.recv(1024) == b""
+    elapsed = time.monotonic() - started
+    assert 0.15 <= elapsed < 1.5
+    assert api.server._drain_deadline is None
+    assert len(workers) == 1
+    workers[0].join(timeout=1)
+    assert not workers[0].is_alive()
+    assert api.path.read_bytes() == before
+
+
+def test_connected_body_can_finish_within_restart_drain(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drain deadline permits an existing progressing request to finish."""
+    monkeypatch.setattr(api_endpoint, "HTTP_INCOMPLETE_DRAIN_S", 1.0)
+    body = b'{"id":"finishing","subject":"finishing","state":"backlog"}'
+    with socket.create_connection((api_endpoint.HOST, api.server.server_port), timeout=2) as client:
+        client.sendall(
+            b"POST /api/v001/cards HTTP/1.0\r\n"
+            + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
+            + f'If-Match: "revision-0"\r\nContent-Length: {len(body)}\r\n\r\n'.encode()
+            + body[:1]
+        )
+        deadline = time.monotonic() + 1
+        while not api.server._reading:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        api.server.begin_drain()
+        client.sendall(body[1:])
+        response = http.client.HTTPResponse(client)
+        response.begin()
+        assert response.status == 200
+        assert json.loads(response.read())["revision"] == 1
+    assert board_state.load(api.path).find("finishing").subject == "finishing"

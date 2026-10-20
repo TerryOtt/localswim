@@ -59,6 +59,13 @@ not hold up another healthy board. Explicit workspace cleanup closes new acquisi
 an owned child whose cleanup fails remains available for a later cleanup retry.
 The CLI continues to use each board's JSON path and its own service descriptor.
 
+Discovery reads at most 8 MiB (8,388,608 bytes) plus one detection byte from each
+regular JSON candidate. This ceiling leaves room above representative local boards
+while bounding unrelated or damaged files. Unreadable, oversized, invalid JSON and
+nonboard files are omitted; a recognized board that fails validation remains visible
+with an error. This is a discovery limit, separate from attachment and API limits;
+it does not bound the number of files or total directory traversal time.
+
 The Attention sidebar gives every project three fixed count columns: **Blocked** (red),
 **Needs Terry** (amber), and **Ready for Review** (blue). A zero count leaves its column
 blank, so a project with two blocked cards and one ready for review has an empty middle
@@ -349,6 +356,9 @@ uv run --frozen localswim-cli boards/my-project.json lane migrate-id ready_for_w
 The first changes only presentation. The second atomically rewrites the embedded
 policy, current card states, and lane-history endpoints. Neither operation derives an
 existing ID from the current label.
+The ID `completed` is reserved for completion semantics: identity migration refuses
+both changing it to another ID and changing another ID to `completed`. Use
+`lane rename-label completed "Done"` to change its displayed name instead.
 
 ## Archiving cards
 
@@ -657,6 +667,14 @@ keeps its actual listening port, including a port assigned by `--port 0`. Startu
 restart coordination prevents another launch from taking ownership during replacement.
 Process IDs and browser/CLI credentials may change; clients use the replacement service
 descriptor and refresh browser credentials.
+
+Board connections allow 30 seconds of idle input. When HTTP server shutdown or close
+starts, incomplete headers and bodies share an absolute two-second budget, observed
+within a 100 ms read poll plus thread scheduling time. Trickling input cannot extend
+that budget. Accepted commands still finish before writer ownership is released;
+these transport limits do not bound command execution, disk writes or Git publishing.
+Response writes retain their ordinary socket-operation timeout, including attachment
+downloads. Any earlier command or publisher flush is outside the read-drain budget.
 
 When upgrading from a build without lifetime writer ownership, stop and consolidate any
 legacy duplicate board services once before launching the upgraded service. An overwritten

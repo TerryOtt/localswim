@@ -66,7 +66,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Self, cast
 
@@ -649,6 +649,10 @@ class Rules:
     **It replaced a five-wide return tuple**, which users, `browserUser`, `cliUser` and
     `defaultOwner` would have taken to nine. A tuple that long is positional trivia at
     every call site, and `reload_rules` unpacks it twice.
+
+    The canonical document is private JSON text, so metadata and nested grant lists
+    cannot be mutated through an exposed dictionary. ``document`` returns detached
+    JSON containers while the compiled policy remains unchanged.
     """
 
     lanes: tuple[tuple[str, str], ...]
@@ -657,9 +661,14 @@ class Rules:
     priority_label: Mapping[str, str]
     default_priority: str
     edge_actors: frozenset[str]
-    document: JsonObject
+    _document_json: str
     # **The cast is NOT here, card #0083.** It moved to the board file, which is
     # per-project; this object describes `rules.json`, which is per-tool.
+
+    @property
+    def document(self) -> JsonObject:
+        """Return a detached document, including metadata unused by authorization."""
+        return cast("JsonObject", json.loads(self._document_json))
 
 
 def _parse_users(doc: JsonObject, path: pathlib.Path) -> tuple[User, ...]:
@@ -850,7 +859,7 @@ def _parse_rules(doc: JsonObject, path: pathlib.Path) -> Rules:
         priority_label=labels,
         default_priority=default,
         edge_actors=edge_actors,
-        document=copy.deepcopy(doc),
+        _document_json=json.dumps(doc, ensure_ascii=False),
     )
 
 
@@ -864,7 +873,7 @@ def _load_rules(path: pathlib.Path) -> Rules:
 
 @dataclass(frozen=True)
 class TransitionPolicy:
-    """Immutable, reloadable view of the board transition configuration."""
+    """Immutable, reloadable grants with detached document and serializer exposure."""
 
     rules: Rules
     path: pathlib.Path
@@ -881,14 +890,10 @@ class TransitionPolicy:
                 for state, rules in self.rules.table.items()
             }
         )
-        frozen = Rules(
-            self.rules.lanes,
-            table,
-            self.rules.priorities,
-            MappingProxyType(dict(self.rules.priority_label)),
-            self.rules.default_priority,
-            self.rules.edge_actors,
-            copy.deepcopy(self.rules.document),
+        frozen = replace(
+            self.rules,
+            table=table,
+            priority_label=MappingProxyType(dict(self.rules.priority_label)),
         )
         object.__setattr__(self, "rules", frozen)
 
@@ -919,7 +924,7 @@ class TransitionPolicy:
 
     def to_json(self) -> JsonObject:
         """Return an isolated, serializer-ready copy of the resolved policy."""
-        return copy.deepcopy(self.rules.document)
+        return self.rules.document
 
     @property
     def lanes(self) -> tuple[tuple[str, str], ...]:
@@ -4110,9 +4115,19 @@ def _rewrite_policy_lane_id(
 
 
 def migrate_lane_id(path: pathlib.Path, source: str, destination: str) -> str:
-    """Atomically migrate one embedded lane ID across policy, state, and audit history."""
+    """Atomically migrate a nonreserved ID across policy, state, and audit history.
+
+    The stable ID ``completed`` carries terminal semantics. Changing its display
+    label is supported through ``lane rename-label``; migrating from or into that
+    ID would change completion and dependency-priority behavior.
+    """
     target = path.resolve()
     destination = _validate_lane_id(destination, "destination lane id")
+    if "completed" in (source, destination):
+        raise BoardError(
+            "cannot migrate from or into reserved lane ID 'completed'; "
+            "use lane rename-label completed LABEL to change its display label"
+        )
     if source == destination:
         raise BoardError("lane migration needs two different IDs")
     with locked(target):

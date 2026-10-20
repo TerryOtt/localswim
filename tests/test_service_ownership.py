@@ -3,18 +3,21 @@
 import contextlib
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from localswim import api_endpoint, board_state, service_ownership
+from localswim import api_endpoint, attachments, board_state, service_ownership
 from tests.test_api import request_json
 from tests.test_workspace import make_board
 
 if TYPE_CHECKING:
+    import argparse
     import pathlib
     from collections.abc import Generator
 
@@ -156,10 +159,14 @@ def test_direct_duplicate_preserves_existing_descriptor(tmp_path: pathlib.Path) 
 
 def test_real_restart_preserves_ephemeral_port_and_launch_ownership(tmp_path: pathlib.Path) -> None:
     board = tmp_path / "board.json"
-    with live_board(board, restartable=True) as parent:
+    with live_board(board, restartable=True) as parent, contextlib.ExitStack() as sockets:
         descriptor = board_state.service_descriptor_path(board)
         before = json.loads(descriptor.read_text(encoding="utf-8"))
         base = f"http://127.0.0.1:{before['port']}"
+        browser_before = request_json(base + board_state.API_PREFIX + "/browser-session")[1]
+        for prefix in (b"", b"GET / HTTP/1.0\r\nX-Incomplete: "):
+            client = sockets.enter_context(socket.create_connection(("127.0.0.1", before["port"])))
+            client.sendall(prefix)
         status, _ = request_json(base + board_state.API_PREFIX + "/status")
         assert status == 200
         deadline = time.monotonic() + 10
@@ -183,10 +190,15 @@ def test_real_restart_preserves_ephemeral_port_and_launch_ownership(tmp_path: pa
             pytest.fail("replacement did not become healthy")
         assert saw_gap
         assert raw["port"] == before["port"]
+        assert raw["token"] != before["token"]
         assert raw["workspaceLaunch"] == before["workspaceLaunch"] == "fixture-launch"
         assert parent.wait(timeout=5) == 0
         assert service_ownership.writer_busy(board)
         assert not request_json(base + board_state.API_PREFIX + "/status")[1]["codeStale"]
+        assert (
+            request_json(base + board_state.API_PREFIX + "/browser-session")[1]["token"]
+            != browser_before["token"]
+        )
 
 
 def test_shutdown_takes_priority_over_pending_restart(
@@ -327,3 +339,126 @@ def test_failed_replacement_cleanup_rejects_bounded_bad_metadata(
             child.kill()
             child.wait(timeout=5)
         board_state.service_descriptor_path(board).unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("mode", ["shutdown", "restart"])
+@pytest.mark.parametrize("send_failure", [False, True])
+def test_admitted_command_retains_lease_and_gate_until_worker_join(  # noqa: PLR0915 -- synchronized lifecycle phases and cleanup
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    send_failure: bool,  # noqa: FBT001 -- parameterized failure control
+) -> None:
+    """The transport budget cannot release a writer still able to save."""
+    board = tmp_path / "board.json"
+    make_board(board, "Paused command")
+    entered, resume, finished = threading.Event(), threading.Event(), threading.Event()
+    ready = threading.Event()
+    servers: list[api_endpoint.BoardHttpServer] = []
+    errors: list[BaseException] = []
+    calls: list[str] = []
+    request_workers: list[threading.Thread] = []
+    server_class = api_endpoint.BoardHttpServer
+    execute = api_endpoint.execute_http_command
+    send = api_endpoint.Handler._json  # noqa: SLF001 -- inject response transport failure
+
+    class ObservedServer(server_class):
+        def serve_forever(self, poll_interval: float = 0.01) -> None:
+            servers.append(self)
+            ready.set()
+            super().serve_forever(poll_interval)
+
+    def paused(
+        store: api_endpoint.BoardStore,
+        expected: int,
+        parts: list[str],
+        body: board_state.JsonObject,
+        actor: str,
+    ) -> tuple[str, int, str | None, attachments.Attachment | None]:
+        assert api_endpoint._command_gate.locked()  # noqa: SLF001 -- admission oracle
+        request_workers.append(threading.current_thread())
+        entered.set()
+        assert resume.wait(5)
+        result = execute(store, expected, parts, body, actor)
+        calls.append("saved")
+        return result
+
+    def respond(handler: api_endpoint.Handler, obj: object, code: int = 200) -> None:
+        if isinstance(obj, dict) and "result" in obj and send_failure:
+            calls.append("send failed")
+            raise BrokenPipeError("disposable response failure")
+        send(handler, cast("object", obj), code)
+
+    def handoff(
+        _args: argparse.Namespace, _port: int, _lease: service_ownership.WriterLease
+    ) -> None:
+        assert calls.count("saved") == 1
+        assert all(not worker.is_alive() for worker in request_workers)
+        assert service_ownership.writer_busy(board)
+        api_endpoint._release_restart_gate()  # noqa: SLF001 -- no replacement for this seam test
+
+    def own_and_serve() -> None:
+        try:
+            api_endpoint._serve_board(api_endpoint.parse_args([str(board), "--port", "0"]))  # noqa: SLF001
+        except BaseException as exc:  # noqa: BLE001 -- propagate worker failures to the test
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(api_endpoint, "BoardHttpServer", ObservedServer)
+    monkeypatch.setattr(api_endpoint, "HTTP_INCOMPLETE_DRAIN_S", 0.05)
+    monkeypatch.setattr(api_endpoint, "execute_http_command", paused)
+    monkeypatch.setattr(api_endpoint.Handler, "_json", respond)
+    monkeypatch.setattr(api_endpoint, "_handoff_board", handoff)
+    # The owned server sets this during teardown; keep that signal local to the
+    # fixture until every server/request thread has joined in the finally block.
+    monkeypatch.setattr(api_endpoint, "_push_stop", threading.Event())
+    api_endpoint._restart_requested.clear()  # noqa: SLF001 -- lifecycle fixture state
+    owner = threading.Thread(target=own_and_serve)
+    owner.start()
+    stopper: threading.Thread | None = None
+    try:
+        assert ready.wait(5)
+        server = servers[0]
+        with socket.create_connection((api_endpoint.HOST, server.server_port), timeout=2) as client:
+            body = b'{"id":"once","subject":"once","state":"backlog"}'
+            client.sendall(
+                b"POST /api/v001/cards HTTP/1.0\r\n"
+                + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
+                + f'If-Match: "revision-0"\r\nContent-Length: {len(body)}\r\n\r\n'.encode()
+                + body
+            )
+            assert entered.wait(5)
+            assert api_endpoint._reserve_board_restart(server)  # noqa: SLF001 -- real gate
+            if mode == "restart":
+                api_endpoint._restart_requested.set()  # noqa: SLF001 -- exercise handoff branch
+            stopper = threading.Thread(target=server.shutdown)
+            stopper.start()
+            assert not finished.wait(0.15), "the incomplete-read budget must not evict a command"
+            assert service_ownership.writer_busy(board)
+            with pytest.raises(TimeoutError), service_ownership.launch_locked(board, timeout=0):
+                pytest.fail("startup gate released before worker joined")
+            assert calls == []
+            resume.set()
+            assert finished.wait(5)
+            owner.join(timeout=1)
+            assert not owner.is_alive()
+            assert all(not worker.is_alive() for worker in request_workers)
+            assert not service_ownership.writer_busy(board)
+            with service_ownership.launch_locked(board, timeout=0):
+                pass
+            assert calls.count("saved") == 1
+            assert calls.count("send failed") == int(send_failure)
+            assert board_state.load(board).revision == 1
+            assert board_state.load(board).find("once").subject == "once"
+            assert not errors
+    finally:
+        resume.set()
+        if servers and owner.is_alive():
+            servers[0].shutdown()
+        if stopper is not None:
+            stopper.join(timeout=5)
+        owner.join(timeout=5)
+        api_endpoint._restart_requested.clear()  # noqa: SLF001 -- restore lifecycle state
+        api_endpoint._release_restart_gate()  # noqa: SLF001 -- failure cleanup
+        assert not owner.is_alive()
