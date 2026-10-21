@@ -3996,11 +3996,26 @@ def initialize_board(
     return f"initialized {target} with {len(board.policy.states)} stable lane IDs"
 
 
+@contextlib.contextmanager
+def _maintenance_locked(path: pathlib.Path) -> Generator[None]:
+    """Exclude service launch and retain writer ownership through the snapshot save."""
+    # Ownership depends on board types; import only after this module is initialized.
+    from . import service_ownership  # noqa: PLC0415 -- avoid the ownership import cycle
+
+    target = path.resolve()
+    with (
+        service_ownership.launch_locked(target),
+        service_ownership.writer_claim(target),
+        locked(target),
+    ):
+        yield
+
+
 def embed_policy(path: pathlib.Path, policy_path: pathlib.Path) -> str:
     """Upgrade a schema-3 board by atomically embedding its resolved policy."""
     target = path.resolve()
     policy = TransitionPolicy.load(policy_path)
-    with locked(target):
+    with _maintenance_locked(target):
         raw = _read_json(target)
         if not isinstance(raw, dict):
             raise BoardError(f"{target}: top level is not an object")
@@ -4044,7 +4059,7 @@ def add_lane(
     target = path.resolve()
     label = label.strip()
     lane_id = lane_slug(label)
-    with locked(target):
+    with _maintenance_locked(target):
         raw = _read_json(target)
         if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
             raise BoardError(f"{target}: lane add needs a schema-{SCHEMA} board")
@@ -4099,7 +4114,7 @@ def rename_lane_label(path: pathlib.Path, lane_id: str, label: str) -> str:
     label = label.strip()
     if not label:
         raise BoardError("lane label is empty")
-    with locked(target):
+    with _maintenance_locked(target):
         raw = _read_json(target)
         if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
             raise BoardError(f"{target}: label rename needs a schema-{SCHEMA} board")
@@ -4166,7 +4181,7 @@ def migrate_lane_id(path: pathlib.Path, source: str, destination: str) -> str:
         )
     if source == destination:
         raise BoardError("lane migration needs two different IDs")
-    with locked(target):
+    with _maintenance_locked(target):
         raw = _read_json(target)
         if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
             raise BoardError(f"{target}: lane-ID migration needs a schema-{SCHEMA} board")
@@ -4224,7 +4239,7 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
     the board unreadable. The original file remains untouched unless the complete
     schema-4 result with its embedded policy validates and replays cleanly.
     """
-    target = pathlib.Path(path)
+    target = path.resolve()
     if not source or not destination or source == destination:
         raise BoardError("lane migration needs two different nonempty lane IDs")
     if source in _POLICY.states:
@@ -4232,7 +4247,7 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
     if destination not in _POLICY.states:
         raise BoardError(f"destination lane {destination!r} is not in the active rules")
 
-    with locked(target):
+    with _maintenance_locked(target):
         raw = _read_json(target)
         if not isinstance(raw, dict):
             raise BoardError(f"{target}: top level is not an object")

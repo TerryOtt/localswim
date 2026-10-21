@@ -54,6 +54,13 @@ native board monitoring is an optional extra.
   Use explicit child-process handoff on Windows; do not assume byte locks are inherited.
   Keep the old descriptor until replacement publication, preserve workspace launch identity,
   and rotate bearer credentials normally.
+  Offline embed_policy, add_lane, rename_lane_label, migrate_lane_id and migrate_lane
+  resolve the board canonically and hold the shared launch gate, then writer claim,
+  then snapshot transaction lock through save; release in reverse order on every exit.
+  A held writer lease is authoritative without a listener or at a different port.
+  Keep the legacy configured-port listener refusal, initialization and ordinary live
+  mutation interfaces unchanged. Never replace a held claim with a check/use probe or
+  unlink persistent ownership locks.
   Bound incomplete HTTP input during drain with one absolute two-second budget,
   observed within a 100 ms read poll plus scheduling; trickling must not reset it.
   Preserve 30-second ordinary inactivity/response timeouts and non-daemon joins.

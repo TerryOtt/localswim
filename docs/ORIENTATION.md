@@ -550,6 +550,25 @@ Process exit releases the lease without a stale-file age heuristic. The existing
 This ownership boundary is separate from the short snapshot transaction lock above and
 the Git repository publishing lock.
 
+The five offline structural operations share maintenance admission: `embed_policy`,
+`add_lane`, `rename_lane_label`, `migrate_lane_id` and `migrate_lane` resolve the
+canonical board path, acquire the launch gate, claim writer ownership, then enter the
+snapshot transaction lock. They retain all three through validation and save, releasing
+in reverse order on success or failure. The lazy ownership import avoids the existing
+board-model/ownership module cycle; initialization and live mutation interfaces do not
+change.
+
+A service's held lease excludes maintenance even during a listener gap or when its
+actual port differs from the configured snapshot port. Maintenance holding admission
+excludes direct and workspace startup before writer construction. A restart's launch
+gate likewise excludes maintenance during handoff. The configured-port listener check
+remains as a conservative refusal for older services without a lease. Do not use a
+`writer_busy` probe as admission or unlink persistent writer/gate files. This does not
+change snapshot-lock stealing or introduce a live structural API.
+
+Workspace discovery made before maintenance may need to be refreshed after the
+snapshot changes; existing admission still refuses a stale discovery candidate.
+
 A board hot restart holds the launch gate from before listener closure until the
 replacement is healthy. It drains HTTP request threads, closes the listener, stops and
 joins the board publisher, then hands off through an explicit child process on Windows
@@ -858,7 +877,7 @@ The suite spans these boundaries:
 | `test_store.py` | Verified startup/read/reload admission, invalid-audit refusal, accepted actor context, policy diagnostics, transactionality, revision races, board placement, and autopush integration. |
 | `test_api.py` | Real threaded loopback routes, auth, revisions, redirects, and code restart. |
 | `test_workspace.py` | Gateway discovery/proxying, child publishing policy, and workspace UI contracts. |
-| `test_service_ownership.py` | Exclusive lifetime leases, one-use launch handoff, real restart port preservation, shutdown precedence, and failed replacement cleanup. |
+| `test_service_ownership.py` | Exclusive lifetime leases, offline maintenance admission and startup exclusion, one-use launch handoff, real restart port preservation, shutdown precedence, and failed replacement cleanup. |
 | `test_workspace_ownership.py` | Per-board recovery independence, canonical same-board serialization, close/registration and cleanup retry, replacement identity, busy-lease rendezvous, and shared launch coordination. |
 | `test_gateway_preferences_api.py` | Gateway preference routes, authentication, independent revisions, and persisted settings. |
 | `test_gateway_publish.py` | Configuration-only commits, unrelated staged-file exclusion, shared locking, and push recovery. |

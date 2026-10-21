@@ -342,8 +342,17 @@ The earlier schema-2 Ready For Work migration also produces a schema-4 board:
 uv run --frozen localswim-cli boards/my-project.json lane migrate <old-lane-id> ready_for_work
 ~~~
 
-Every structural migration refuses a listening board port, validates and replays the
-complete result before replacing the file, and increments the board revision.
+The five offline structural operations (policy embedding, lane addition, label rename,
+lane-ID migration and legacy lane migration) acquire the canonical launch gate and
+hold exclusive writer ownership through the snapshot transaction and save. A running
+service's lease prevents maintenance even when its listener is absent or uses a
+different port. Maintenance also excludes service startup until it exits.
+
+These operations retain the conservative configured-port listener refusal for older
+services without leases. Stop the service before maintenance; do not delete ownership
+lock files to force access. They validate and replay the complete result before
+replacing the snapshot and increment its revision. Failure releases maintenance
+admission; the existing snapshot-save outcome rules still apply.
 
 Add a lane to a stopped board with explicit creation and bidirectional move rights.
 Existing cards and their history remain in place:

@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import queue
 import socket
 import subprocess
 import sys
@@ -14,12 +15,251 @@ import pytest
 
 from localswim import api_endpoint, attachments, board_state, service_ownership
 from tests.test_api import request_json
+from tests.test_cli import run_cli, write_schema_two_lane_board
 from tests.test_workspace import make_board
 
 if TYPE_CHECKING:
     import argparse
     import pathlib
     from collections.abc import Generator
+
+
+@contextlib.contextmanager
+def maintenance_child(program: str, board: pathlib.Path) -> Generator[subprocess.Popen[str]]:
+    """Run an isolated child whose pipe messages are bounded synchronization events."""
+    environment = dict(os.environ)
+    command = service_ownership.python_child_command(["-u", "-c", program, str(board)], environment)
+    child = subprocess.Popen(
+        command,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    try:
+        yield child
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.communicate(timeout=10)
+
+
+def child_event(child: subprocess.Popen[str], expected: str) -> None:
+    messages: queue.Queue[str] = queue.Queue()
+    assert child.stdout is not None
+    stream = child.stdout
+    reader = threading.Thread(target=lambda: messages.put(stream.readline().strip()), daemon=True)
+    reader.start()
+    assert messages.get(timeout=10) == expected
+    reader.join(timeout=10)
+
+
+def release_child(child: subprocess.Popen[str]) -> None:
+    assert child.stdin is not None
+    child.stdin.write("release\n")
+    child.stdin.flush()
+
+
+def maintenance_fixture(board: pathlib.Path, operation: str) -> tuple[str, ...]:
+    make_board(board, "Maintenance")
+    with socket.socket() as candidate:
+        candidate.bind(("127.0.0.1", 0))
+        unused_port = candidate.getsockname()[1]
+    if operation == "migrate":
+        legacy = write_schema_two_lane_board(board, unused_port)
+        return ("lane", "migrate", legacy, "ready_for_work")
+    raw = json.loads(board.read_text(encoding="utf-8"))
+    raw["port"] = unused_port
+    if operation == "embed":
+        raw["schema"] = board_state.EMBEDDED_POLICY_PREVIOUS_SCHEMA
+        del raw["policy"]
+    board.write_text(json.dumps(raw), encoding="utf-8")
+    return {
+        "embed": ("board", "embed-policy", str(board_state.RULES_PATH)),
+        "add": ("lane", "add", "Maintenance lane"),
+        "rename": ("lane", "rename-label", "backlog", "Pending"),
+        "migrate-id": ("lane", "migrate-id", "backlog", "pending"),
+    }[operation]
+
+
+def invoke_maintenance(board: pathlib.Path, arguments: tuple[str, ...]) -> str:
+    match arguments[:2]:
+        case ("board", "embed-policy"):
+            return board_state.embed_policy(board, board_state.RULES_PATH)
+        case ("lane", "add"):
+            return board_state.add_lane(board, arguments[2])
+        case ("lane", "rename-label"):
+            return board_state.rename_lane_label(board, arguments[2], arguments[3])
+        case ("lane", "migrate-id"):
+            return board_state.migrate_lane_id(board, arguments[2], arguments[3])
+        case ("lane", "migrate"):
+            return board_state.migrate_lane(board, arguments[2], arguments[3])
+        case _:
+            raise AssertionError("unknown maintenance fixture")
+
+
+@pytest.mark.parametrize("operation", ["embed", "add", "rename", "migrate-id", "migrate"])
+@pytest.mark.parametrize("listener", [False, True], ids=["absent-listener", "port-override"])
+def test_maintenance_refuses_real_writer_without_changing_snapshot(
+    tmp_path: pathlib.Path, operation: str, *, listener: bool
+) -> None:
+    board = tmp_path / "board.json"
+    arguments = maintenance_fixture(board, operation)
+    before = board.read_bytes()
+    program = (
+        "import pathlib,socket,sys; from localswim import service_ownership as own; "
+        "board=pathlib.Path(sys.argv[1]); "
+        "listener=socket.socket(); "
+        + ("listener.bind(('127.0.0.1',0)); listener.listen(); " if listener else "")
+        + "\nwith own.writer_claim(board):\n print('held',flush=True); sys.stdin.readline()\n"
+    )
+    with maintenance_child(program, board) as child:
+        child_event(child, "held")
+        result = run_cli(board, *arguments)
+        assert result.returncode != 0
+        assert "already owns this board" in result.stderr
+        assert board.read_bytes() == before
+        release_child(child)
+        assert child.wait(timeout=10) == 0
+    assert run_cli(board, *arguments).returncode == 0
+    assert board_state.load(board).verify() == []
+
+
+@pytest.mark.parametrize("failure", ["validation", "save"])
+@pytest.mark.parametrize("operation", ["embed", "add", "rename", "migrate-id", "migrate"])
+def test_maintenance_failure_releases_admission(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, failure: str, operation: str
+) -> None:
+    board = tmp_path / "board.json"
+    arguments = maintenance_fixture(board, operation)
+    before = board.read_bytes()
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise board_state.BoardError("injected maintenance failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "save":
+            patch.setattr(board_state, "save", fail)
+        else:
+            patch.setattr(board_state.Board, "from_json", fail)
+        with pytest.raises(board_state.BoardError, match="injected maintenance failure"):
+            invoke_maintenance(board, arguments)
+    assert board.read_bytes() == before
+    for suffix in (".workspace.lock", ".writer.lock"):
+        assert board_state.service_descriptor_path(board).with_suffix(suffix).exists()
+    with service_ownership.launch_locked(board, timeout=0), service_ownership.writer_claim(board):
+        pass
+    assert run_cli(board, *arguments).returncode == 0
+
+
+@pytest.mark.parametrize("startup", ["direct", "workspace"])
+def test_maintenance_save_excludes_startup_until_exit(tmp_path: pathlib.Path, startup: str) -> None:
+    board = tmp_path / "board.json"
+    maintenance_fixture(board, "rename")
+    maintenance = """
+import pathlib,sys
+from localswim import board_state as state
+board=pathlib.Path(sys.argv[1])
+original=state.save
+def save(*args):
+    print('saving',flush=True)
+    sys.stdin.readline()
+    original(*args)
+    print('saved',flush=True)
+state.save=save
+state.rename_lane_label(board,'backlog','Pending')
+"""
+    startup_program = """
+import pathlib,sys
+from localswim import api_endpoint as api, board_state as state, service_ownership as own
+board=pathlib.Path(sys.argv[1])
+original=own._try_lock
+def claim(descriptor):
+    result=original(descriptor)
+    if not result:
+        print('blocked',flush=True)
+        sys.stdin.readline()
+    return result
+own._try_lock=claim
+def constructed(*args,**kwargs):
+    assert state.load(board).revision == 1
+    print('constructed',flush=True)
+    sys.exit(0)
+"""
+    if startup == "direct":
+        startup_program += (
+            "api._serve_owned_board=constructed\n"
+            "api._serve_board(api.parse_args([str(board),'--port','0']))\n"
+        )
+    else:
+        startup_program += """
+from localswim import workspace
+workspace.subprocess.Popen=constructed
+instance=workspace.Workspace(board.parent)
+try:
+    instance.endpoint(board)
+except ValueError as exc:
+    assert 'changed during discovery' in str(exc)
+    instance.endpoint(board)
+"""
+    before = board.read_bytes()
+    with maintenance_child(maintenance, board) as maintainer:
+        child_event(maintainer, "saving")
+        assert service_ownership.writer_busy(board)
+        assert board.read_bytes() == before
+        with maintenance_child(startup_program, board) as starter:
+            child_event(starter, "blocked")
+            assert starter.poll() is None
+            assert board.read_bytes() == before
+            release_child(maintainer)
+            child_event(maintainer, "saved")
+            assert maintainer.wait(timeout=10) == 0
+            release_child(starter)
+            child_event(starter, "constructed")
+            assert starter.wait(timeout=10) == 0
+    assert not service_ownership.writer_busy(board)
+
+
+def test_maintenance_waits_out_restart_gate_without_writer_lease(tmp_path: pathlib.Path) -> None:
+    board = tmp_path / "board.json"
+    maintenance_fixture(board, "rename")
+    before = board.read_bytes()
+    # The old writer can release its lease while the restart coordinator keeps the gate.
+    holder = """
+import pathlib,sys
+from localswim import service_ownership as own
+with own.launch_locked(pathlib.Path(sys.argv[1])):
+    print('gap',flush=True)
+    sys.stdin.readline()
+"""
+    maintainer = """
+import pathlib,sys
+from localswim import board_state as state, service_ownership as own
+original=own._try_lock
+def claim(descriptor):
+    result=original(descriptor)
+    if not result:
+        print('blocked',flush=True)
+        sys.stdin.readline()
+    return result
+own._try_lock=claim
+state.rename_lane_label(pathlib.Path(sys.argv[1]),'backlog','Pending')
+print('saved',flush=True)
+"""
+    with maintenance_child(holder, board) as restart:
+        child_event(restart, "gap")
+        assert not service_ownership.writer_busy(board)
+        with maintenance_child(maintainer, board) as maintenance:
+            child_event(maintenance, "blocked")
+            assert board.read_bytes() == before
+            release_child(restart)
+            assert restart.wait(timeout=10) == 0
+            release_child(maintenance)
+            child_event(maintenance, "saved")
+            assert maintenance.wait(timeout=10) == 0
+    assert board_state.load(board).revision == 1
 
 
 @contextlib.contextmanager
@@ -85,6 +325,21 @@ def test_writer_lease_is_exclusive_and_releases_without_unlinking(tmp_path: path
             pytest.fail("a duplicate acquired ownership")
     assert lock.exists()
     assert not service_ownership.writer_busy(board)
+
+
+def test_maintenance_refuses_real_ephemeral_port_service(tmp_path: pathlib.Path) -> None:
+    board = tmp_path / "board.json"
+    with live_board(board):
+        before = board.read_bytes()
+        descriptor = json.loads(
+            board_state.service_descriptor_path(board).read_text(encoding="utf-8")
+        )
+        assert descriptor["port"] != board_state.load(board).port
+        result = run_cli(board, "lane", "rename-label", "backlog", "Pending")
+        assert result.returncode != 0
+        assert "already owns this board" in result.stderr
+        assert board.read_bytes() == before
+        assert service_ownership.service_is_healthy(board)
 
 
 def test_launch_capability_is_one_use_and_bound_to_parent_gate(
