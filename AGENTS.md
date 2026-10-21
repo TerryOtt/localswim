@@ -186,6 +186,10 @@ native board monitoring is an optional extra.
   brief; never wait for board acquisition, network, process startup or cleanup under
   that shared lock. Explicit close freezes new acquisitions and retains each exact
   owned pair until cleanup succeeds, so failures remain retryable.
+  Explicit cleanup escalates only its captured Popen after a bounded terminate wait,
+  then attempts bounded reap. Continue later children after one failure, retain
+  unresolved exact pairs and report a sanitized aggregate error. Do not overwrite
+  residual ownership before cleanup; normal gateway exit still leaves writers live.
   New gateways default to publishing disabled; `--autopush` persists true in the gateway
   configuration and applies to newly owned children. Retain that setting across restarts
   without the flag. Existing services retain their own publishing policy. Publish only
@@ -228,6 +232,10 @@ native board monitoring is an optional extra.
   candidates without hiding recognized board validation errors. Use request-local
   private resolutions for one proxy scan, rechecking containment and file identity;
   never accept caller mappings as discovery authority or introduce a durable cache.
+  A changed regular snapshot may consume at most two fresh key scans and full board
+  validations per request. Keep the active launch gate, capability and child wait;
+  unsafe/invalid replacements and exhausted churn still refuse. Never replay a POST.
+  Discovery diagnostics contain fixed event labels/counts, never paths or capabilities.
 - Bound workspace reads and keep one poll in flight per navigation epoch. Show clear
   recovery and Retry for failed loads; never leave Loading indefinitely or lose queued
   retries. Advance the snapshot marker only after rendering/restoration succeeds.
@@ -298,6 +306,12 @@ fresh per-turn owner approval before any Astra use remain unchanged.
   field-specific messages. Preserve unknown-field rejection where a structure defines
   it explicitly, especially transition edge objects; do not claim every board object
   currently rejects additional keys.
+- Creation rejects empty required ID/subject strings before allocation or mutation.
+  HTTP creation takes its omitted priority from the locked candidate policy. Generated
+  IDs try the free base, actual next-ticket suffix, then unused ordinal suffixes
+  starting at `-0002`; explicit duplicates still refuse atomically. Single-card
+  priority commands accept exact configured IDs first, then only the unambiguous
+  lowercase `p0` through `p5` convenience aliases. Do not fold custom stable IDs.
 - Keep protocol and schema changes explicit. Update implementation, rules/example
   data, tests, and README together when a public route or persisted shape changes.
 - Preserve compatibility routes only where the code intentionally documents them;
@@ -408,6 +422,13 @@ Never require one activity event per observed filesystem write. For queued alert
 inspect only activity metadata first; proven automation-only events need no card
 inspection, work resumption or further action. Preserve Terry's alerts. Keep prose
 and credentials out of logs. Routine alerts do not justify a GitHub visibility query.
+
+Ordinary monitor startup validates saved same-board status after taking its lifetime
+lock and before replacement. Retain pending/cursor activity and signature gaps; refuse
+foreign, unreadable or inconsistent metadata without overwriting it. A saved pending
+end must equal its cursor. Never discard an uncertain interval to force startup.
+Queue acknowledgement before status persistence creates an at-least-once crash
+duplicate window; do not promise exactly-once or power-loss delivery.
 
 ## Git in the Codex sandbox
 

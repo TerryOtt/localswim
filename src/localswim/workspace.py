@@ -38,6 +38,8 @@ MAX_PREFERENCES_BYTES = 64 * 1024
 # Discovery only: roughly five times the largest representative 1.7 MB snapshot.
 # This is not a board-service payload or attachment limit.
 MAX_CANDIDATE_BYTES = 8 * 1024 * 1024
+# One request may recover from two ordinary atomic snapshot replacements.
+MAX_DISCOVERY_REFRESHES = 2
 START_WAIT_SECONDS = 15.0
 START_POLL_SECONDS = 0.1
 REQUEST_TIMEOUT = 5.0
@@ -83,6 +85,10 @@ class ServiceUpgradePendingError(OSError):
     """An existing service must finish its browser-session protocol upgrade."""
 
 
+class _DiscoveryChangedError(ValueError):
+    """A regular, contained candidate changed since its validated scan."""
+
+
 @dataclass(frozen=True)
 class Endpoint:
     """Validated upstream browser capability; never a CLI capability."""
@@ -92,12 +98,13 @@ class Endpoint:
     user_css: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Candidate:
     """One request's discovered file identity, never a durable authorization."""
 
     path: pathlib.Path
     identity: os.stat_result
+    refreshes: int = 0
 
 
 def _read_candidate(path: pathlib.Path) -> _Candidate | None:
@@ -184,6 +191,47 @@ class Workspace:
 
     def _checked_path(self, candidate: _Candidate) -> pathlib.Path:
         """Recheck containment and file identity immediately before consuming a scan."""
+        while True:
+            try:
+                return self._unchanged_path(candidate)
+            except _DiscoveryChangedError:
+                if candidate.refreshes >= MAX_DISCOVERY_REFRESHES:
+                    self._discovery_diagnostic("exhausted", candidate.refreshes)
+                    raise
+            candidate.refreshes += 1
+            self._discovery_diagnostic("retry", candidate.refreshes)
+            try:
+                fresh = self._rediscover(candidate)
+            except _DiscoveryChangedError:
+                continue
+            except OSError, ValueError, RecursionError:
+                self._discovery_diagnostic("rejected", candidate.refreshes)
+                raise
+            # Keep the active gate, launch capability and child wait intact. Only
+            # this request's freshly validated discovery identity is replaced.
+            candidate.identity = fresh.identity
+            self._discovery_diagnostic("recovered", candidate.refreshes)
+
+    def _rediscover(self, candidate: _Candidate) -> _Candidate:
+        key = candidate.path.relative_to(self.root).with_suffix("").as_posix()
+        fresh = self._resolve(key)
+        if fresh.path != candidate.path:
+            raise ValueError("workspace board path changed")
+        path = self._unchanged_path(fresh)
+        board_state.load(path, install_context=False)
+        self._unchanged_path(fresh)
+        return fresh
+
+    @staticmethod
+    def _discovery_diagnostic(event: str, attempt: int) -> None:
+        print(
+            f"Workspace discovery {event} (attempt {attempt}/{MAX_DISCOVERY_REFRESHES}).",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _unchanged_path(self, candidate: _Candidate) -> pathlib.Path:
+        """Check identity without granting another discovery retry budget."""
         path = candidate.path
         canonical = path.resolve(strict=True)
         if not canonical.is_relative_to(self.root):
@@ -195,10 +243,10 @@ class Workspace:
                 raise ValueError("workspace board path changed")
         current = path.stat()
         fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-        if not stat.S_ISREG(current.st_mode) or any(
-            getattr(current, field) != getattr(candidate.identity, field) for field in fields
-        ):
-            raise ValueError("workspace board changed during discovery; retry")
+        if not stat.S_ISREG(current.st_mode):
+            raise ValueError("workspace board path is not a regular file")
+        if any(getattr(current, field) != getattr(candidate.identity, field) for field in fields):
+            raise _DiscoveryChangedError("workspace board changed during discovery; retry")
         return canonical
 
     def _resolve(self, key: str) -> _Candidate:
@@ -388,6 +436,13 @@ class Workspace:
             if endpoint := self._await_existing(candidate, wait_for_upgrade=False):
                 return endpoint
             self._checked_path(candidate)
+            with self._bookkeeping_lock:
+                previous_child = self._children.get(path)
+                previous_launch = self._launch_ids.get(path)
+            if previous_child is not None and previous_launch is not None:
+                self._terminate_child(previous_child)
+                self._forget_child(path, previous_child, previous_launch)
+            self._checked_path(candidate)
             arguments = ["-m", "localswim.api_endpoint", str(path), "--port", "0"]
             if self.settings.snapshot().autopush:
                 arguments.append("--autopush")
@@ -422,9 +477,8 @@ class Workspace:
                     msg = "board service could not start"
                     raise OSError(msg)
                 time.sleep(START_POLL_SECONDS)
-            if child.poll() is None:
-                child.terminate()
-                child.wait(timeout=REQUEST_TIMEOUT)
+            self._terminate_child(child)
+            self._forget_child(path, child, launch_id)
             msg = "board service did not publish a healthy endpoint"
             raise TimeoutError(msg)
 
@@ -447,6 +501,7 @@ class Workspace:
         with self._bookkeeping_lock:
             self._closed = True
             boards = tuple(self._board_locks.items())
+        failures = 0
         for path, lock in boards:
             # An in-flight acquisition may still be registering its child. Wait
             # without bookkeeping held, then retain ownership until cleanup succeeds.
@@ -455,14 +510,35 @@ class Workspace:
                     child = self._children.get(path)
                     launch_id = self._launch_ids.get(path)
                 if child is not None and launch_id is not None:
-                    self._close_child(path, child, launch_id)
-                    with self._bookkeeping_lock:
-                        if (
-                            self._children.get(path) is child
-                            and self._launch_ids.get(path) == launch_id
-                        ):
-                            del self._children[path]
-                            del self._launch_ids[path]
+                    try:
+                        self._close_child(path, child, launch_id)
+                    except OSError:
+                        failures += 1
+                    else:
+                        self._forget_child(path, child, launch_id)
+        if failures:
+            raise OSError(f"workspace cleanup incomplete for {failures} owned child service(s)")
+
+    def _forget_child(
+        self, path: pathlib.Path, child: subprocess.Popen[bytes], launch_id: str
+    ) -> None:
+        with self._bookkeeping_lock:
+            if self._children.get(path) is child and self._launch_ids.get(path) == launch_id:
+                del self._children[path]
+                del self._launch_ids[path]
+
+    @staticmethod
+    def _terminate_child(child: subprocess.Popen[bytes]) -> None:
+        """Escalate only a captured child and retain sanitized residual failure."""
+        try:
+            child.terminate()
+            try:
+                child.wait(timeout=REQUEST_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=REQUEST_TIMEOUT)
+        except OSError, subprocess.TimeoutExpired:
+            raise OSError("owned board child cleanup did not complete") from None
 
     def _close_child(
         self, path: pathlib.Path, child: subprocess.Popen[bytes], launch_id: str
@@ -497,8 +573,7 @@ class Workspace:
                     connection.close()
             self._wait_child_stopped(path, child, launch_id)
         except OSError, ValueError, http.client.HTTPException, subprocess.TimeoutExpired:
-            child.terminate()
-            child.wait(timeout=REQUEST_TIMEOUT)
+            self._terminate_child(child)
 
     def _wait_child_stopped(
         self, path: pathlib.Path, child: subprocess.Popen[bytes], launch_id: str

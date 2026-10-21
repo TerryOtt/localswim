@@ -687,6 +687,109 @@ def test_authenticated_create_uses_browser_actor(api: RunningApi) -> None:
     assert saved.find("1").history[0].by == "terry"
 
 
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_create_uses_current_candidate_default(
+    api: RunningApi, *, external: bool, explicit: bool
+) -> None:
+    original = board_state.load(api.path, install_context=False)
+    api_endpoint.STORE = api_endpoint.BoardStore(api.path, original.policy if external else None)
+    raw = original.policy.to_json()
+    raw["defaultPriority"] = "P4"
+    original.policy = board_state.TransitionPolicy.from_json(raw, "edited embedded default")
+    original.revision = 1
+    board_state.save(original, api.path)
+    body: dict[str, object] = {"subject": "Current default", "state": "backlog"}
+    if explicit:
+        body["priority"] = "P1"
+    code, response = request_json(
+        api.base + API + "/cards", token=api_endpoint.CLI_TOKEN, revision=1, body=body
+    )
+    assert code == 200
+    assert response["revision"] == 2
+    expected = "P1" if explicit else "P3" if external else "P4"
+    assert board_state.load(api.path).find("current-default").priority == expected
+
+
+@pytest.mark.parametrize("collisions", [0, 1, 2, 4])
+def test_create_chooses_unused_deterministic_slug(api: RunningApi, collisions: int) -> None:
+    board = board_state.load(api.path, install_context=False)
+    ids = ["alpha", "alpha-0010", "alpha-0010-0002", "alpha-0010-0003"]
+    for item_id in ids[:collisions]:
+        board.create(item_id, "Existing", "backlog", "bot")
+    board.next_ticket = 10
+    board_state.save(board, api.path)
+    code, response = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=0,
+        body={"subject": "Alpha", "state": "backlog"},
+    )
+    assert code == 200
+    assert response["revision"] == 1
+    saved = board_state.load(api.path)
+    expected = {0: "alpha", 1: "alpha-0010", 2: "alpha-0010-0002", 4: "alpha-0010-0004"}
+    assert saved.find("10").id == expected[collisions]
+    assert saved.next_ticket == 11
+    assert len(saved.items) == collisions + 1
+    before = api.path.read_bytes()
+    code, _ = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=1,
+        body={"id": expected[collisions], "subject": "Duplicate", "state": "backlog"},
+    )
+    assert code == 409
+    assert api.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(
+    "priority", ["normal", "urgent", "Normal", "p3", "P3", "INVALID", "NORMAL", "p6"]
+)
+def test_custom_priority_ids_match_exactly(api: RunningApi, *, batch: bool, priority: str) -> None:
+    board = board_state.load(api.path, install_context=False)
+    raw = board.policy.to_json()
+    entries = cast("list[board_state.JsonObject]", raw["priorities"])
+    for index, name in enumerate(["urgent", "normal", "Normal", "P3", "p3", "P5"]):
+        entries[index]["id"] = name
+    board.policy = board_state.TransitionPolicy.from_json(raw, "exact priority IDs")
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board_state.save(board, api.path)
+    before = api.path.read_bytes()
+    route = "/cards/priorities" if batch else "/cards/alpha/priority"
+    body: dict[str, object] = {"priority": priority}
+    if batch:
+        body["cards"] = ["alpha"]
+    code, response = request_json(
+        api.base + API + route, token=api_endpoint.CLI_TOKEN, revision=0, body=body
+    )
+    if priority in {"INVALID", "NORMAL", "p6"}:
+        assert code == 409
+        assert api.path.read_bytes() == before
+    else:
+        assert code == 200
+        assert response["revision"] == 1
+        assert board_state.load(api.path).find("alpha").priority == priority
+
+
+@pytest.mark.parametrize("priority", ["P0", "P1", "P2", "P3", "P4", "P5", "p3"])
+def test_single_priority_accepts_standard_ids_and_p3_convenience(
+    api: RunningApi, priority: str
+) -> None:
+    board = board_state.load(api.path, install_context=False)
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board_state.save(board, api.path)
+    code, response = request_json(
+        api.base + API + "/cards/alpha/priority",
+        token=api_endpoint.CLI_TOKEN,
+        revision=0,
+        body={"priority": priority},
+    )
+    assert code == 200
+    assert response["priority"] == priority.upper()
+
+
 def test_archive_routes_keep_data_and_enforce_credentials_and_revisions(api: RunningApi) -> None:
     code, _ = request_json(
         api.base + API + "/cards",

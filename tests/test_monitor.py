@@ -372,6 +372,195 @@ def test_reload_timeout_cancels_request(
     assert "reloadPid" not in watcher.read_json(config.target_path)
 
 
+def saved_status(config: watcher.Config, pending: watcher.PendingAlert) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "state": "failed",
+        "board": str(config.board),
+        "lastSignature": list(watcher.board_signature(config.board)),
+        "lastSignatureAt": pending.last_observed_at,
+        "lastAlertAt": None,
+        "pendingWriteCount": pending.write_count,
+        "pendingActivityStartedAt": pending.activity_started_at,
+        "pendingFirstObservedAt": pending.first_observed_at,
+        "pendingLastObservedAt": pending.last_observed_at,
+    }
+
+
+def test_ordinary_restart_retries_failed_queue_without_board_write(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watcher.write_atomic_json(config.status_path, saved_status(config, pending))
+    monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
+    monkeypatch.setattr(watcher, "service_is_healthy", Mock(return_value=True))
+    monkeypatch.setattr(watcher, "bot_only_activity", Mock(return_value=False))
+    monkeypatch.setattr(watcher.time, "monotonic", Mock(side_effect=[100.0, 115.0] * 2))
+    queue = Mock(side_effect=[RuntimeError("queue unavailable"), None])
+    monkeypatch.setattr(watcher, "queue_alert", queue)
+
+    def idle(_: watcher.Config) -> Iterator[set[object]]:
+        status = watcher.read_json(config.status_path)
+        assert status["pendingWriteCount"] == pending.write_count
+        assert watcher.acquire_lock(config.lock_path) is None
+        yield set()
+
+    monkeypatch.setattr(watcher, "watch_board", idle)
+    signature = watcher.board_signature(config.board)
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        watcher.monitor(config)
+    failed = watcher.read_json(config.status_path)
+    assert failed["state"] == "failed"
+    assert failed["pendingActivityStartedAt"] == pending.activity_started_at
+    assert failed["pendingWriteCount"] == pending.write_count
+    assert watcher.monitor(config) == 0
+    status = watcher.read_json(config.status_path)
+    assert queue.call_count == 2
+    retried = queue.call_args.args[2]
+    assert retried.activity_started_at == pending.activity_started_at
+    assert retried.last_observed_at == pending.last_observed_at
+    assert status["pendingWriteCount"] == 0
+    assert status["lastAlertAt"] is not None
+    assert watcher.board_signature(config.board) == signature
+
+
+@pytest.mark.parametrize("with_pending", [False, True])
+def test_ordinary_restart_retains_cursor_and_covers_signature_gap(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    *,
+    with_pending: bool,
+) -> None:
+    saved = saved_status(config, pending)
+    saved["lastSignature"] = [0, 0]
+    if not with_pending:
+        saved.update(
+            pendingWriteCount=0,
+            pendingActivityStartedAt=None,
+            pendingFirstObservedAt=None,
+            pendingLastObservedAt=None,
+        )
+    watcher.write_atomic_json(config.status_path, saved)
+    lock, previous = watcher.claim_monitor(config)
+    assert lock is not None
+    try:
+        runtime = watcher.resume_runtime(config, previous, watcher.now())
+    finally:
+        watcher.release_lock(lock)
+    assert runtime.pending_alert is not None
+    assert runtime.pending_alert.write_count == (pending.write_count + 1 if with_pending else 1)
+    assert runtime.pending_alert.activity_started_at == (
+        pending.activity_started_at if with_pending else pending.last_observed_at
+    )
+    assert runtime.last_signature_at == runtime.pending_alert.last_observed_at
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"board": "foreign-board.json"},
+        {"schema": 2},
+        {"pendingWriteCount": True},
+        {"pendingWriteCount": -1},
+        {"pendingWriteCount": 0},
+        {"pendingLastObservedAt": None},
+        {"pendingFirstObservedAt": "not-a-timestamp"},
+        {"pendingActivityStartedAt": "2026-10-17T00:00:00+00:00"},
+        {"lastSignatureAt": "2026-10-17T00:00:00+00:00"},
+        {"lastSignatureAt": "2026-10-16T00:00:00"},
+        {"lastSignature": [True, 2]},
+        {"lastAlertAt": 17},
+    ],
+)
+def test_ordinary_restart_protects_uncertain_status_and_releases_lock(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    changes: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = saved_status(config, pending)
+    saved.update(changes)
+    watcher.write_atomic_json(config.status_path, saved)
+    before = config.status_path.read_bytes()
+    monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
+    watch = Mock()
+    monkeypatch.setattr(watcher, "watch_board", watch)
+    with pytest.raises(RuntimeError, match="uncertain; preserved for recovery"):
+        watcher.monitor(config)
+    assert config.status_path.read_bytes() == before
+    watch.assert_not_called()
+    lock = watcher.acquire_lock(config.lock_path)
+    assert lock is not None
+    watcher.release_lock(lock)
+
+
+@pytest.mark.parametrize("contents", ["{", "[]", "{}"])
+def test_ordinary_restart_preserves_malformed_or_partial_document(
+    config: watcher.Config,
+    contents: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.status_path.write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
+    with pytest.raises(RuntimeError, match="preserved for recovery"):
+        watcher.monitor(config)
+    assert config.status_path.read_text(encoding="utf-8") == contents
+
+
+def test_ordinary_restart_retains_idle_cursor_and_previous_acknowledgement(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+) -> None:
+    saved = saved_status(config, pending)
+    saved.update(
+        pendingWriteCount=0,
+        pendingActivityStartedAt=None,
+        pendingFirstObservedAt=None,
+        pendingLastObservedAt=None,
+        lastAlertAt=pending.last_observed_at,
+    )
+    watcher.write_atomic_json(config.status_path, saved)
+    runtime = watcher.resume_runtime(config, {}, watcher.now())
+    assert runtime.pending_alert is None
+    assert runtime.last_signature_at == pending.last_observed_at
+    assert runtime.last_alert_at == pending.last_observed_at
+
+
+@pytest.mark.parametrize("events", [[{"by": "bot"}], [{"by": "terry"}], []])
+def test_recovered_interval_uses_shared_actor_filter_and_mocked_transport(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    events: list[dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watcher.write_atomic_json(config.status_path, saved_status(config, pending))
+    monkeypatch.setattr(watcher.time, "monotonic", Mock(side_effect=[100.0, 115.0]))
+    monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-executable"))
+    monkeypatch.setattr(watcher, "service_is_healthy", Mock(return_value=True))
+    transport = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps(events), ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]
+    )
+    monkeypatch.setattr(watcher.subprocess, "run", transport)
+    empty_changes: set[object] = set()
+    monkeypatch.setattr(watcher, "watch_board", Mock(return_value=iter([empty_changes])))
+    assert watcher.monitor(config) == 0
+    assert transport.call_count == (1 if events == [{"by": "bot"}] else 2)
+    status = watcher.read_json(config.status_path)
+    assert status["pendingWriteCount"] == 0
+    if transport.call_count == 2:
+        assert transport.call_args.args[0][:4] == [
+            "mock-executable",
+            "queue",
+            "--thread",
+            config.thread_id,
+        ]
+        assert pending.activity_started_at in transport.call_args.args[0][-1]
+
+
 @pytest.mark.parametrize("correct_identity", [False, True])
 def test_lifecycle_uses_live_descriptor_and_board_identity(
     config: watcher.Config,

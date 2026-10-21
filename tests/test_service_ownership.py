@@ -451,7 +451,99 @@ def test_launch_capability_is_one_use_and_bound_to_parent_gate(
 
 
 @pytest.mark.parametrize(
-    "payload", [b"[" * 2000 + b"]" * 2000, b"x" * 5000], ids=["deep", "oversized"]
+    ("saved_token", "supplied_token"),
+    [
+        ("synthetic-\N{LATIN SMALL LETTER E WITH ACUTE}", "synthetic-ascii"),
+        ("synthetic-ascii", "synthetic-\N{LATIN SMALL LETTER E WITH ACUTE}"),
+        (
+            "synthetic-\N{LATIN SMALL LETTER E WITH ACUTE}",
+            "synthetic-\N{LATIN SMALL LETTER E WITH ACUTE}",
+        ),
+        (None, "synthetic-ascii"),
+        (123, "synthetic-ascii"),
+        ([], "synthetic-ascii"),
+        ("synthetic-ascii", "synthetic-mismatch"),
+    ],
+    ids=[
+        "saved-nonascii",
+        "supplied-nonascii",
+        "both-nonascii",
+        "null",
+        "number",
+        "list",
+        "mismatch",
+    ],
+)
+def test_malformed_launch_tokens_refuse_without_disclosure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    saved_token: board_state.JsonValue,
+    supplied_token: str,
+) -> None:
+    board = tmp_path / "board.json"
+    raw: board_state.JsonObject = {"board": str(board.resolve()), "token": saved_token}
+
+    def read_ticket(_path: pathlib.Path, _limit: int) -> board_state.JsonValue:
+        return raw
+
+    with service_ownership.launch_locked(board):
+        monkeypatch.setattr(service_ownership, "_read_json", read_ticket)
+        monkeypatch.setenv(service_ownership.LAUNCH_MARKER_ENV, supplied_token)
+        with pytest.raises(OSError, match=r"^invalid board launch capability$") as failure:
+            service_ownership.consume_launch(board)
+        assert str(failure.value) == "invalid board launch capability"
+        assert service_ownership.LAUNCH_MARKER_ENV not in os.environ
+    with service_ownership.launch_locked(board, timeout=0):
+        pass
+
+
+def test_valid_launch_token_refuses_wrong_board_binding(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = tmp_path / "board.json"
+    ticket = board_state.service_descriptor_path(board).with_suffix(".launch-token")
+    with service_ownership.launch_locked(board) as gate:
+        marker = gate.child_environment()[service_ownership.LAUNCH_MARKER_ENV]
+        ticket.write_text(
+            json.dumps({"board": str((tmp_path / "other.json").resolve()), "token": marker}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(service_ownership.LAUNCH_MARKER_ENV, marker)
+        with pytest.raises(OSError, match=r"^invalid board launch capability$"):
+            service_ownership.consume_launch(board)
+        assert service_ownership.LAUNCH_MARKER_ENV not in os.environ
+        assert ticket.exists()
+        with pytest.raises(TimeoutError), service_ownership.launch_locked(board, timeout=0):
+            pytest.fail("refusal released the parent's gate")
+    assert not ticket.exists()
+    with service_ownership.launch_locked(board, timeout=0):
+        pass
+
+
+def test_orphan_launch_token_with_live_parent_pid_refuses_and_releases_probe(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = tmp_path / "board.json"
+    marker = "synthetic-orphan-token"
+    ticket = board_state.service_descriptor_path(board).with_suffix(".launch-token")
+    ticket.parent.mkdir(parents=True, exist_ok=True)
+    ticket.write_text(
+        json.dumps({"board": str(board.resolve()), "token": marker, "pid": os.getpid()}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(service_ownership.LAUNCH_MARKER_ENV, marker)
+    with pytest.raises(OSError, match=r"^invalid board launch capability$"):
+        service_ownership.consume_launch(board)
+    assert service_ownership.LAUNCH_MARKER_ENV not in os.environ
+    assert ticket.exists()
+    with service_ownership.launch_locked(board, timeout=0):
+        pass
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"[" * 2000 + b"]" * 2000, b"x" * 5000, b"{", b"[]", b"\xff"],
+    ids=["deep", "oversized", "malformed", "nonobject", "encoding"],
 )
 def test_invalid_launch_ticket_is_bounded_and_releases_gate(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, payload: bytes

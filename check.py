@@ -107,15 +107,17 @@ def tracked(suffixes: tuple[str, ...]) -> list[pathlib.Path]:
     gate and a tracked file cannot hide from it.
     """
     out = subprocess.run(
-        ["git", "ls-files"],  # noqa: S607 -- Git is the required repository tool.
+        ["git", "ls-files", "-z"],  # noqa: S607 -- Git is the required repository tool.
         cwd=ROOT,
         capture_output=True,
-        text=True,
         check=False,
     )
     if out.returncode != 0:
         return []
-    paths = (ROOT / line for line in out.stdout.splitlines() if line.endswith(suffixes))
+    # Decode filesystem names only after preserving Git's raw pathname boundaries.
+    # fsdecode supports Windows UTF-8 paths and POSIX surrogate-escaped bytes.
+    names = (os.fsdecode(name) for name in out.stdout.split(b"\0") if name)
+    paths = (ROOT / name for name in names if name.endswith(suffixes))
     return [path for path in paths if path.is_file()]
 
 

@@ -254,6 +254,8 @@ def _validate_launch(path: pathlib.Path, token: str) -> None:
         not isinstance(raw, dict)
         or raw.get("board") != str(path.resolve())
         or not isinstance(saved_token, str)
+        or not saved_token.isascii()
+        or not token.isascii()
         or not secrets.compare_digest(saved_token, token)
     ):
         raise OSError("invalid board launch capability")

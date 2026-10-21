@@ -2866,6 +2866,10 @@ class Board:
         **Creation is an EVENT, not an initial condition.** Without an entry here a
         card's earliest record would be the day somebody happened to touch it.
         """
+        if not item_id:
+            raise BoardError("a card needs a non-empty id")
+        if not subject:
+            raise BoardError("a card needs a non-empty subject")
         if not self.policy.may_create(by, state):
             allowed = sorted(s for s in self.policy.states if self.policy.may_create(by, s))
             raise BoardError(

@@ -123,12 +123,16 @@ schema-4 envelope that fails board validation, including validation recursion, s
 in the catalog with an error. API and attachment limits are separate; discovery does
 not promise a bound on total traversal or file count.
 
-A proxy request resolves its board with one discovery scan. Its private candidate
+A stable proxy request resolves its board with one discovery scan. Its private candidate
 retains file identity only for that request; it is neither a persistent cache nor
 caller-supplied authorization. Direct path/endpoint calls perform their own safe
 discovery. Before consumption and after waiting for board acquisition, containment,
-symlink/junction membership and file identity are checked again. Removal or replacement
-produces a controlled refusal; a later request may retry discovery.
+symlink/junction membership and file identity are checked again. An ordinary atomic
+replacement may refresh that same key at most twice per request, with fresh bounded
+discovery and full board validation. The current launch gate, capability and child
+wait remain intact. Unsafe paths, invalid replacements and exhausted churn refuse;
+proxy mutations are never replayed. Fixed diagnostic event labels and attempt counts
+go to standard error without paths, card content or capabilities.
 
 A board key is its relative POSIX path without `.json`. For example,
 `localswim/localswim.json` becomes `localswim/localswim`, with a readable
@@ -158,6 +162,10 @@ bookkeeping, never the reverse. Unrelated boards can therefore recover independe
 Explicit `Workspace.close()` closes new acquisitions, waits outside bookkeeping for
 in-flight registration, and removes an owned pair only after its cleanup succeeds.
 A failed cleanup remains retryable; replacement identities are never shut down.
+Explicit cleanup uses the captured Popen for terminate, bounded wait, timeout-only
+kill and bounded reap. It attempts later children after one failure, retains residual
+pairs, and reports a sanitized aggregate error. A new launch must first clean any
+previously owned residual handle. Normal gateway exit leaves writers running.
 
 When no writer owns the board, it starts a child on an ephemeral loopback port;
 that child publishes its actual port in the usual descriptor, so existing CLI mutations
@@ -920,8 +928,10 @@ The gate runs LF validation, Ruff `ALL`, Ruff's formatter check, strict Pyright,
 actionlint with ShellCheck, and the external US English/house vocabulary checker. Ruff
 verifies that annotations exist; Pyright verifies their types. The vocabulary detector
 first runs a known-bad control sentence and fails if the canonical table is missing.
-The checker scans prose-bearing Git-tracked Python, Markdown, JSON, TOML, and YAML files,
-so a newly created untracked document is not covered until it becomes tracked. Tool
+The checker scans prose-bearing Git-tracked Python, Markdown, JSON, TOML, and YAML files.
+Its NUL-delimited Git inventory preserves Unicode, spaces and other supported pathname
+characters before filtering; it checks current working-tree content. A newly created
+untracked document is not covered until it becomes tracked. Tool
 pins and the rationale for not stacking redundant linters are in `docs/TOOLING.md`.
 
 CI obtains the canonical word table from the public `FlickrGroupAddr/backend-api`
@@ -1009,5 +1019,9 @@ document; link to the authoritative data so it cannot drift.
 portable lifetime lock, sanitized CLI attribution, per-board target/status files,
 and cooperative reload. `tests/test_monitor.py` covers fail-open actor filtering,
 event-count independence, quiet-window debounce, PID scoping, lock exclusion,
-and cursor continuity during reload. See README's shared board-write monitor
+and cursor continuity during reload. Ordinary startup validates saved same-board
+pending activity only after taking ownership, preserving failed dispatch and signature
+gaps. Foreign or inconsistent metadata is retained and refused, including a pending
+end that differs from the saved cursor. Queue acknowledgement and status persistence
+are separate, so crash recovery has at-least-once duplicate windows. See README's shared board-write monitor
 section for launch arguments and migration from the old FGA-local watcher.

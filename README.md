@@ -56,7 +56,10 @@ reused; absent services start on available loopback ports. If a writer is restar
 the gateway waits for its rendezvous to recover instead of starting another writer.
 Recovery is serialized separately for each canonical board, so one waiting board does
 not hold up another healthy board. Explicit workspace cleanup closes new acquisitions;
-an owned child whose cleanup fails remains available for a later cleanup retry.
+cleanup attempts every tracked child and escalates a captured child from terminate to
+kill only after its bounded wait expires. An incomplete cleanup raises one sanitized
+aggregate error and retains unresolved child/launch pairs for a later retry. Normal
+gateway exit still leaves board writers running.
 The CLI continues to use each board's JSON path and its own service descriptor.
 
 Discovery reads at most 8 MiB (8,388,608 bytes) plus one detection byte from each
@@ -65,6 +68,14 @@ while bounding unrelated or damaged files. Unreadable, oversized, invalid JSON a
 nonboard files are omitted; a recognized board that fails validation remains visible
 with an error. This is a discovery limit, separate from attachment and API limits;
 it does not bound the number of files or total directory traversal time.
+
+A stable request uses one discovery scan. If an ordinary atomic save replaces the
+snapshot during endpoint acquisition, the gateway allows at most two fresh scans of
+that same key and validates the replacement before reuse. It keeps the current
+launch gate and child wait; it does not resend a mutation. Unsafe paths, invalid
+replacement boards and continued churn still fail visibly. Standard error records
+fixed discovery retry/recovery/refusal events and attempt counts without board
+paths, card content or capabilities; redirect it to a private log when launching.
 
 The Attention sidebar gives every project three fixed count columns: **Blocked** (red),
 **Needs Terry** (amber), and **Ready for Review** (blue). A zero count leaves its column
@@ -637,6 +648,14 @@ evaluated before floors are applied, while unfinished blockers outside the selec
 can clamp effective priorities. The request uses the ordinary bearer credential and
 `If-Match` revision boundary.
 
+Single-card priority commands also preserve exact configured IDs, including named
+and case-distinct IDs. Only after exact membership fails do standard lowercase
+`p0` through `p5` aliases resolve to their configured uppercase counterparts.
+Creation rejects empty required IDs or subjects before allocating a ticket. An
+omitted HTTP creation priority uses the current locked policy default. Generated
+IDs try the free title slug, then the actual next-ticket suffix, then unused
+ordinal suffixes starting at `-0002`; explicit duplicate IDs still refuse.
+
 The board permission route accepts exactly this body, using stable actor and lane IDs:
 
 ~~~json
@@ -828,6 +847,16 @@ Filesystem signatures and activity-event counts differ and are never compared.
 No board prose or service credentials enter monitor logs or status files.
 An already queued alert should first inspect only its bounded activity metadata;
 proven automation-only activity needs no card inspection or work resumption.
+
+Ordinary startup acquires the monitor lock before validating and recovering saved
+same-board activity. A saved failed pending burst and cursor survive a restart even
+without a later board write; a changed file signature adds a covering interval.
+Foreign, unreadable, unsupported or inconsistent recovery metadata causes startup to
+refuse while preserving the status document for investigation. Inspect that document
+and recover its uncertain interval before replacing it; do not simply delete it.
+Delivery is at least once: a crash after queue acknowledgement but before status
+persistence can duplicate an alert. This does not promise exactly-once delivery or
+survival of sudden power loss.
 
 Add `--reload` to the same launch command after deploying an updated package.
 It requests replacement of the exact recorded monitor PID while the board stays

@@ -38,6 +38,23 @@ def test_create_refuses_duplicate_id(board: board_state.Board) -> None:
         board.create("alpha", "Another", "backlog", "bot")
 
 
+@pytest.mark.parametrize(("item_id", "subject"), [("", "Title"), ("alpha", "")])
+def test_create_refuses_empty_required_strings_atomically(
+    board: board_state.Board, item_id: str, subject: str
+) -> None:
+    board.create("existing", "Existing", "backlog", "bot")
+    before = copy.deepcopy(board.to_json())
+    counter = board.next_ticket
+    with pytest.raises(board_state.BoardError, match="non-empty"):
+        board.create(item_id, subject, "backlog", "bot")
+    assert board.to_json() == before
+    assert board.next_ticket == counter
+    board.create("valid", "Valid", "backlog", "bot")
+    restored = board_state.Board.from_json(board.to_json(), "creation roundtrip")
+    assert restored.to_json() == board.to_json()
+    assert restored.verify() == []
+
+
 def test_create_refuses_forbidden_lane(board: board_state.Board) -> None:
     with pytest.raises(board_state.BoardError, match="may not create"):
         board.create("alpha", "Alpha", "completed", "bot")

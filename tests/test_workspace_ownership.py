@@ -463,7 +463,7 @@ def test_close_retains_owned_pair_after_cleanup_failure_for_retry(
     child = cast("subprocess.Popen[bytes]", Child())
     instance._children[path.resolve()] = child
     instance._launch_ids[path.resolve()] = "original"
-    with pytest.raises(PermissionError, match="controlled transient"):
+    with pytest.raises(OSError, match="incomplete for 1"):
         instance.close()
     assert instance._children[path.resolve()] is child
     assert instance._launch_ids[path.resolve()] == "original"
@@ -471,5 +471,183 @@ def test_close_retains_owned_pair_after_cleanup_failure_for_retry(
         instance.endpoint(path)
     instance.close()
     assert attempts == ["terminate", "terminate"]
+    assert not instance._children
+    assert not instance._launch_ids
+
+
+@pytest.mark.parametrize("residual", [False, True])
+def test_failed_start_escalates_captured_child_and_retains_only_residual(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, residual: bool
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Failed launch")
+    instance = workspace.Workspace(tmp_path)
+    actions: list[str] = []
+
+    class Child:
+        @staticmethod
+        def terminate() -> None:
+            actions.append("terminate")
+
+        @staticmethod
+        def kill() -> None:
+            actions.append("kill")
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == workspace.REQUEST_TIMEOUT
+            assert instance._bookkeeping_lock.acquire(blocking=False)
+            instance._bookkeeping_lock.release()
+            actions.append("wait")
+            if actions.count("wait") == 1 or residual:
+                raise subprocess.TimeoutExpired("private-command-secret", timeout)
+            return 0
+
+    child = cast("subprocess.Popen[bytes]", Child())
+
+    def spawn(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        return child
+
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(instance, "_await_existing", unavailable)
+    monkeypatch.setattr(workspace, "START_WAIT_SECONDS", 0)
+    message = "cleanup did not complete" if residual else "healthy endpoint"
+    with pytest.raises(OSError, match=message) as failure:
+        instance.endpoint(path)
+    assert "private-command-secret" not in str(failure.value)
+    assert actions == ["terminate", "wait", "kill", "wait"]
+    if residual:
+        assert instance._children[path.resolve()] is child
+        assert instance._launch_ids[path.resolve()]
+        with pytest.raises(OSError, match="cleanup did not complete"):
+            instance.endpoint(path)
+        assert instance._children[path.resolve()] is child
+    else:
+        assert not instance._children
+        assert not instance._launch_ids
+
+
+def test_close_attempts_later_child_and_retries_residual_without_bookkeeping_lock(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = workspace.Workspace(tmp_path)
+    paths = [tmp_path / name for name in ("first.json", "second.json")]
+    actions: list[str] = []
+    residual = True
+
+    class Child:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def terminate(self) -> None:
+            actions.append(self.name + ":terminate")
+
+        def kill(self) -> None:
+            actions.append(self.name + ":kill")
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == workspace.REQUEST_TIMEOUT
+            assert instance._bookkeeping_lock.acquire(blocking=False)
+            instance._bookkeeping_lock.release()
+            actions.append(self.name + ":wait")
+            if self.name == "first" and residual:
+                raise subprocess.TimeoutExpired("private-command-secret", timeout)
+            return 0
+
+    for path in paths:
+        instance._board_lock(path)
+        instance._children[path] = cast("subprocess.Popen[bytes]", Child(path.stem))
+        instance._launch_ids[path] = path.stem
+
+    def unavailable(_path: pathlib.Path) -> None:
+        return None
+
+    monkeypatch.setattr(service_ownership, "read_service_metadata", unavailable)
+    with pytest.raises(OSError, match="incomplete for 1") as failure:
+        instance.close()
+    assert "private-command-secret" not in str(failure.value)
+    assert actions == [
+        "first:terminate",
+        "first:wait",
+        "first:kill",
+        "first:wait",
+        "second:terminate",
+        "second:wait",
+    ]
+    assert list(instance._children) == paths[:1]
+    assert list(instance._launch_ids) == paths[:1]
+    residual = False
+    instance.close()
+    assert not instance._children
+    assert not instance._launch_ids
+
+
+@pytest.mark.parametrize("changed", ["child", "launch"])
+def test_close_does_not_forget_replaced_ownership_pair(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    path = tmp_path / "board.json"
+    instance = workspace.Workspace(tmp_path)
+    instance._board_lock(path)
+    child = cast("subprocess.Popen[bytes]", object())
+    replacement = cast("subprocess.Popen[bytes]", object())
+    instance._children[path] = child
+    instance._launch_ids[path] = "original"
+
+    def clean(_path: pathlib.Path, _child: object, _launch_id: str) -> None:
+        if changed == "child":
+            instance._children[path] = replacement
+        else:
+            instance._launch_ids[path] = "replacement"
+
+    monkeypatch.setattr(instance, "_close_child", clean)
+    instance.close()
+    assert path in instance._children
+    assert path in instance._launch_ids
+
+
+def test_new_launch_reaps_previous_captured_child_before_replacing_handle(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Retry launch")
+    instance = workspace.Workspace(tmp_path)
+    instance._board_lock(path)
+    actions: list[str] = []
+
+    class Child:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def terminate(self) -> None:
+            actions.append(self.name + ":terminate")
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == workspace.REQUEST_TIMEOUT
+            actions.append(self.name + ":wait")
+            return 0
+
+    previous = cast("subprocess.Popen[bytes]", Child("previous"))
+    instance._children[path] = previous
+    instance._launch_ids[path] = "previous"
+
+    def spawn(*_args: object, **_kwargs: object) -> Child:
+        assert path not in instance._children
+        assert path not in instance._launch_ids
+        actions.append("spawn")
+        return Child("new")
+
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(instance, "_await_existing", unavailable)
+    monkeypatch.setattr(workspace, "START_WAIT_SECONDS", 0)
+    with pytest.raises(TimeoutError, match="healthy endpoint"):
+        instance.endpoint(path)
+    assert actions == ["previous:terminate", "previous:wait", "spawn", "new:terminate", "new:wait"]
     assert not instance._children
     assert not instance._launch_ids

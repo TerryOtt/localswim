@@ -4837,15 +4837,25 @@ def slug_for(board: board_state.Board, subject: str) -> str:
     nothing; the ticket is already on the card and already unique. So a second
     `Dark status bar` becomes `dark-status-bar-0051`.
 
+    If that ticket-derived ID is already occupied by an explicit ID, append the
+    first unused zero-padded ordinal, starting at `-0002`.
+
     **Zero-padded, because the house rule says pad anything that will ever sort.**
     """
     base = re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")[:SLUG_MAX].strip("-")
     # A title of nothing but punctuation still needs an id. The caller has already
     # refused an EMPTY subject, so this is the "###" case rather than the blank one.
     base = base or "card"
-    if not any(item.id == base for item in board.items):
+    occupied = {item.id for item in board.items}
+    if base not in occupied:
         return base
-    return f"{base}-{board.next_ticket:04d}"
+    candidate = f"{base}-{board.next_ticket:04d}"
+    suffix = 2
+    result = candidate
+    while result in occupied:
+        result = f"{candidate}-{suffix:04d}"
+        suffix += 1
+    return result
 
 
 def create_relationship_specs(
@@ -4909,12 +4919,18 @@ def apply_attachment_command(
     return board.set_cover(ref, cover, actor)
 
 
+def _single_priority_id(board: board_state.Board, priority: str) -> str:
+    """Keep exact policy IDs; accept only the legacy lowercase p-number alias."""
+    if priority not in board.policy.priorities and re.fullmatch(r"p[0-5]", priority):
+        return priority.upper()
+    return priority
+
+
 def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per REST action
     board: board_state.Board,
     command_parts: list[str],
     body: board_state.JsonObject,
     actor: board_state.Actor,
-    policy: board_state.TransitionPolicy,
 ) -> str:
     """Translate one validated REST route into one domain mutation."""
     if command_parts == ["cards"]:
@@ -4929,7 +4945,7 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
             subject,
             state,
             actor,
-            priority=str(body.get("priority") or policy.default_priority),
+            priority=str(body.get("priority") or board.policy.default_priority),
             detail=str(body.get("detail") or ""),
             owner=board_state.as_actor(str(body.get("owner") or board.default_owner), board.users),
         )
@@ -4955,7 +4971,7 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
     if action == "assign":
         return board.assign(ref, board_state.as_actor(str(body["owner"]), board.users), actor)
     if action == "priority":
-        return board.set_priority(ref, str(body["priority"]).upper(), actor)
+        return board.set_priority(ref, _single_priority_id(board, str(body["priority"])), actor)
     if action == "subject":
         return board.set_subject(ref, str(body["subject"]), actor)
     if action == "detail":
@@ -5066,7 +5082,7 @@ def execute_http_command(
         result = (
             apply_attachment_command(board, parts[1], parts[2], body, actor)
             if is_card and parts[2] in {"attachment", "cover"}
-            else _apply_http_command(board, parts, body, actor, store.policy)
+            else _apply_http_command(board, parts, body, actor)
         )
         if is_card and parts[2] == "priority":
             effective_priority = board.find(parts[1]).priority

@@ -349,7 +349,7 @@ def test_launch_gate_rechecks_candidate_before_reuse_or_launch(
         with pytest.raises((OSError, ValueError)):
             instance.resolve_endpoint("board")
         assert reuse_calls == 0
-    assert scans == 1
+    assert scans == (2 if change == "replace" else 1)
 
 
 @pytest.mark.parametrize("boundary", ["busy", "upgrade", "ready", "before_launch"])
@@ -390,6 +390,313 @@ def test_endpoint_wait_paths_retain_candidate_identity(
     with pytest.raises((OSError, ValueError)):
         instance.resolve_endpoint("board")
     assert attempts == 1
+
+
+@pytest.mark.parametrize("boundary", ["scan", "gate", "busy", "upgrade", "ready"])
+def test_atomic_save_recovers_through_fresh_discovery(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    boundary: str,
+) -> None:
+    path = tmp_path / "private-board-key.json"
+    make_board(path, "Private project prose")
+    instance = workspace.Workspace(tmp_path)
+    expected = workspace.Endpoint(12345, "private-capability", "private-css")
+    original_paths = instance._paths  # noqa: SLF001 -- deterministic scan boundary
+    scans = 0
+    changed = False
+
+    def replace() -> None:
+        nonlocal changed
+        if not changed:
+            changed = True
+            make_board(path, "After atomic replacement")
+
+    def scan() -> dict[str, workspace._Candidate]:
+        nonlocal scans
+        scans += 1
+        found = original_paths()
+        if boundary == "scan":
+            replace()
+        return found
+
+    @contextlib.contextmanager
+    def gate(_path: pathlib.Path) -> Generator[object]:
+        if boundary == "gate":
+            replace()
+        yield object()
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint | None:
+        if boundary in {"busy", "upgrade"} and not changed:
+            if boundary == "upgrade":
+                replace()
+                raise workspace.ServiceUpgradePendingError("synthetic upgrade")
+            return None
+        if boundary == "ready":
+            replace()
+        return expected
+
+    def busy(_path: pathlib.Path) -> bool:
+        replace()
+        return True
+
+    def refuse_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("existing writer recovery reached process launch")
+
+    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_launch_locked", gate)
+    monkeypatch.setattr(instance, "_existing", existing)
+    monkeypatch.setattr(service_ownership, "writer_busy", busy)
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    monkeypatch.setattr(workspace, "START_POLL_SECONDS", 0)
+    assert instance.resolve_endpoint("private-board-key") == (path.resolve(), expected)
+    assert scans == 2
+    assert capsys.readouterr().err == (
+        "Workspace discovery retry (attempt 1/2).\nWorkspace discovery recovered (attempt 1/2).\n"
+    )
+
+
+@pytest.mark.parametrize("boundary", ["before_launch", "after_launch", "child_ready"])
+def test_atomic_save_around_launch_retains_child_and_gate(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before")
+    instance = workspace.Workspace(tmp_path)
+    expected = workspace.Endpoint(12345, "synthetic", "")
+    launches = 0
+    gates = 0
+
+    class Child:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    child = Child()
+
+    def launch(*_args: object, **_kwargs: object) -> Child:
+        nonlocal launches
+        launches += 1
+        if boundary == "after_launch":
+            make_board(path, "After child launch")
+        return child
+
+    @contextlib.contextmanager
+    def gate(target: pathlib.Path) -> Generator[service_ownership.LaunchGate]:
+        nonlocal gates
+        gates += 1
+        yield service_ownership.LaunchGate(target)
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint | None:
+        if launches and boundary == "child_ready":
+            make_board(path, "At child readiness")
+        return expected if launches else None
+
+    def busy(_path: pathlib.Path) -> bool:
+        if boundary == "before_launch":
+            make_board(path, "Before child launch")
+        return False
+
+    def environment(_gate: service_ownership.LaunchGate) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(instance, "_launch_locked", gate)
+    monkeypatch.setattr(instance, "_existing", existing)
+    monkeypatch.setattr(service_ownership, "writer_busy", busy)
+    monkeypatch.setattr(service_ownership.LaunchGate, "child_environment", environment)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    assert instance.resolve_endpoint("board") == (path.resolve(), expected)
+    assert launches == gates == 1
+    assert instance._children[path] is child  # noqa: SLF001 -- original launch retained
+
+
+@pytest.mark.parametrize("replacement", ["malformed", "foreign", "invalid_board", "oversized"])
+def test_discovery_refresh_rejects_invalid_replacement(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before")
+    instance = workspace.Workspace(tmp_path)
+    original_paths = instance._paths  # noqa: SLF001 -- deterministic scan boundary
+    changed = False
+
+    def scan() -> dict[str, workspace._Candidate]:
+        nonlocal changed
+        found = original_paths()
+        if not changed:
+            changed = True
+            blobs = {
+                "malformed": b"{",
+                "foreign": b'{"schema":1,"project":"X","items":[],"policy":{}}',
+                "invalid_board": b'{"schema":4,"project":"X","items":[],"policy":{}}',
+                "oversized": b" " * (workspace.MAX_CANDIDATE_BYTES + 1),
+            }
+            temporary = path.with_name(".replacement")
+            temporary.write_bytes(blobs[replacement])
+            temporary.replace(path)
+        return found
+
+    def refuse_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid replacement reached process launch")
+
+    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    with pytest.raises(ValueError, match=r"unknown workspace board|policy"):
+        instance.resolve_endpoint("board")
+
+
+def test_discovery_refresh_churn_is_bounded(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before")
+    instance = workspace.Workspace(tmp_path)
+    original_paths = instance._paths  # noqa: SLF001 -- deterministic churn boundary
+    scans = 0
+
+    def scan() -> dict[str, workspace._Candidate]:
+        nonlocal scans
+        scans += 1
+        found = original_paths()
+        make_board(path, f"Replacement {scans}")
+        return found
+
+    monkeypatch.setattr(instance, "_paths", scan)
+    with pytest.raises(ValueError, match="changed during discovery"):
+        instance.resolve_endpoint("board")
+    assert scans == 1 + workspace.MAX_DISCOVERY_REFRESHES
+    assert "Workspace discovery exhausted (attempt 2/2)." in capsys.readouterr().err
+    assert not instance._children  # noqa: SLF001 -- churn cannot reach launch
+
+
+@pytest.mark.parametrize("churn", [False, True])
+def test_discovery_refresh_rechecks_after_full_validation(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, churn: bool
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before")
+    instance = workspace.Workspace(tmp_path)
+    original_paths = instance._paths  # noqa: SLF001 -- deterministic validation boundary
+    original_load = board_state.load
+    scans = 0
+    validations = 0
+    expected = workspace.Endpoint(12345, "synthetic", "")
+
+    def scan() -> dict[str, workspace._Candidate]:
+        nonlocal scans
+        scans += 1
+        found = original_paths()
+        if scans == 1:
+            make_board(path, "After initial scan")
+        return found
+
+    def load(target: pathlib.Path, *, install_context: bool = True) -> board_state.Board:
+        nonlocal validations
+        board = original_load(target, install_context=install_context)
+        if not install_context:
+            validations += 1
+            if churn or validations == 1:
+                make_board(path, f"Replaced after validation {validations}")
+        return board
+
+    def reuse(_candidate: workspace._Candidate) -> workspace.Endpoint:
+        return expected
+
+    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(board_state, "load", load)
+    monkeypatch.setattr(instance, "_endpoint_under_gate", reuse)
+    if churn:
+        with pytest.raises(ValueError, match="changed during discovery"):
+            instance.resolve_endpoint("board")
+    else:
+        assert instance.resolve_endpoint("board") == (path.resolve(), expected)
+    assert scans == 3
+    assert validations == 2
+
+
+def test_discovery_refresh_rejects_escape_after_fresh_scan(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "root" / "board.json"
+    outside = tmp_path / "outside.json"
+    make_board(path, "Before")
+    make_board(outside, "Outside")
+    instance = workspace.Workspace(path.parent)
+    original_paths = instance._paths  # noqa: SLF001 -- deterministic fresh-scan escape
+    scans = 0
+
+    def scan() -> dict[str, workspace._Candidate]:
+        nonlocal scans
+        scans += 1
+        found = original_paths()
+        if scans == 1:
+            make_board(path, "Ordinary replacement")
+        else:
+            path.unlink()
+            try:
+                path.symlink_to(outside)
+            except OSError:
+                pytest.skip("creating symlinks requires unavailable OS privilege")
+        return found
+
+    def refuse_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("escaped replacement reached process launch")
+
+    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    with pytest.raises(ValueError, match=r"outside the workspace|path changed"):
+        instance.resolve_endpoint("board")
+    assert scans == 2
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_discovery_recovery_never_replays_proxy_post(
+    gateway: RunningWorkspace, monkeypatch: pytest.MonkeyPatch, *, disconnect: bool
+) -> None:
+    posts = 0
+
+    class Handler(workspace.http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 -- HTTP handler protocol
+            nonlocal posts
+            posts += 1
+            self.rfile.read(int(self.headers["Content-Length"]))
+            if not disconnect:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    server = workspace.http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    changed = False
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint:
+        nonlocal changed
+        if not changed:
+            changed = True
+            make_board(gateway.first, "Atomic save before dispatch")
+        return workspace.Endpoint(server.server_address[1], "upstream-capability", "")
+
+    monkeypatch.setattr(gateway.instance, "_existing", existing)
+    try:
+        code, _ = request_json(
+            board_route(gateway.base, "alpha/board", "cards"),
+            token=gateway.instance.token,
+            revision=0,
+            body={"id": "one", "subject": "One mutation", "state": "backlog"},
+        )
+        assert code == (503 if disconnect else 200)
+        assert posts == 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def test_fresh_requests_observe_removal_and_replacement(tmp_path: pathlib.Path) -> None:
@@ -933,3 +1240,135 @@ def test_close_stops_owned_children_but_preserves_existing_writers(
         assert json.loads(original_descriptor.read_text(encoding="utf-8")) == descriptor
         base = f"http://127.0.0.1:{descriptor['port']}"
         assert request_json(base + API + "/board")[0] == 200
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_normal_gateway_exit_leaves_owned_children_live(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, interrupted: bool
+) -> None:
+    events: list[str] = []
+
+    class Server:
+        server_address = ("127.0.0.1", 12345)
+
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        @staticmethod
+        def serve_forever() -> None:
+            events.append("serve")
+            if interrupted:
+                raise KeyboardInterrupt
+
+        @staticmethod
+        def server_close() -> None:
+            events.append("server-close")
+
+    def start(_instance: workspace.Workspace) -> None:
+        events.append("publisher-start")
+
+    def stop(_instance: workspace.Workspace) -> None:
+        events.append("publisher-stop")
+
+    def close(_instance: workspace.Workspace) -> None:
+        pytest.fail("normal gateway exit must leave owned children live")
+
+    def reexec() -> None:
+        events.append("reexec")
+
+    monkeypatch.setattr(workspace, "WorkspaceServer", Server)
+    monkeypatch.setattr(workspace.Workspace, "start_publishing", start)
+    monkeypatch.setattr(workspace.Workspace, "stop_publishing", stop)
+    monkeypatch.setattr(workspace.Workspace, "close", close)
+    monkeypatch.setattr(api_endpoint, "reexec_if_requested", reexec)
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            workspace.serve(tmp_path)
+    else:
+        workspace.serve(tmp_path)
+    assert events == ["publisher-start", "serve", "server-close", "publisher-stop"] + (
+        [] if interrupted else ["reexec"]
+    )
+
+
+@pytest.mark.parametrize("replacement", ["malformed", "nonregular", "ordinary"])
+def test_residual_child_wait_rechecks_discovery_before_new_launch(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    path = tmp_path / "board.json"
+    make_board(path, "Before cleanup")
+    instance = workspace.Workspace(tmp_path)
+    token = instance.token
+    expected = workspace.Endpoint(12345, "synthetic", "")
+    events: list[str] = []
+    spawned = False
+
+    class PreviousChild:
+        @staticmethod
+        def terminate() -> None:
+            events.append("terminate")
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == workspace.REQUEST_TIMEOUT
+            events.append("wait")
+            if replacement == "ordinary":
+                make_board(path, "After atomic save during cleanup")
+            elif replacement == "malformed":
+                temporary = path.with_name(".replacement")
+                temporary.write_bytes(b"{")
+                temporary.replace(path)
+            else:
+                path.unlink()
+                path.mkdir()
+            return 0
+
+    class NewChild:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    previous = cast("subprocess.Popen[bytes]", PreviousChild())
+    child = NewChild()
+    instance._children[path] = previous  # noqa: SLF001 -- captured residual ownership
+    instance._launch_ids[path] = "previous"  # noqa: SLF001 -- paired residual ownership
+
+    @contextlib.contextmanager
+    def gate(target: pathlib.Path) -> Generator[service_ownership.LaunchGate]:
+        events.append("gate")
+        yield service_ownership.LaunchGate(target)
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint | None:
+        return expected if spawned else None
+
+    def busy(_path: pathlib.Path) -> bool:
+        return False
+
+    def environment(_gate: service_ownership.LaunchGate) -> dict[str, str]:
+        events.append("capability")
+        return {}
+
+    def launch(*_args: object, **_kwargs: object) -> NewChild:
+        nonlocal spawned
+        assert replacement == "ordinary", "unsafe replacement reached process launch"
+        spawned = True
+        events.append("launch")
+        return child
+
+    monkeypatch.setattr(instance, "_launch_locked", gate)
+    monkeypatch.setattr(instance, "_existing", existing)
+    monkeypatch.setattr(service_ownership, "writer_busy", busy)
+    monkeypatch.setattr(service_ownership.LaunchGate, "child_environment", environment)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    if replacement == "ordinary":
+        assert instance.resolve_endpoint("board") == (path.resolve(), expected)
+        assert events == ["gate", "terminate", "wait", "capability", "launch"]
+        assert instance._children[path] is child  # noqa: SLF001 -- single new child retained
+        assert instance._launch_ids[path] != "previous"  # noqa: SLF001 -- new launch pair
+    else:
+        with pytest.raises(ValueError, match=r"unknown workspace board|not a regular file"):
+            instance.resolve_endpoint("board")
+        assert events == ["gate", "terminate", "wait"]
+        assert not instance._children  # noqa: SLF001 -- prior child confirmed reaped
+        assert not instance._launch_ids  # noqa: SLF001 -- prior pair removed only after reap
+    assert instance.token == token

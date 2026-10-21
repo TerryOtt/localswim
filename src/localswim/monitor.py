@@ -38,6 +38,7 @@ MAX_SERVICE_MISSES = 5
 DEFAULT_QUIET_SECONDS = 15.0
 MAX_QUIET_SECONDS = 300.0
 ACTOR_FILTER_VERSION = 2
+SIGNATURE_PARTS = 2
 
 
 @dataclass(frozen=True)
@@ -471,29 +472,113 @@ def request_target(config: Config) -> dict[str, Any]:
 
 
 def resume_runtime(config: Config, previous: dict[str, Any], started_at: str) -> MonitorRuntime:
-    """Retain the prior activity cursor and detect writes during lock handoff."""
+    """Recover activity after ownership acquisition, before replacing status.
+
+    Recovery is at least once: a crash after queue acknowledgement but before
+    status replacement can replay the saved interval. It is not an exactly-once
+    delivery or power-loss durability guarantee.
+    """
     signature = board_signature(config.board)
     runtime = MonitorRuntime(signature, started_at)
     observed_at = now()
-    if config.reload:
+    if not config.reload:
+        final = orphaned_status(config)
+    else:
         try:
             final = read_json(config.status_path)
         except OSError, TypeError, ValueError:
             final = previous
-        cursor = final.get("lastSignatureAt")
-        if isinstance(cursor, str):
-            activity_query_bound(cursor)
-            runtime.last_signature_at = cursor
-            if final.get("lastSignature") != list(signature):
-                runtime.pending_alert = note_board_write(
-                    None,
-                    activity_started_at=cursor,
-                    observed_at=observed_at,
-                    observed_monotonic=time.monotonic(),
-                )
-                runtime.last_signature_at = observed_at
-        restore_pending(runtime, final)
+    cursor = final.get("lastSignatureAt")
+    if isinstance(cursor, str):
+        activity_query_bound(cursor)
+        runtime.last_signature_at = cursor
+        if final.get("lastSignature") != list(signature):
+            runtime.pending_alert = note_board_write(
+                None,
+                activity_started_at=cursor,
+                observed_at=observed_at,
+                observed_monotonic=time.monotonic(),
+            )
+            runtime.last_signature_at = observed_at
+    restore_pending(runtime, final)
+    if not config.reload:
+        runtime.last_alert_at = final.get("lastAlertAt")
     return runtime
+
+
+def orphaned_status(config: Config) -> dict[str, Any]:
+    """Validate ordinary-start metadata under the lifetime lock; protect uncertainty."""
+    try:
+        final = read_json(config.status_path)
+    except FileNotFoundError:
+        return {}
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError("saved monitor status is unreadable; preserved for recovery") from exc
+    try:
+        validate_orphaned_status(config, final)
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError("saved monitor status is uncertain; preserved for recovery") from exc
+    return final
+
+
+def validate_orphaned_status(config: Config, final: dict[str, Any]) -> None:
+    """Require a complete same-canonical-board cursor and pending interval."""
+    board = final.get("board")
+    if (
+        type(final.get("schema")) is not int
+        or final["schema"] != 1
+        or not isinstance(board, str)
+        or os.path.normcase(str(Path(board).resolve()))
+        != os.path.normcase(str(config.board.resolve()))
+    ):
+        raise ValueError("unsupported or foreign-board monitor status")
+    signature = cast("object", final.get("lastSignature"))
+    if not isinstance(signature, list):
+        raise TypeError("invalid saved board signature")
+    parts = cast("list[object]", signature)
+    if len(parts) != SIGNATURE_PARTS or any(type(part) is not int or part < 0 for part in parts):
+        raise ValueError("invalid saved board signature")
+    cursor_value = final.get("lastSignatureAt")
+    if not isinstance(cursor_value, str):
+        raise TypeError("invalid saved activity cursor")
+    cursor = datetime.fromisoformat(activity_query_bound(cursor_value))
+    validate_saved_pending(final, cursor)
+    alerted_at = final.get("lastAlertAt")
+    if alerted_at is not None:
+        if not isinstance(alerted_at, str):
+            raise ValueError("invalid saved alert timestamp")
+        activity_query_bound(alerted_at)
+
+
+def validate_saved_pending(final: dict[str, Any], cursor: datetime) -> None:
+    """Refuse partial or reversed pending intervals rather than silently clearing them."""
+    count = final.get("pendingWriteCount")
+    if type(count) is not int or count < 0:
+        raise ValueError("invalid saved pending count")
+    if not all(
+        field in final
+        for field in (
+            "pendingActivityStartedAt",
+            "pendingFirstObservedAt",
+            "pendingLastObservedAt",
+        )
+    ):
+        raise ValueError("incomplete saved pending metadata")
+    stamps = [
+        final.get("pendingActivityStartedAt"),
+        final.get("pendingFirstObservedAt"),
+        final.get("pendingLastObservedAt"),
+    ]
+    if count:
+        bounds: list[datetime] = []
+        for stamp in stamps:
+            if not isinstance(stamp, str):
+                raise TypeError("incomplete saved pending interval")
+            bounds.append(datetime.fromisoformat(activity_query_bound(stamp)))
+        if not bounds[0] <= bounds[1] <= bounds[2] == cursor:
+            raise ValueError("inconsistent saved activity interval")
+    elif any(stamp is not None for stamp in stamps):
+        raise ValueError("saved pending timestamps have no pending count")
 
 
 def restore_pending(runtime: MonitorRuntime, final: dict[str, Any]) -> None:
