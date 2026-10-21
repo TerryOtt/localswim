@@ -52,6 +52,7 @@ import copy
 import datetime as dt
 import graphlib
 import hashlib
+import http.client
 import io
 import itertools
 import json
@@ -67,6 +68,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
+from http import HTTPStatus
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Self, cast
 
@@ -4274,19 +4276,30 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
 
 
 def _service_descriptor(path: pathlib.Path) -> JsonObject:
-    """Read and validate the local service rendezvous file."""
-    service = service_descriptor_path(path)
+    """Validate board-bound metadata and live identity before any CLI dispatch."""
+    from . import service_ownership  # noqa: PLC0415 -- ownership imports board types
+
     try:
-        raw = cast("JsonValue", json.loads(service.read_text(encoding="utf-8")))
-    except (OSError, ValueError) as exc:
+        raw = service_ownership.service_descriptor(path, require_cli_token=True)
+        connection = http.client.HTTPConnection("127.0.0.1", cast("int", raw["port"]), timeout=5)
+        try:
+            connection.request("GET", API_PREFIX + "/browser-session")
+            response = connection.getresponse()
+            session = service_ownership.decode_service_metadata(
+                response.read(service_ownership.MAX_METADATA_BYTES + 1)
+            )
+            if (
+                response.status != HTTPStatus.OK
+                or not isinstance(session, dict)
+                or session.get("boardIdentity") != service_ownership.board_identity(path)
+            ):
+                raise ValueError("service board identity mismatch")
+        finally:
+            connection.close()
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         raise BoardError(
-            f"board service is not running ({service} is unavailable); nothing changed"
+            "board service is not running or its metadata/identity is unavailable; nothing changed"
         ) from exc
-    if not isinstance(raw, dict) or raw.get("schema") != 1:
-        raise BoardError(f"{service}: unsupported service descriptor")
-    host, port, token = raw.get("host"), raw.get("port"), raw.get("token")
-    if host != "127.0.0.1" or not isinstance(port, int) or not isinstance(token, str):
-        raise BoardError(f"{service}: invalid loopback service endpoint")
     return raw
 
 
@@ -4320,6 +4333,8 @@ def _service_json(
             error = error_raw.get("error", str(exc)) if isinstance(error_raw, dict) else str(exc)
         except ValueError:
             error = str(exc)
+        finally:
+            exc.close()
         raise BoardError(f"board service refused the command: {error}") from exc
     except (OSError, urllib.error.URLError, ValueError) as exc:
         outcome = (
@@ -4430,7 +4445,7 @@ def apply_remote_priority_batch(
     *,
     expected_revision: int | None = None,
 ) -> JsonObject:
-    """Send one bounded batch, using an explicit revision without a preliminary GET."""
+    """Send one bounded batch, using an explicit revision without a snapshot GET."""
     if expected_revision is not None and (
         type(expected_revision) is not int or expected_revision < 0
     ):

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from localswim import api_endpoint, board_state, cli
+from localswim import api_endpoint, board_state, cli, service_ownership
 from tests.test_cli import assert_cli, run_cli, served_board
 
 __all__ = ["served_board"]
@@ -277,27 +277,72 @@ def invoke_batch_transport(
 ) -> tuple[Result, list[urllib.request.Request]]:
     path = tmp_path / "absent.json"
     board_state.service_descriptor_path(path).write_text(
-        json.dumps({"schema": 1, "host": "127.0.0.1", "port": 12345, "token": "synthetic"}),
+        json.dumps(
+            {
+                "schema": 1,
+                "host": "127.0.0.1",
+                "port": 12345,
+                "board": str(path.resolve()),
+                "token": "synthetic",
+            }
+        ),
         encoding="utf-8",
     )
     requests: list[urllib.request.Request] = []
+    identity_probes: list[str] = []
+    closed: list[bool] = []
+    session = json.dumps(
+        {
+            "boardIdentity": service_ownership.board_identity(path),
+            "token": "browser-only-capability",
+            "userCSS": "",
+        }
+    ).encode()
+
+    class MetadataResponse:
+        status = 200
+
+        @staticmethod
+        def read(amount: int) -> bytes:
+            assert amount == service_ownership.MAX_METADATA_BYTES + 1
+            return session
+
+    class MetadataConnection:
+        def __init__(self, host: str, port: int, *, timeout: float) -> None:
+            assert (host, port) == ("127.0.0.1", 12345)
+            assert timeout > 0
+
+        @staticmethod
+        def request(method: str, route: str) -> None:
+            assert method == "GET"
+            assert route == board_state.API_PREFIX + "/browser-session"
+            identity_probes.append(route)
+
+        @staticmethod
+        def getresponse() -> MetadataResponse:
+            return MetadataResponse()
+
+        @staticmethod
+        def close() -> None:
+            closed.append(True)
 
     def respond(request: urllib.request.Request, *, timeout: float) -> BytesIO:
         requests.append(request)
         assert timeout > 0
-        if request.get_method() == "GET":
-            # Identity metadata reads may be added independently; revision-fetch reads may not.
-            assert request.full_url != "http://127.0.0.1:12345/api/v001/board"
-            return BytesIO(json.dumps({"boardPath": str(path.resolve())}).encode())
+        assert request.get_method() == "POST"
         if reply is None:
             raise urllib.error.URLError(TimeoutError("synthetic timeout"))
         return BytesIO(reply)
 
     monkeypatch.setattr(urllib.request, "urlopen", respond)
+    monkeypatch.setattr(board_state.http.client, "HTTPConnection", MetadataConnection)
     arguments = [str(path), "card", "set-priorities", "P3", "alpha", "--expected-revision", "7"]
     if structured:
         arguments.append("--json")
-    return CliRunner().invoke(cli.cli, arguments), requests
+    result = CliRunner().invoke(cli.cli, arguments)
+    assert identity_probes == [board_state.API_PREFIX + "/browser-session"]
+    assert closed == [True]
+    return result, requests
 
 
 def assert_batch_post(requests: list[urllib.request.Request]) -> None:

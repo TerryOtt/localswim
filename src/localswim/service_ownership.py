@@ -196,7 +196,10 @@ def launch_locked(
 
 def _read_json(path: pathlib.Path, limit: int) -> board_state.JsonValue:
     _regular_file(path)
-    with path.open("rb") as stream:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise OSError("service metadata must be a regular file")
         data = stream.read(limit + 1)
     return _decode_json(data, limit)
 
@@ -204,7 +207,43 @@ def _read_json(path: pathlib.Path, limit: int) -> board_state.JsonValue:
 def _decode_json(data: bytes, limit: int) -> board_state.JsonValue:
     if len(data) > limit:
         raise ValueError("service metadata exceeds size limit")
-    return cast("board_state.JsonValue", json.loads(data))
+    try:
+        return cast("board_state.JsonValue", json.loads(data))
+    except (ValueError, RecursionError) as exc:
+        raise ValueError("invalid service metadata JSON") from exc
+
+
+def decode_service_metadata(data: bytes) -> board_state.JsonValue:
+    """Decode only small rendezvous/session/status metadata, never board payloads."""
+    return _decode_json(data, MAX_METADATA_BYTES)
+
+
+def board_identity(path: pathlib.Path) -> str:
+    """Identify the canonical board independently of its service port."""
+    return hashlib.sha256(str(path.resolve()).casefold().encode("utf-8")).hexdigest()
+
+
+def service_descriptor(
+    path: pathlib.Path, *, require_cli_token: bool = False
+) -> board_state.JsonObject:
+    """Validate a board-bound endpoint, optionally requiring its CLI capability."""
+    raw = read_service_metadata(path)
+    if not isinstance(raw, dict):
+        raise ValueError("invalid service descriptor")  # noqa: TRY004 -- malformed JSON metadata
+    port, board, token = raw.get("port"), raw.get("board"), raw.get("token")
+    if (
+        type(raw.get("schema")) is not int
+        or raw.get("schema") != 1
+        or raw.get("host") != "127.0.0.1"
+        or type(port) is not int
+        or not 0 < port < PORT_LIMIT
+        or not isinstance(board, str)
+        or not board
+        or board_identity(pathlib.Path(board)) != board_identity(path)
+        or (require_cli_token and (not isinstance(token, str) or not token))
+    ):
+        raise ValueError("invalid board-bound service descriptor")
+    return raw
 
 
 def _validate_launch(path: pathlib.Path, token: str) -> None:
@@ -245,29 +284,17 @@ def read_service_metadata(path: pathlib.Path) -> board_state.JsonValue:
 def service_is_healthy(path: pathlib.Path) -> bool:
     """Recognize legacy correct-board listeners which predate OS ownership leases."""
     try:
-        raw = read_service_metadata(path)
-        if not isinstance(raw, dict):
-            return False
-        port, board = raw.get("port"), raw.get("board")
-        if (
-            raw.get("schema") != 1
-            or raw.get("host") != "127.0.0.1"
-            or type(port) is not int
-            or not 0 < port < PORT_LIMIT
-            or not isinstance(board, str)
-            or pathlib.Path(board).resolve() != path.resolve()
-        ):
-            return False
+        raw = service_descriptor(path)
+        port = cast("int", raw["port"])
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
         try:
             connection.request("GET", board_state.API_PREFIX + "/browser-session")
             response = connection.getresponse()
             session = _decode_json(response.read(MAX_METADATA_BYTES + 1), MAX_METADATA_BYTES)
-            identity = hashlib.sha256(str(path.resolve()).casefold().encode("utf-8")).hexdigest()
             return (
                 response.status == HTTPStatus.OK
                 and isinstance(session, dict)
-                and session.get("boardIdentity") == identity
+                and session.get("boardIdentity") == board_identity(path)
             )
         finally:
             connection.close()

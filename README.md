@@ -601,6 +601,7 @@ The browser and CLI use these loopback routes:
 
 ~~~text
 GET  /api/v001/status
+GET  /api/v001/browser-session
 GET  /api/v001/board
 POST /api/v001/cards
 POST /api/v001/cards/priorities
@@ -683,6 +684,24 @@ Mutations require the per-process bearer credential and an
 If-Match: "revision-N" header. Credentials are published in a user-local temporary
 service descriptor; they are not stored in the board. The shutdown route accepts only
 the CLI credential and does not change the board revision.
+
+CLI writes and shutdown verify that both the local descriptor and the live
+browser-session identity name the requested canonical board before sending a POST.
+An explicit revision skips the snapshot revision fetch, but still requires that
+identity check. CLI commands continue to use the CLI credential; reading session
+identity does not grant browser authority.
+
+Descriptor files must be regular files. Service-acquisition descriptor, browser-session
+and status metadata reads are limited to 64 KiB and reject malformed or excessively
+nested JSON.
+The gateway uses the same narrow validation boundary while retaining browser
+capabilities, styles, legacy upgrade and owned-child cleanup checks. These limits do
+not apply to full board payloads or attachment downloads.
+
+A service can restart or rotate credentials between identity verification and a
+write. Such a race may refuse the request; the identity check is not an atomic
+session guarantee. An uncertain POST is never automatically repeated: inspect the
+board before retrying deliberately.
 
 ## Live code updates
 

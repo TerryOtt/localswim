@@ -377,6 +377,94 @@ def test_shutdown_command_stops_live_service(served_board: pathlib.Path) -> None
     assert not board_state.service_descriptor_path(served_board).exists()
 
 
+@pytest.mark.parametrize("operation", ["mutation", "batch", "shutdown"])
+@pytest.mark.parametrize("mismatch", ["descriptor", "live"])
+def test_cli_board_identity_mismatch_never_posts(
+    served_board: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    mismatch: str,
+) -> None:
+    requested = served_board.with_name("other.json")
+    raw = json.loads(board_state.service_descriptor_path(served_board).read_text(encoding="utf-8"))
+    if mismatch == "live":
+        raw["board"] = str(requested)
+    descriptor = board_state.service_descriptor_path(requested)
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_text(json.dumps(raw), encoding="utf-8")
+    posts: list[str] = []
+    original = api_endpoint.Handler.do_POST
+
+    def post(handler: api_endpoint.Handler) -> None:
+        posts.append(handler.path)
+        original(handler)
+
+    monkeypatch.setattr(api_endpoint.Handler, "do_POST", post)
+
+    def dispatch() -> object:
+        if operation == "mutation":
+            return board_state.apply_remote_mutation(
+                requested, board_state.API_PREFIX + "/cards", {}
+            )
+        if operation == "batch":
+            return board_state.apply_remote_priority_batch(
+                requested, ["alpha"], "p3", expected_revision=0
+            )
+        return board_state.shutdown_service(requested)
+
+    with pytest.raises(board_state.BoardError, match="nothing changed"):
+        dispatch()
+    assert posts == []
+
+
+def test_cli_stale_capability_refuses_once_without_replay(
+    served_board: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    descriptor = board_state.service_descriptor_path(served_board)
+    raw = json.loads(descriptor.read_text(encoding="utf-8"))
+    raw["token"] = "stale-cli-capability"  # noqa: S105 -- synthetic refused capability
+    descriptor.write_text(json.dumps(raw), encoding="utf-8")
+    posts: list[str] = []
+    original = api_endpoint.Handler.do_POST
+
+    def post(handler: api_endpoint.Handler) -> None:
+        posts.append(handler.path)
+        original(handler)
+
+    monkeypatch.setattr(api_endpoint.Handler, "do_POST", post)
+    with pytest.raises(board_state.BoardError, match="refused"):
+        board_state.apply_remote_priority_batch(served_board, ["alpha"], "p3", expected_revision=0)
+    assert posts == [board_state.API_PREFIX + "/cards/priorities"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"{}" + b" " * 65535, b"[" * 2000 + b"]" * 2000, b"{", b"[]"],
+    ids=["oversized", "deep", "malformed", "nonobject"],
+)
+def test_cli_invalid_live_metadata_never_posts(
+    served_board: pathlib.Path, monkeypatch: pytest.MonkeyPatch, payload: bytes
+) -> None:
+    posts: list[str] = []
+    original_get, original_post = api_endpoint.Handler.do_GET, api_endpoint.Handler.do_POST
+
+    def get(handler: api_endpoint.Handler) -> None:
+        if handler.path.endswith("/browser-session"):
+            handler._send(payload, "application/json")  # noqa: SLF001 -- malformed transport injection
+        else:
+            original_get(handler)
+
+    def post(handler: api_endpoint.Handler) -> None:
+        posts.append(handler.path)
+        original_post(handler)
+
+    monkeypatch.setattr(api_endpoint.Handler, "do_GET", get)
+    monkeypatch.setattr(api_endpoint.Handler, "do_POST", post)
+    with pytest.raises(board_state.BoardError, match="nothing changed"):
+        board_state.apply_remote_priority_batch(served_board, ["alpha"], "p3", expected_revision=0)
+    assert posts == []
+
+
 def test_read_only_report_works_offline(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     board = board_state.Board(

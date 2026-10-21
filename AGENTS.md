@@ -171,6 +171,17 @@ native board monitoring is an optional extra.
   treat a temporary restart gap as permission to launch another writer or stop a foreign
   listener. A released crash lease permits recovery. Legacy writers without the lease
   require one-time consolidation; overwritten descriptors cannot identify all old writers.
+  Share the narrow descriptor/metadata validation boundary with CLI consumers:
+  schema 1, exact loopback host, non-Boolean valid port, canonical requested-board path
+  and required capabilities. Read only regular bounded descriptor files; cap descriptor,
+  browser-session and status metadata at 64 KiB, including malformed/deep JSON handling.
+  Before CLI mutation, explicit-revision priority batch or shutdown POST, verify the
+  live browser-session boardIdentity. The probe does not grant browser authority:
+  CLI requests retain the CLI credential, workspace proxy requests the browser token.
+  Preserve browser userCSS, legacy upgrade and workspaceLaunch cleanup checks.
+  Never replay a POST after an uncertain outcome or rotation; a preflight identity
+  check is not atomic with service replacement. Do not cap full board or attachment
+  payloads as metadata or expose capability values in diagnostics.
   Serialize endpoint recovery per canonical board. Keep child/launch-ID bookkeeping
   brief; never wait for board acquisition, network, process startup or cleanup under
   that shared lock. Explicit close freezes new acquisitions and retains each exact

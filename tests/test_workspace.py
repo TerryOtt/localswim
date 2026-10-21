@@ -31,6 +31,64 @@ if TYPE_CHECKING:
 API = board_state.API_PREFIX
 
 
+@pytest.mark.parametrize("route", ["browser-session", "status"])
+@pytest.mark.parametrize(
+    "payload",
+    [b"x" * 65537, b"[" * 2000 + b"]" * 2000, b"{"],
+    ids=["oversized", "deep", "malformed"],
+)
+def test_workspace_bad_session_and_status_metadata_is_unavailable(
+    tmp_path: pathlib.Path, route: str, payload: bytes
+) -> None:
+    path = tmp_path / "board.json"
+    if len(payload) > service_ownership.MAX_METADATA_BYTES:
+        payload = json.dumps(
+            {
+                "boardIdentity": workspace.path_identity(path),
+                "token": "browser-capability",
+                "userCSS": "",
+                "build": "legacy-build",
+                "codeStale": False,
+                "padding": "x" * 65537,
+            }
+        ).encode()
+
+    class Handler(workspace.http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 -- HTTP handler protocol
+            self.send_response(200 if self.path.endswith(route) else 404)
+            self.end_headers()
+            self.wfile.write(payload if self.path.endswith(route) else b"{}")
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 -- base protocol
+            pass
+
+    server = workspace.http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    descriptor = board_state.service_descriptor_path(path)
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "host": "127.0.0.1",
+                "port": server.server_address[1],
+                "board": str(path),
+                "token": "cli-capability",
+            }
+        ),
+        encoding="utf-8",
+    )
+    instance = workspace.Workspace(tmp_path)
+    try:
+        assert instance._existing(path) is None  # noqa: SLF001 -- metadata boundary oracle
+    finally:
+        instance.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 def make_board(path: pathlib.Path, project: str, *, alternate: bool = False) -> None:
     """Create an isolated persisted board with distinguishable users and labels."""
     path.parent.mkdir(parents=True, exist_ok=True)

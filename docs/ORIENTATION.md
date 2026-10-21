@@ -660,6 +660,7 @@ Current API routes:
 
 ```text
 GET  /api/v001/status
+GET  /api/v001/browser-session
 GET  /api/v001/board
 POST /api/v001/cards
 POST /api/v001/cards/priorities
@@ -677,6 +678,27 @@ browser credential is embedded in the served page. The CLI credential is publish
 a temporary service descriptor whose filename is a hash of the resolved, case-folded
 board path. The descriptor lives under the system temp `claude-status` directory and
 is removed only by the process that owns its token.
+
+CLI and workspace clients share a small descriptor/metadata validation boundary in
+`service_ownership.py`, using a lazy import from the board module to avoid the existing
+module cycle. Descriptor admission requires schema 1, exact `127.0.0.1`, a non-Boolean
+integer port in 1..65535, the canonical requested-board path and required capabilities.
+Descriptor files must be regular; file and browser-session/status JSON reads use the
+64 KiB metadata ceiling with one detection byte. Malformed or excessive nesting is a
+controlled refusal. Full board responses and attachment payloads are not metadata.
+
+CLI descriptor acquisition also checks the live browser-session `boardIdentity`
+before ordinary mutation, explicit-revision priority batch or shutdown dispatch.
+An explicit revision avoids the snapshot GET, not identity verification. CLI POSTs
+still use only the descriptor's CLI credential; the probe does not grant browser
+authority. Workspace consumers retain browser token/userCSS checks, legacy upgrade
+handling and exact workspaceLaunch ownership checks during child cleanup.
+
+Metadata failures produce sanitized refusal or unavailable/recovery behavior, without
+including capabilities. Service replacement can occur after a successful identity
+probe, so credential rotation may safely refuse the subsequent request. This does not
+introduce an atomic session-generation protocol or automatic POST replay; uncertain
+mutation outcomes still require inspection before any deliberate retry.
 
 The approval route accepts an empty JSON object and uses the authenticated browser actor
 and request revision. It validates the `ready_for_review -> completed` move before

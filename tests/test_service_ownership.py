@@ -24,6 +24,94 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"schema": True},
+        {"schema": 2},
+        {"schema": None},
+        {"host": "localhost"},
+        {"host": None},
+        {"port": True},
+        {"port": 0},
+        {"port": -1},
+        {"port": 65536},
+        {"port": "80"},
+        {"port": None},
+        {"board": ""},
+        {"board": "other-board.json"},
+        {"board": None},
+        {"token": ""},
+        {"token": None},
+        {"token": 123},
+    ],
+)
+def test_descriptor_rejects_invalid_board_endpoint_without_token_disclosure(
+    tmp_path: pathlib.Path, change: board_state.JsonObject
+) -> None:
+    path = tmp_path / "board.json"
+    raw: board_state.JsonObject = {
+        "schema": 1,
+        "host": "127.0.0.1",
+        "port": 12345,
+        "board": str(path),
+        "token": "secret-cli-capability",
+    }
+    raw.update(change)
+    descriptor = board_state.service_descriptor_path(path)
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="descriptor") as failure:
+        service_ownership.service_descriptor(path, require_cli_token=True)
+    assert "secret-cli-capability" not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"[" * 2000 + b"]" * 2000, b"x" * 65537, b"{", b"[]", b"\xff"],
+    ids=["deep", "oversized", "malformed", "nonobject", "encoding"],
+)
+def test_descriptor_rejects_bounded_invalid_metadata(
+    tmp_path: pathlib.Path, payload: bytes
+) -> None:
+    path = tmp_path / "board.json"
+    descriptor = board_state.service_descriptor_path(path)
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_bytes(payload)
+    with pytest.raises(ValueError, match=r"metadata|descriptor"):
+        service_ownership.service_descriptor(path, require_cli_token=True)
+
+
+def test_descriptor_rejects_nonregular_path(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    board_state.service_descriptor_path(path).mkdir(parents=True)
+    with pytest.raises(OSError, match="regular"):
+        service_ownership.service_descriptor(path)
+
+
+def test_metadata_decoder_exact_ceiling_and_descriptor_size(tmp_path: pathlib.Path) -> None:
+    assert service_ownership.decode_service_metadata(b"{}" + b" " * 65534) == {}
+    with pytest.raises(ValueError, match="size limit"):
+        service_ownership.decode_service_metadata(b"{}" + b" " * 65535)
+    path = tmp_path / "board.json"
+    descriptor = board_state.service_descriptor_path(path)
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(
+        {
+            "schema": 1,
+            "host": "127.0.0.1",
+            "port": 12345,
+            "board": str(path),
+            "token": "synthetic-cli",
+        }
+    ).encode()
+    descriptor.write_bytes(raw + b" " * (65536 - len(raw)))
+    assert service_ownership.service_descriptor(path, require_cli_token=True)["port"] == 12345
+    descriptor.write_bytes(raw + b" " * (65537 - len(raw)))
+    with pytest.raises(ValueError, match="size limit"):
+        service_ownership.service_descriptor(path, require_cli_token=True)
+
+
 @contextlib.contextmanager
 def maintenance_child(program: str, board: pathlib.Path) -> Generator[subprocess.Popen[str]]:
     """Run an isolated child whose pipe messages are bounded synchronization events."""

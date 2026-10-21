@@ -1,7 +1,6 @@
 """Loopback workspace gateway over independent, sole-writer board services."""
 
 import contextlib
-import hashlib
 import html
 import http.client
 import http.server
@@ -42,13 +41,12 @@ MAX_CANDIDATE_BYTES = 8 * 1024 * 1024
 START_WAIT_SECONDS = 15.0
 START_POLL_SECONDS = 0.1
 REQUEST_TIMEOUT = 5.0
-PORT_LIMIT = 65536
 ASSET_DIR = pathlib.Path(__file__).resolve().parent
 
 
 def path_identity(path: pathlib.Path) -> str:
     """Identify the canonical board independently of its service port."""
-    return hashlib.sha256(str(path.resolve()).casefold().encode("utf-8")).hexdigest()
+    return service_ownership.board_identity(path)
 
 
 def _card_edit_stamps(board: board_state.Board) -> Generator[str]:
@@ -272,23 +270,8 @@ class Workspace:
 
     def _existing(self, path: pathlib.Path) -> Endpoint | None:
         try:
-            raw = cast(
-                "board_state.JsonValue",
-                json.loads(board_state.service_descriptor_path(path).read_text(encoding="utf-8")),
-            )
-            if not isinstance(raw, dict) or raw.get("schema") != 1:
-                return None
-            port = raw.get("port")
-            board = raw.get("board")
-            if (
-                raw.get("host") != api_endpoint.HOST
-                or type(port) is not int
-                or not 0 < port < PORT_LIMIT
-                or not isinstance(board, str)
-                or path_identity(pathlib.Path(board)) != path_identity(path)
-            ):
-                return None
-            return self._browser_endpoint(path, port)
+            raw = service_ownership.service_descriptor(path)
+            return self._browser_endpoint(path, cast("int", raw["port"]))
         except ServiceUpgradePendingError:
             raise
         except OSError, ValueError, http.client.HTTPException:
@@ -299,11 +282,11 @@ class Workspace:
         try:
             connection.request("GET", board_state.API_PREFIX + "/browser-session")
             response = connection.getresponse()
-            blob = response.read()
+            blob = response.read(service_ownership.MAX_METADATA_BYTES + 1)
             if response.status != HTTPStatus.OK:
                 self._request_existing_upgrade(port)
                 return None
-            session = cast("board_state.JsonValue", json.loads(blob))
+            session = service_ownership.decode_service_metadata(blob)
             if not isinstance(session, dict):
                 return None
             token, css = session.get("token"), session.get("userCSS")
@@ -324,7 +307,9 @@ class Workspace:
         try:
             connection.request("GET", board_state.API_PREFIX + "/status")
             response = connection.getresponse()
-            status = cast("board_state.JsonValue", json.loads(response.read()))
+            status = service_ownership.decode_service_metadata(
+                response.read(service_ownership.MAX_METADATA_BYTES + 1)
+            )
             if (
                 response.status == HTTPStatus.OK
                 and isinstance(status, dict)
@@ -484,13 +469,14 @@ class Workspace:
     ) -> None:
         """Clean up one stable ownership snapshot without holding bookkeeping."""
         try:
-            raw = cast(
-                "board_state.JsonObject",
-                json.loads(board_state.service_descriptor_path(path).read_text(encoding="utf-8")),
-            )
+            raw = service_ownership.read_service_metadata(path)
+            if not isinstance(raw, dict):
+                raise ValueError("invalid service metadata")  # noqa: TRY004, TRY301 -- cleanup fallback
+            if raw.get("workspaceLaunch") == launch_id:
+                raw = service_ownership.service_descriptor(path, require_cli_token=True)
             port, token = raw.get("port"), raw.get("token")
             if (
-                isinstance(port, int)
+                type(port) is int
                 and isinstance(token, str)
                 and raw.get("workspaceLaunch") == launch_id
                 and self._existing(path)
@@ -504,7 +490,9 @@ class Workspace:
                         board_state.API_PREFIX + "/shutdown",
                         headers={"Authorization": "Bearer " + token},
                     )
-                    connection.getresponse().read()
+                    service_ownership.decode_service_metadata(
+                        connection.getresponse().read(service_ownership.MAX_METADATA_BYTES + 1)
+                    )
                 finally:
                     connection.close()
             self._wait_child_stopped(path, child, launch_id)
@@ -517,15 +505,12 @@ class Workspace:
     ) -> None:
         child.wait(timeout=REQUEST_TIMEOUT)
         deadline = time.monotonic() + REQUEST_TIMEOUT
-        descriptor = board_state.service_descriptor_path(path)
         while time.monotonic() < deadline:
             try:
-                raw = cast(
-                    "board_state.JsonObject", json.loads(descriptor.read_text(encoding="utf-8"))
-                )
+                raw = service_ownership.read_service_metadata(path)
             except OSError, ValueError:
                 return
-            if raw.get("workspaceLaunch") != launch_id:
+            if not isinstance(raw, dict) or raw.get("workspaceLaunch") != launch_id:
                 return
             time.sleep(START_POLL_SECONDS)
         msg = "owned board service did not release its descriptor"

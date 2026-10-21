@@ -25,6 +25,28 @@ def reject_spawn(*_args: object, **_kwargs: object) -> Never:
     raise AssertionError("a live writer must never cause another process launch")
 
 
+@pytest.mark.parametrize("kind", ["deep", "oversized", "malformed", "nonregular"])
+def test_gateway_bad_descriptor_is_unavailable_without_network(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    path = tmp_path / "board.json"
+    descriptor = board_state.service_descriptor_path(path)
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "nonregular":
+        descriptor.mkdir()
+    else:
+        payload = {"deep": b"[" * 2000 + b"]" * 2000, "oversized": b"x" * 65537, "malformed": b"{"}[
+            kind
+        ]
+        descriptor.write_bytes(payload)
+    instance = workspace.Workspace(tmp_path)
+    monkeypatch.setattr(workspace.http.client, "HTTPConnection", reject_spawn)
+    try:
+        assert instance._existing(path) is None
+    finally:
+        instance.close()
+
+
 @pytest.mark.parametrize("initial", ["missing", "malformed", "refused"])
 def test_gateway_waits_through_metadata_gap_and_connection_refusal(
     tmp_path: pathlib.Path,
