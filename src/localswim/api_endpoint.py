@@ -1247,12 +1247,20 @@ class BoardStore:
             return self._board.browser_user if browser else self._board.cli_user
 
     def execute(
-        self, expected_revision: int, command: Callable[[board_state.Board], str]
+        self,
+        expected_revision: int,
+        command: Callable[[board_state.Board], str],
+        *,
+        outcome: board_state.SaveOutcome | None = None,
     ) -> tuple[str, int]:
         """Apply one command under the file lock and commit one new revision."""
+        if outcome is not None:
+            outcome.state = "uncommitted"
         with self._mutex:
             active = self.policy if self._external_policy else None
-            with board_state.edit(self.path, active, install_context=False) as candidate:
+            with board_state.edit(
+                self.path, active, install_context=False, outcome=outcome
+            ) as candidate:
                 if candidate.revision != expected_revision:
                     raise RevisionConflict(
                         f"board revision is {candidate.revision}, not "
@@ -1268,11 +1276,15 @@ class BoardStore:
                         "command would leave an invalid board: " + "; ".join(problems)
                     )
                 candidate.revision += 1
-                committed = candidate
-            # `board_state.edit` saves on exit. Publish in memory only after that succeeds.
-            self._board = copy.deepcopy(committed)
-            self.policy = self._board.policy
+                committed = copy.deepcopy(candidate)
+            # Replacement may succeed even when lock cleanup or publication raises.
+            self._publish_candidate(committed)
             return result, committed.revision
+
+    def _publish_candidate(self, committed: board_state.Board) -> None:
+        """Publish the isolated board prepared before irreversible replacement."""
+        self._board = committed
+        self.policy = committed.policy
 
     def grant_permissions(
         self, expected: int, body: board_state.JsonObject, actor: str
@@ -1288,7 +1300,7 @@ class BoardStore:
     def upload(
         self, expected_revision: int, ref: str, name: object, encoded: object, actor: str
     ) -> tuple[str, int, attachments.Attachment]:
-        """Commit bytes before metadata and roll back a new file if the snapshot fails."""
+        """Remove new bytes only after a definitely uncommitted snapshot failure."""
         try:
             filename = attachments.valid_name(name)
             blob = attachments.decode_upload(encoded)
@@ -1316,12 +1328,16 @@ class BoardStore:
                 )
             return board.add_attachment(ref, file)
 
+        outcome = board_state.SaveOutcome()
         with self._mutex:
             try:
-                result, revision = self.execute(expected_revision, attach)
-            except BaseException:
-                if created_path is not None:
-                    created_path.unlink(missing_ok=True)
+                result, revision = self.execute(expected_revision, attach, outcome=outcome)
+            except BaseException as failure:
+                if created_path is not None and outcome.state == "uncommitted":
+                    try:
+                        created_path.unlink(missing_ok=True)
+                    except BaseException as cleanup_failure:  # noqa: BLE001 -- preserve primary failure
+                        failure.add_note(f"attachment compensation failed: {cleanup_failure!r}")
                 raise
         return result, revision, file
 

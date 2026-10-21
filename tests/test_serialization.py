@@ -523,3 +523,76 @@ def test_parse_stamp_accepts_every_persisted_shape(raw: str) -> None:
 
 def test_parse_stamp_falls_back_for_absent_or_unreadable_values() -> None:
     assert board_state.parse_stamp(None) == board_state.parse_stamp("utter nonsense")
+
+
+@pytest.mark.parametrize("boundary", ["fsync", "replace", "committed", "unknown"])
+def test_save_reports_replacement_outcome_separately_from_failure(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    path = tmp_path / "board.json"
+    changed = saved_board(path)
+    before = path.read_bytes()
+    changed.project = "New project"
+    outcome = board_state.SaveOutcome()
+    replace = board_state.pathlib.Path.replace
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError("precommit fsync failure")
+
+    def replace_fault(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+        if boundary == "replace":
+            raise OSError("replace refused")
+        replace(source, target)
+        raise KeyboardInterrupt("unknown replacement")
+
+    with monkeypatch.context() as fault:
+        if boundary == "fsync":
+            fault.setattr(board_state.os, "fsync", fail_fsync)
+        elif boundary != "committed":
+            fault.setattr(board_state.pathlib.Path, "replace", replace_fault)
+        if boundary == "committed":
+            assert board_state.save(changed, path, outcome=outcome) is None
+        else:
+            with pytest.raises(KeyboardInterrupt if boundary == "unknown" else OSError):
+                board_state.save(changed, path, outcome=outcome)
+    expected = "uncommitted" if boundary == "fsync" else "unknown"
+    if boundary == "committed":
+        expected = "committed"
+    assert outcome.state == expected
+    assert (path.read_bytes() == before) == (boundary in {"fsync", "replace"})
+
+
+@pytest.mark.parametrize("prior_outcome", ["committed", "unknown"])
+@pytest.mark.parametrize("failure", ["command", "load"])
+def test_reused_edit_outcome_resets_before_early_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    prior_outcome: str,
+) -> None:
+    path = tmp_path / "board.json"
+    saved_board(path)
+    outcome = board_state.SaveOutcome()
+    with board_state.edit(path, outcome=outcome) as board:
+        board.project = "Committed edit"
+    assert outcome.state == "committed"
+    if prior_outcome == "unknown":
+        outcome.state = "unknown"
+    before = path.read_bytes()
+
+    def fail_load(
+        _path: pathlib.Path,
+        _policy: board_state.TransitionPolicy | None = None,
+        *,
+        install_context: bool = True,
+    ) -> board_state.Board:
+        del install_context
+        raise OSError("injected load refusal")
+
+    with monkeypatch.context() as fault:
+        if failure == "load":
+            fault.setattr(board_state, "load", fail_load)
+        with pytest.raises(OSError, match="injected"), board_state.edit(path, outcome=outcome):
+            raise OSError("injected command refusal")
+    assert outcome.state == "uncommitted"
+    assert path.read_bytes() == before

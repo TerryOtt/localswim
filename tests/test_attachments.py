@@ -1,12 +1,15 @@
 """Attachment upload, bounded storage, covers, removal, CLI, and Git durability."""
 
 import base64
+import contextlib
 import datetime as dt
+import hashlib
 import json
 import urllib.error
 import urllib.request
 import uuid
 from typing import TYPE_CHECKING, cast
+lazy from collections.abc import Generator
 
 import pytest
 
@@ -230,10 +233,17 @@ def test_snapshot_failure_rolls_back_uploaded_bytes(
     store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
     before = path.read_bytes()
 
-    def fail_save(_board: board_state.Board, _path: pathlib.Path) -> None:
-        raise OSError("injected snapshot failure")
+    fsync = board_state.os.fsync
+    calls = 0
 
-    monkeypatch.setattr(board_state, "save", fail_save)
+    def fail_fsync(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected snapshot failure")
+        fsync(fd)
+
+    monkeypatch.setattr(board_state.os, "fsync", fail_fsync)
     with pytest.raises(OSError, match="injected"):
         store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
     assert path.read_bytes() == before
@@ -376,3 +386,163 @@ def test_malformed_attachment_metadata_is_refused(
     card["attachments"] = [cast("board_state.JsonValue", raw)]
     with pytest.raises(board_state.BoardError, match="attachment"):
         board_state.Item.from_json(card, "card")
+
+
+@pytest.mark.parametrize(
+    "boundary", ["cleanup", "publication", "interruption", "primitive_response", "helper_failure"]
+)
+def test_upload_retains_bytes_when_snapshot_committed_or_unknown(  # noqa: PLR0915 -- fault matrix
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    path = tmp_path / "board.json"
+    store = make_store(path)
+    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    accepted = store._board  # noqa: SLF001 -- inspect publication boundary
+    locked = board_state.locked
+    replace = board_state.pathlib.Path.replace
+    replace_with_retry = board_state._replace_with_retry  # noqa: SLF001 -- fault seam
+    failure = KeyboardInterrupt("replacement bookkeeping interrupted")
+
+    @contextlib.contextmanager
+    def fail_cleanup(target: pathlib.Path) -> Generator[None]:
+        with locked(target):
+            yield
+        raise OSError("transaction cleanup failed")
+
+    def fail_publication(_candidate: board_state.Board) -> None:
+        raise MemoryError("memory publication failed")
+
+    def interrupt_replace(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+        result = replace(source, target)
+        if target == path:
+            if boundary == "primitive_response":
+                raise OSError("primitive response failed")
+            raise failure
+        return result
+
+    def fail_after_helper(
+        source: pathlib.Path,
+        target: pathlib.Path,
+        *,
+        outcome: board_state.SaveOutcome | None = None,
+    ) -> None:
+        replace_with_retry(source, target, outcome=outcome)
+        raise OSError("replacement helper response failed")
+
+    with monkeypatch.context() as fault:
+        if boundary == "cleanup":
+            fault.setattr(board_state, "locked", fail_cleanup)
+            expected = OSError
+        elif boundary == "publication":
+            fault.setattr(store, "_publish_candidate", fail_publication)
+            expected = MemoryError
+        elif boundary == "helper_failure":
+            fault.setattr(board_state, "_replace_with_retry", fail_after_helper)
+            expected = OSError
+        else:
+            fault.setattr(board_state.pathlib.Path, "replace", interrupt_replace)
+            expected = OSError if boundary == "primitive_response" else KeyboardInterrupt
+        with pytest.raises(expected) as caught:
+            store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+        if boundary == "interruption":
+            assert caught.value is failure
+    assert store._board is accepted  # noqa: SLF001 -- failure did not acknowledge publication
+    committed = board_state.load(path)
+    assert committed.revision == 2
+    assert committed.verify() == []
+    [file] = committed.find("card").attachments
+    blob = attachments.blob_path(path, 1, file.id, attachments.extension(file.name)).read_bytes()
+    assert blob == PNG
+    assert hashlib.sha256(blob).hexdigest() == file.sha256
+    fresh = store.snapshot()
+    assert fresh.revision == 2
+    assert store.policy.to_json() == fresh.policy.to_json()
+    assert len(fresh.find("card").attachments) == 1
+
+
+def test_upload_failed_replace_preserves_snapshot_and_retains_unknown_bytes(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    store = make_store(path)
+    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.upload(1, "card", "prior.png", base64.b64encode(PNG).decode("ascii"), "bot")
+    before = path.read_bytes()
+    prior = list((tmp_path / "attachments" / "0001").iterdir())
+
+    replace = board_state.pathlib.Path.replace
+
+    def fail_replace(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+        if target == path:
+            raise OSError("snapshot replacement refused")
+        return replace(source, target)
+
+    monkeypatch.setattr(board_state.pathlib.Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="snapshot replacement refused"):
+        store.upload(2, "card", "next.png", base64.b64encode(PNG).decode("ascii"), "bot")
+    assert path.read_bytes() == before
+    retained = list((tmp_path / "attachments" / "0001").iterdir())
+    assert len(retained) == 2
+    assert prior[0] in retained
+    assert all(file.read_bytes() == PNG for file in retained)
+    assert len(store.snapshot().find("card").attachments) == 1
+
+
+def test_upload_compensation_failure_preserves_original_exception(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    store = make_store(path)
+    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    unlink = board_state.pathlib.Path.unlink
+    primary = OSError("snapshot replacement refused")
+
+    fsync = board_state.os.fsync
+    calls = 0
+
+    def fail_fsync(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise primary
+        fsync(fd)
+
+    def fail_compensation(target: pathlib.Path, *, missing_ok: bool = False) -> None:
+        if target.suffix == ".png":
+            raise PermissionError("blob cleanup refused")
+        unlink(target, missing_ok=missing_ok)
+
+    monkeypatch.setattr(board_state.os, "fsync", fail_fsync)
+    monkeypatch.setattr(board_state.pathlib.Path, "unlink", fail_compensation)
+    with pytest.raises(OSError, match="snapshot replacement refused") as caught:
+        store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+    assert caught.value is primary
+    assert any("blob cleanup refused" in note for note in caught.value.__notes__)
+    assert board_state.load(path).revision == 1
+
+
+def test_upload_retains_orphan_on_pre_replace_uncertainty(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    store = make_store(path)
+    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    before = path.read_bytes()
+
+    def interrupt_helper(
+        _source: pathlib.Path,
+        _target: pathlib.Path,
+        *,
+        outcome: board_state.SaveOutcome | None = None,
+    ) -> None:
+        assert outcome is not None
+        assert outcome.state == "unknown"
+        raise KeyboardInterrupt("replacement call interrupted")
+
+    monkeypatch.setattr(board_state, "_replace_with_retry", interrupt_helper)
+    with pytest.raises(KeyboardInterrupt, match="replacement call interrupted"):
+        store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+    assert path.read_bytes() == before
+    [orphan] = (tmp_path / "attachments" / "0001").iterdir()
+    assert orphan.read_bytes() == PNG
+    assert store.snapshot().revision == 1

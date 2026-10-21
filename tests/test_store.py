@@ -873,3 +873,62 @@ def test_autopush_flag_and_default_are_parsed() -> None:
 
     assert default.autopush is False
     assert enabled.autopush is True
+
+
+def test_execute_prepares_isolated_publication_before_snapshot_replacement(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    store = make_store(path)
+    before = path.read_bytes()
+    outcome = board_state.SaveOutcome()
+
+    def fail_copy(_candidate: object) -> object:
+        raise MemoryError("candidate preparation failed")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(api_endpoint.copy, "deepcopy", fail_copy)
+        with pytest.raises(MemoryError, match="candidate preparation failed"):
+            store.execute(0, create_alpha, outcome=outcome)
+    assert outcome.state == "uncommitted"
+    assert path.read_bytes() == before
+    assert store.snapshot().revision == 0
+
+
+@pytest.mark.parametrize("prior_outcome", ["committed", "unknown"])
+@pytest.mark.parametrize("failure", ["command", "conflict", "load"])
+def test_reused_execute_outcome_resets_before_early_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    prior_outcome: str,
+) -> None:
+    path = tmp_path / "board.json"
+    store = make_store(path)
+    outcome = board_state.SaveOutcome()
+    store.execute(0, create_alpha, outcome=outcome)
+    assert outcome.state == "committed"
+    if prior_outcome == "unknown":
+        outcome.state = "unknown"
+    before = path.read_bytes()
+
+    def fail_command(_board: board_state.Board) -> str:
+        raise board_state.BoardError("injected command refusal")
+
+    def fail_load(
+        _path: pathlib.Path,
+        _policy: board_state.TransitionPolicy | None = None,
+        *,
+        install_context: bool = True,
+    ) -> board_state.Board:
+        del install_context
+        raise board_state.BoardError("injected load refusal")
+
+    with monkeypatch.context() as fault:
+        if failure == "load":
+            fault.setattr(board_state, "load", fail_load)
+        with pytest.raises(board_state.BoardError, match=r"revision|injected"):
+            store.execute(0 if failure == "conflict" else 1, fail_command, outcome=outcome)
+    assert outcome.state == "uncommitted"
+    assert path.read_bytes() == before
+    assert store.snapshot().revision == 1

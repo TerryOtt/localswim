@@ -68,7 +68,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Literal, Self, cast
 
 from . import attachments as card_attachments
 
@@ -3617,12 +3617,25 @@ def locked(path: pathlib.Path) -> Generator[None]:
         lock.unlink(missing_ok=True)
 
 
+@dataclass
+class SaveOutcome:
+    """Report snapshot replacement separately from cleanup or response failures.
+
+    Unknown means replacement may have happened; callers must retain referenced
+    resources. A raised replacement call alone cannot prove noncommit. This is
+    application interruption safety, not a power-loss guarantee.
+    """
+
+    state: Literal["uncommitted", "unknown", "committed"] = "uncommitted"
+
+
 @contextlib.contextmanager
 def edit(
     path: pathlib.Path,
     policy: TransitionPolicy | None = None,
     *,
     install_context: bool = True,
+    outcome: SaveOutcome | None = None,
 ) -> Generator[Board]:
     """Load, hand over the board, then save -- all under one lock.
 
@@ -3633,13 +3646,19 @@ def edit(
     acquiring would hand out a snapshot that another writer can invalidate before the
     save lands.
     """
+    if outcome is not None:
+        outcome.state = "uncommitted"
     with locked(path):
         board = load(path, policy, install_context=install_context)
         yield board
-        save(board, path)
+        if outcome is None:
+            save(board, path)
+        else:
+            outcome.state = "unknown"
+            save(board, path, outcome=outcome)
 
 
-def save(board: Board, path: pathlib.Path) -> None:
+def save(board: Board, path: pathlib.Path, *, outcome: SaveOutcome | None = None) -> None:
     """Write the board ATOMICALLY. The reader sees the old file or the new one.
 
     **`indent=2` and a trailing newline are not cosmetic.** A single-line JSON file
@@ -3655,15 +3674,18 @@ def save(board: Board, path: pathlib.Path) -> None:
     **`Path.replace` is atomic on Windows and POSIX alike**, which is why it is used
     rather than `shutil.move` or an unlink-then-rename.
 
-    **`fsync` before the rename is the part people skip.** Without it the rename can
-    reach the disk before the bytes do, and a power loss leaves a correctly named
-    empty file -- the worst of both outcomes. The board is 13 KB and this happens on
-    a human's drag, so the cost is irrelevant.
+    **Flush and fsync the temporary bytes before replacement.** Readers see an old
+    or complete new snapshot across application interruption. This does not promise
+    the latest edit survives power loss or hardware failure; backups must retain
+    both snapshots and attachment bytes. Optional outcome reporting distinguishes
+    replacement from later cleanup failure without changing the usual None return.
 
     **The temp file is in the SAME DIRECTORY on purpose.** A rename across
     filesystems is not atomic, and `X:` is an SMB share while the temp directory is
     not.
     """
+    if outcome is not None:
+        outcome.state = "uncommitted"
     text = json.dumps(board.to_json(), indent=2, ensure_ascii=False) + "\n"
     target = pathlib.Path(path)
     tmp = target.with_name(target.name + f".tmp{os.getpid()}")
@@ -3672,7 +3694,11 @@ def save(board: Board, path: pathlib.Path) -> None:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        _replace_with_retry(tmp, target)
+        if outcome is None:
+            _replace_with_retry(tmp, target)
+        else:
+            outcome.state = "unknown"
+            _replace_with_retry(tmp, target, outcome=outcome)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
@@ -3689,7 +3715,9 @@ RENAME_TRIES = 6
 RENAME_PAUSE = 0.04
 
 
-def _replace_with_retry(tmp: pathlib.Path, target: pathlib.Path) -> None:
+def _replace_with_retry(
+    tmp: pathlib.Path, target: pathlib.Path, *, outcome: SaveOutcome | None = None
+) -> None:
     """Rename the temp file over the target, retrying a transient WinError 5.
 
     **BOUNDED, and it RAISES at the end.** A swallowed failure would be a lost write
@@ -3704,12 +3732,16 @@ def _replace_with_retry(tmp: pathlib.Path, target: pathlib.Path) -> None:
     """
     for attempt in range(RENAME_TRIES):
         try:
+            if outcome is not None:
+                outcome.state = "unknown"
             tmp.replace(target)
         except PermissionError:
             if attempt == RENAME_TRIES - 1:
                 raise
             time.sleep(RENAME_PAUSE)
         else:
+            if outcome is not None:
+                outcome.state = "committed"
             return
 
 

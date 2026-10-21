@@ -518,8 +518,24 @@ complete snapshot:
 
 Lock acquisition waits up to one second. A lock older than ten seconds is considered
 abandoned and may be removed. Atomic replacement retries only transient Windows
-`PermissionError` failures: six attempts, 40 ms apart. Other I/O failures surface and
-the prior snapshot remains in place.
+`PermissionError` failures: six attempts, 40 ms apart. Other I/O failures surface.
+Failures before replacement leave the prior snapshot in place; a failure after
+entering replacement may have committed and must not be treated as proof of rollback.
+
+The live store prepares its isolated publishable board before replacement where
+practical. An in-process outcome tracker distinguishes definitely uncommitted,
+committed and unknown metadata replacement. Cleanup or memory-publication failure
+after replacement still propagates an error, but cannot justify deleting uploaded
+bytes. Interruption before outcome bookkeeping remains unknown. Ordinary replacement
+refusals also retain bytes conservatively; no temporary-path or readback heuristic
+is used to infer rollback. This tracker is not a persisted recovery journal.
+
+A fresh admitted read reconciles accepted board/policy memory with committed disk
+state. Preserve the original failure and any compensation diagnostics; do not
+acknowledge success or automatically retry an upload after an ambiguous failure.
+The contract is application-crash/interrupted-write safety with backups, not latest
+edit survival across power loss or hardware failure. No directory-sync or lock
+ownership redesign is implied.
 
 The server adds an in-process `RLock` around the filesystem lock. Two clients writing
 the same revision produce one winner and one HTTP 412 response; a stale command never
@@ -576,7 +592,12 @@ state; activity emits action/GUID attribution without filenames or bytes.
 
 `BoardStore.upload()` decodes a bounded body, checks the expected revision under the
 existing writer lock, allocates a GUID, and flushes bytes before saving metadata.
-A snapshot failure removes the new file; failed/stale requests never attach metadata.
+A definitely pre-replacement failure removes the new unreferenced file. Committed
+or uncertain outcomes retain bytes, including failures during transaction-lock
+cleanup, memory publication and response delivery. A raised error is not proof that
+attachment metadata is absent; inspect before retrying. Uncertain failures can leave
+orphan files, which are not automatically collected or added to audited Git paths.
+Stale revisions are refused before creating bytes or attachment metadata.
 Paths resolve inside `<board directory>/attachments/<ticket:04d>/<GUID><extension>`;
 GUID and extension validation and resolved containment checks reject path traversal.
 Each upload gets a separate file, even for identical names or contents.

@@ -117,9 +117,13 @@ native board monitoring is an optional extra.
 
 - Attachments are capped at 10 MiB per file and stored beside each board as
   `attachments/<four-digit zero-padded card number>/<GUID>.<extension>`. Preserve the
-  original filename in metadata. Flush files before snapshot references and remove
-  newly written files on transaction failure. Removal detaches files but retains
-  bytes/history; only active attachments may be served or used as cover. Detect safe
+  original filename in metadata. Flush files before snapshot references. Remove a
+  newly written upload only when metadata is definitely uncommitted; retain bytes
+  after replacement or any uncertain outcome, including interruption. A raised
+  exception does not prove rollback. Preserve error causality and inspect before
+  retrying; never automatically repeat an uncertain upload or collect orphan bytes.
+  Removal detaches files but retains bytes/history; only active attachments may be
+  served or used as cover. Detect safe
   raster previews from bytes; generic files must download with `nosniff` and sandbox
   CSP. Git snapshots include exact audited attachment paths, never a directory glob.
   Browser and bot CLI uploads/removals use the sole live writer and revision checks.

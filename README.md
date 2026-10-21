@@ -432,9 +432,21 @@ shape. `attachments` records metadata (GUID, name, size, detected media type, SH
 upload time, actor); `coverAttachment` records the chosen image GUID; `attachmentHistory`
 records uploads, removals, and cover choices. CLI activity includes these actions and
 GUIDs without filenames or file contents. Writes remain authenticated, revision-checked,
-and atomic. A failed snapshot write removes the newly uploaded file. Downloads validate
-size/digest and serve only current attachments; generic files, including HTML/SVG, are
-forced to download rather than execute in the board origin.
+and atomic. A failure known to occur before snapshot replacement removes the new
+upload. Once replacement may have happened, bytes are retained even if lock cleanup,
+in-memory publication or the response fails. Inspect the card's attachments before
+retrying an unsuccessful upload: its metadata may already be committed.
+
+An uncertain or interrupted replacement may leave an unreferenced file, including
+when the operating system refuses the replacement. These conservative orphan files
+are not deleted automatically. This provides application-crash/interrupted-write
+safety with backups; it does not promise the latest acknowledged edit survives
+power loss or hardware failure. Keep JSON and retained attachment bytes together
+when backing up. Audited Git paths remain unchanged; unaudited orphan files are not
+silently added to that inventory.
+
+Downloads validate size/digest and serve only current attachments; generic files,
+including HTML/SVG, are forced to download rather than execute in the board origin.
 
 ## Dependency priority inheritance
 
