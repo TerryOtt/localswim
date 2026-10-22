@@ -194,6 +194,10 @@ native board monitoring is an optional extra.
   configuration and applies to newly owned children. Retain that setting across restarts
   without the flag. Existing services retain their own publishing policy. Publish only
   `localswim-gateway.json` under the shared repository lock; exclude unrelated staged files.
+  Persisted preference read/validation failures produce sanitized 503 responses for
+  preferences/catalog reads and valid writes; never fabricate defaults or overwrite
+  malformed saved settings. Retain command 400, conflict 412, authentication and header
+  precedence, and recovery after valid settings restoration.
 - Stable board keys derive from relative snapshot paths, never mutable project labels.
   Support cold deep links and Back/Forward. Switch boards through SPA navigation without
   document reload, with explicit errors for missing or malformed boards. Keep drafts,
@@ -434,6 +438,16 @@ foreign, unreadable or inconsistent metadata without overwriting it. A saved pen
 end must equal its cursor. Never discard an uncertain interval to force startup.
 Queue acknowledgement before status persistence creates an at-least-once crash
 duplicate window; do not promise exactly-once or power-loss delivery.
+
+Cooperative monitor reload binds updated owners by PID and owner UUID, discovering
+the first complete same-board status when initialization is still in progress.
+Preserve each launch's request UUID across retries and timeout cleanup; never replace
+a newer retarget/reload/stop request. Cooperating target writers use the persistent
+derived `<target path>.lock` for compare/write operations, not readiness waits; keep
+it distinct from the board, status, target and lifetime-lock paths. Never unlink
+either lock path. Pre-UUID shared owners retain only their historical PID-based
+cooperative upgrade guarantee; new owners enforce UUIDs. Direct target-file writers
+must follow the same request-lock protocol to receive its serialization guarantee.
 
 ## Git in the Codex sandbox
 

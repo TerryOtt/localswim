@@ -779,10 +779,10 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             snapshot = self.workspace.update_preferences(int(revision), command)
         except workspace_config.ConfigRevisionConflict as exc:
             self._json({"error": str(exc)}, 412)
+        except workspace_config.GatewayConfigUnavailableError, OSError:
+            self._json({"error": "preferences storage unavailable"}, 503)
         except ValueError, TypeError, RecursionError:
             self._json({"error": "invalid preferences command"}, 400)
-        except OSError:
-            self._json({"error": "preferences storage unavailable"}, 503)
         else:
             self._json(snapshot.to_json())
 
@@ -793,10 +793,17 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             self._json(
                 {"token": self.workspace.token, "workspaceIdentity": self.workspace.identity}
             )
-        elif route == PREFERENCES_ROUTE:
-            self._json(self.workspace.settings.snapshot().to_json())
-        elif route == PREFIX:
-            self._json({**self.workspace.catalog(), **api_endpoint.source_status(self.server)})
+        elif route in (PREFERENCES_ROUTE, PREFIX):
+            try:
+                document = (
+                    self.workspace.settings.snapshot().to_json()
+                    if route == PREFERENCES_ROUTE
+                    else {**self.workspace.catalog(), **api_endpoint.source_status(self.server)}
+                )
+            except workspace_config.GatewayConfigError, OSError:
+                self._json({"error": "preferences storage unavailable"}, 503)
+            else:
+                self._json(document)
         elif route.startswith(BOARD_PREFIX):
             self._proxy(route)
         elif route in ("/", "/index.html") or route.startswith("/board/"):

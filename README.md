@@ -703,6 +703,11 @@ Bodies are `{ "action": "pin", "key": "project/board" }`, the equivalent `unpin`
 or `{ "action": "initialize", "pinnedBoards": ["project/board"] }`. Initialization
 imports only the first nonempty legacy list while shared pins remain uninitialized.
 A stale preference revision returns 412; clients refresh and reconcile pending actions.
+If saved preferences cannot be read or validated, preferences reads, catalog reads and
+otherwise valid preference writes return a sanitized 503 response. The gateway preserves
+the saved bytes instead of replacing pins or publishing settings with defaults. Restoring
+valid settings permits normal reads and the next write. Invalid JSON still returns 400;
+semantic command validation follows the existing saved-state read and revision checks.
 
 Only the `/api/v001` routes are API endpoints. For seamless upgrades of already-open
 tabs, `/v1/status` and `/mtime` issue no-cache redirects to
@@ -872,12 +877,23 @@ persistence can duplicate an alert. This does not promise exactly-once delivery 
 survival of sudden power loss.
 
 Add `--reload` to the same launch command after deploying an updated package.
-It requests replacement of the exact recorded monitor PID while the board stays
+It requests replacement of the recorded monitor PID and owner UUID while the board stays
 live. The old monitor continues observing writes, drains its pending quiet window,
 and releases its OS lock. The replacement waits up to 330 seconds, owns that same
 lock, and resumes the prior activity cursor; a write during handoff becomes a new
 pending burst. The status document publishes `reloadSupported: true` and
 `actorFilterVersion: 2`. A timeout fails rather than starting a duplicate.
+
+If the lifetime lock is held before the owner's first status appears, the launcher waits
+for a complete same-board identity and targets that owner. Each launch has a request UUID;
+retries and timeout cleanup leave newer retarget, reload and stop requests untouched.
+Cooperating target writers serialize updates through a persistent `<target path>.lock`
+file, distinct from the lifetime lock and other runtime paths. Readiness waits do not
+hold that request lock. Direct writes outside this protocol do not receive that guarantee.
+Pre-UUID shared owners can still hand off through their older PID-based reload protocol
+when their same-board status is complete. That one-time compatibility path cannot add
+UUID checks to an already running old owner; replacement owners publish and enforce them.
+
 The old FGA-local monitor predates this protocol and needs its existing graceful
 board-stop/restart boundary once before future reloads can leave the board running.
 Do not use PID termination or assume Windows byte locks survive process replacement.

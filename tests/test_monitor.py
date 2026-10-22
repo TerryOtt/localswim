@@ -1,5 +1,6 @@
 """Shared monitor attribution, quiet windows, portable ownership and graceful reload."""
 
+import contextlib
 import hashlib
 import json
 import subprocess
@@ -269,7 +270,12 @@ def test_reload_debounces_initialization_write_with_or_without_notification(
         config.board.write_text('{"changed":true}', encoding="utf-8")
         watcher.write_atomic_json(
             config.target_path,
-            {"schema": 1, "threadId": config.thread_id, "reloadPid": watcher.os.getpid()},
+            {
+                "schema": 1,
+                "threadId": config.thread_id,
+                "reloadPid": watcher.os.getpid(),
+                "reloadOwnerId": watcher.read_json(config.status_path)["ownerId"],
+            },
         )
         yield {object()} if native_change else set()
         status = watcher.read_json(config.status_path)
@@ -303,11 +309,26 @@ def test_reload_preserves_handoff_gap_activity(config: watcher.Config) -> None:
     assert runtime.pending_alert.activity_started_at == cursor
 
 
+def unlocked_target(_: watcher.Config) -> contextlib.AbstractContextManager[None]:
+    return contextlib.nullcontext()
+
+
+def owner_status(config: watcher.Config) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "pid": 123,
+        "board": str(config.board),
+        "state": "running",
+        "ownerId": str(uuid.uuid4()),
+    }
+
+
 def test_reload_launch_waits_for_exact_owner(
     config: watcher.Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    watcher.write_atomic_json(config.status_path, {"schema": 1, "pid": 123})
+    watcher.write_atomic_json(config.status_path, owner_status(config))
+    monkeypatch.setattr(watcher, "target_transaction", unlocked_target)
     handle = Mock()
     acquire = Mock(side_effect=[None, None, handle])
     monkeypatch.setattr(watcher, "acquire_lock", acquire)
@@ -316,6 +337,125 @@ def test_reload_launch_waits_for_exact_owner(
     assert claimed is handle
     assert acquire.call_count == 3
     assert watcher.read_json(config.target_path)["reloadPid"] == 123
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_reload_discovers_owner_after_lock_before_status(
+    config: watcher.Config, monkeypatch: pytest.MonkeyPatch, *, legacy: bool
+) -> None:
+    """Controlled publication interleaving; no real foreign process is started."""
+    old = watcher.acquire_lock(config.lock_path)
+    assert old is not None
+    published = owner_status(config)
+    if legacy:
+        published.pop("ownerId")
+        published.update(startedAt=watcher.now(), reloadSupported=True)
+    observations: list[bool] = []
+
+    def publish_then_retire(_: float) -> None:
+        target = watcher.read_json(config.target_path)
+        if not observations:
+            assert "reloadPid" not in target
+            watcher.write_atomic_json(config.status_path, published)
+            observations.append(False)
+        else:
+            assert target["reloadPid"] == 123
+            assert target["reloadOwnerId"] == published.get("ownerId")
+            watcher.release_lock(old)
+            observations.append(True)
+
+    monkeypatch.setattr(watcher.time, "sleep", publish_then_retire)
+    claimed, previous = watcher.claim_monitor(replace(config, reload=True))
+    assert claimed is not None
+    try:
+        assert observations == [False, True]
+        assert previous == published
+        assert watcher.acquire_lock(config.lock_path) is None
+    finally:
+        watcher.release_lock(claimed)
+    assert config.target_path.with_name(f"{config.target_path.name}.lock").exists()
+
+
+@pytest.mark.parametrize("kind", ["target", "reload", "stop"])
+@pytest.mark.parametrize("timeout", [False, True])
+def test_reload_preserves_newer_requests(
+    config: watcher.Config, monkeypatch: pytest.MonkeyPatch, kind: str, *, timeout: bool
+) -> None:
+    monkeypatch.setattr(watcher, "target_transaction", unlocked_target)
+    monkeypatch.setattr(watcher, "acquire_lock", Mock(return_value=None))
+    newer: dict[str, object] = {"schema": 1, "threadId": "newer", "requestId": "newer"}
+    if kind == "reload":
+        newer.update(reloadPid=456, reloadOwnerId=str(uuid.uuid4()))
+    if kind == "stop":
+        newer["stopPid"] = 123
+    ticks = iter([0.0, 331.0] if timeout else [0.0, 1.0])
+
+    def advance() -> float:
+        tick = next(ticks)
+        if tick:
+            watcher.write_atomic_json(config.target_path, newer)
+        return tick
+
+    monkeypatch.setattr(watcher.time, "monotonic", advance)
+    monkeypatch.setattr(watcher.time, "sleep", Mock(return_value=None))
+    with pytest.raises(RuntimeError, match="superseded"):
+        watcher.claim_monitor(replace(config, reload=True))
+    assert watcher.read_json(config.target_path) == newer
+
+
+@pytest.mark.parametrize("invalid", ["foreign", "unknown", "boolean-pid"])
+def test_reload_refuses_unverified_owner(config: watcher.Config, invalid: str) -> None:
+    published = owner_status(config)
+    if invalid == "foreign":
+        published["board"] = str(config.board.with_name("foreign.json"))
+    elif invalid == "unknown":
+        published.pop("ownerId")
+    else:
+        published["pid"] = True
+    watcher.write_atomic_json(config.status_path, published)
+    watcher.request_target(replace(config, reload=True))
+    assert "reloadPid" not in watcher.read_json(config.target_path)
+
+
+def test_reload_uuid_protects_reused_pid(config: watcher.Config) -> None:
+    original = str(uuid.uuid4())
+    watcher.write_atomic_json(
+        config.target_path, {"schema": 1, "reloadPid": 123, "reloadOwnerId": original}
+    )
+    assert watcher.reload_requested(config.target_path, 123, original)
+    assert not watcher.reload_requested(config.target_path, 123, str(uuid.uuid4()))
+
+
+def test_reload_retry_keeps_original_owner_and_stop(config: watcher.Config) -> None:
+    old = owner_status(config)
+    watcher.write_atomic_json(config.status_path, old)
+    request_id, _ = watcher.request_target(replace(config, reload=True))
+    watcher.write_atomic_json(config.status_path, owner_status(config))
+    with watcher.target_transaction(config):
+        watcher.refresh_reload(config, request_id)
+    target = watcher.read_json(config.target_path)
+    assert target["reloadOwnerId"] == old["ownerId"]
+    target["stopPid"] = 123
+    watcher.write_atomic_json(config.target_path, target)
+    with watcher.target_transaction(config), pytest.raises(RuntimeError, match="superseded"):
+        watcher.refresh_reload(config, request_id, cancel=True)
+    assert watcher.read_json(config.target_path) == target
+
+
+def test_target_transactions_use_separate_persistent_lock(config: watcher.Config) -> None:
+    request_path = config.target_path.with_name(f"{config.target_path.name}.lock")
+    owner = watcher.acquire_lock(config.lock_path)
+    assert owner is not None
+    try:
+        with watcher.target_transaction(config):
+            assert watcher.acquire_lock(request_path) is None
+            assert watcher.acquire_lock(config.lock_path) is None
+        request = watcher.acquire_lock(request_path)
+        assert request is not None
+        watcher.release_lock(request)
+        assert request_path.exists()
+    finally:
+        watcher.release_lock(owner)
 
 
 def test_cli_requires_board_specific_runtime_paths(config: watcher.Config) -> None:
@@ -332,6 +472,64 @@ def test_cli_requires_board_specific_runtime_paths(config: watcher.Config) -> No
     assert parsed.automation_actor == "robot"
     assert parsed.reload
     assert parsed.board_label == "localswim"
+
+
+@pytest.mark.parametrize("field", ["board", "status_path", "target_path", "lock_path"])
+def test_request_lock_symlink_cannot_alias_protected_paths(
+    config: watcher.Config, field: str
+) -> None:
+    protected = {
+        "board": config.board,
+        "status_path": config.status_path,
+        "target_path": config.target_path,
+        "lock_path": config.lock_path,
+    }[field]
+    protected.write_text("{}", encoding="utf-8")
+    derived = config.target_path.with_name(f"{config.target_path.name}.lock")
+    try:
+        derived.symlink_to(protected)
+    except OSError:
+        pytest.skip("symlink creation privilege unavailable")
+    args = [
+        "--board-path",
+        str(config.board),
+        "--thread-id",
+        config.thread_id,
+        "--port",
+        str(config.port),
+        "--status-path",
+        str(config.status_path),
+        "--target-path",
+        str(config.target_path),
+        "--lock-path",
+        str(config.lock_path),
+    ]
+    with pytest.raises(SystemExit):
+        watcher.parse_args(args)
+    with (
+        pytest.raises(ValueError, match="must all be distinct"),
+        watcher.target_transaction(config),
+    ):
+        pytest.fail("an aliased request lock must never be acquired")
+    assert protected.read_text(encoding="utf-8") == "{}"
+    assert derived.is_symlink()
+
+
+def test_request_transaction_acquires_resolved_safe_symlink_target(
+    config: watcher.Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    safe = config.target_path.with_name("separate-request.lock")
+    derived = config.target_path.with_name(f"{config.target_path.name}.lock")
+    try:
+        derived.symlink_to(safe)
+    except OSError:
+        pytest.skip("symlink creation privilege unavailable")
+    acquire = Mock(wraps=watcher.acquire_lock)
+    monkeypatch.setattr(watcher, "acquire_lock", acquire)
+    with watcher.target_transaction(config):
+        acquire.assert_called_once_with(safe.resolve())
+    assert derived.is_symlink()
+    assert safe.exists()
 
 
 def test_optional_backend_failure_has_install_hint(
@@ -364,12 +562,16 @@ def test_reload_retains_unflushed_activity_after_failed_drain(config: watcher.Co
 def test_reload_timeout_cancels_request(
     config: watcher.Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    watcher.write_atomic_json(config.status_path, {"schema": 1, "pid": 123})
+    watcher.write_atomic_json(config.status_path, owner_status(config))
+    monkeypatch.setattr(watcher, "target_transaction", unlocked_target)
     monkeypatch.setattr(watcher, "acquire_lock", Mock(return_value=None))
     monkeypatch.setattr(watcher.time, "monotonic", Mock(side_effect=[0.0, 331.0]))
     with pytest.raises(RuntimeError, match="timed out"):
         watcher.claim_monitor(replace(config, reload=True))
-    assert "reloadPid" not in watcher.read_json(config.target_path)
+    target = watcher.read_json(config.target_path)
+    assert "reloadPid" not in target
+    assert "reloadOwnerId" not in target
+    assert not watcher.reload_requested(config.target_path, 123)
 
 
 def saved_status(config: watcher.Config, pending: watcher.PendingAlert) -> dict[str, object]:

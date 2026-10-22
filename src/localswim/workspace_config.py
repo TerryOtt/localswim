@@ -27,6 +27,10 @@ class GatewayConfigError(ValueError):
     """Preferences or commands violate the gateway configuration contract."""
 
 
+class GatewayConfigUnavailableError(GatewayConfigError):
+    """Persisted preferences cannot be safely read or replaced."""
+
+
 class ConfigRevisionConflict(ValueError):  # noqa: N818 -- public revision-conflict contract
     """The caller's preferences revision is stale."""
 
@@ -131,7 +135,9 @@ class GatewayConfigStore:
     @staticmethod
     def _safe_file(path: pathlib.Path, *, missing_ok: bool = False) -> None:
         if path.is_symlink() or path.is_junction():
-            raise GatewayConfigError("gateway configuration paths must not be symbolic links")
+            raise GatewayConfigUnavailableError(
+                "gateway configuration paths must not be symbolic links"
+            )
         try:
             mode = path.lstat().st_mode
         except FileNotFoundError:
@@ -139,7 +145,7 @@ class GatewayConfigStore:
                 return
             raise
         if not stat.S_ISREG(mode):
-            raise GatewayConfigError("gateway configuration path must be a regular file")
+            raise GatewayConfigUnavailableError("gateway configuration path must be a regular file")
 
     @contextlib.contextmanager
     def locked(self) -> Generator[GatewayConfigStore]:
@@ -175,12 +181,12 @@ class GatewayConfigStore:
         with self.path.open("rb") as stream:
             data = stream.read(MAX_CONFIG_BYTES + 1)
         if len(data) > MAX_CONFIG_BYTES:
-            raise GatewayConfigError("gateway configuration exceeds size limit")
+            raise GatewayConfigUnavailableError("gateway configuration exceeds size limit")
         try:
             raw = cast("board_state.JsonValue", json.loads(data, object_pairs_hook=_unique_object))
+            return _preferences(raw)
         except (UnicodeError, ValueError, RecursionError) as exc:
-            raise GatewayConfigError(f"invalid gateway configuration: {exc}") from exc
-        return _preferences(raw)
+            raise GatewayConfigUnavailableError(f"invalid gateway configuration: {exc}") from exc
 
     def _write(self, preferences: GatewayPreferences) -> None:
         self._safe_file(self.path, missing_ok=True)

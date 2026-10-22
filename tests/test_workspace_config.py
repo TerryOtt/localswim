@@ -344,3 +344,19 @@ def test_deep_json_preserves_bytes_and_recovers_after_repair(tmp_path: pathlib.P
     result = store.apply(0, {"action": "pin", "key": "beta"}, KEYS)
     assert result.pinned_boards == ("beta",)
     assert result.revision == 1
+
+
+def test_persisted_validation_is_distinct_from_command_validation(tmp_path: pathlib.Path) -> None:
+    store = workspace_config.GatewayConfigStore(tmp_path)
+    valid = store.path.read_bytes()
+    with pytest.raises(workspace_config.GatewayConfigError) as command_failure:
+        store.apply(0, {"action": "erase"}, KEYS)
+    assert not isinstance(command_failure.value, workspace_config.GatewayConfigUnavailableError)
+    store.path.write_bytes(b"{}")
+    with pytest.raises(workspace_config.GatewayConfigUnavailableError):
+        store.snapshot()
+    with pytest.raises(workspace_config.GatewayConfigUnavailableError):
+        store.apply(0, {"action": "pin", "key": "beta"}, KEYS)
+    assert store.path.read_bytes() == b"{}"
+    store.path.write_bytes(valid)
+    assert store.apply(0, {"action": "pin", "key": "beta"}, KEYS).revision == 1

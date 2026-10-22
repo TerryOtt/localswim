@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, cast
 from . import service_ownership
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Generator, Iterator, Sequence
     from typing import IO, Any
 
 
@@ -421,6 +421,10 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     identities = [os.path.normcase(str(path)) for path in [board, *runtime_paths]]
     if len(set(identities)) != len(identities):
         parser.error("board, status, target and lock paths must all be distinct")
+    try:
+        request_lock_path(runtime_paths[1], [board, *runtime_paths])
+    except ValueError as exc:
+        parser.error(str(exc))
     board_label = args.board_label.strip()
     if not board_label:
         parser.error("--board-label must not be empty")
@@ -445,28 +449,113 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     )
 
 
-def reload_requested(path: Path, pid: int) -> bool:
+def request_lock_path(target: Path, protected: Sequence[Path]) -> Path:
+    """Resolve the derived lock and refuse aliases to protected runtime files."""
+    path = target.with_name(f"{target.name}.lock").resolve()
+    if os.path.normcase(str(path)) in {
+        os.path.normcase(str(protected_path.resolve())) for protected_path in protected
+    }:
+        raise ValueError(
+            "board, status, target, lock and target request lock paths must all be distinct"
+        )
+    return path
+
+
+def reload_requested(path: Path, pid: int, owner_id: str | None = None) -> bool:
     """Request replacement only for the exact process named by the launcher."""
     try:
         target = read_json(path)
     except OSError, TypeError, ValueError:
         return False
-    return target.get("schema") == 1 and target.get("reloadPid") == pid
+    return (
+        target.get("schema") == 1
+        and target.get("reloadPid") == pid
+        and (owner_id is None or target.get("reloadOwnerId") == owner_id)
+    )
 
 
-def request_target(config: Config) -> dict[str, Any]:
+@contextlib.contextmanager
+def target_transaction(config: Config) -> Generator[None]:
+    """Serialize launcher read/modify/write operations without replacing any lock."""
+    path = request_lock_path(
+        config.target_path, [config.board, config.status_path, config.target_path, config.lock_path]
+    )
+    lock = acquire_lock(path)
+    deadline = 0.0 if lock is not None else time.monotonic() + 30
+    while lock is None:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("monitor target request lock timed out")
+        time.sleep(0.1)
+        lock = acquire_lock(path)
+    try:
+        yield
+    finally:
+        release_lock(lock)
+
+
+def published_owner(config: Config) -> dict[str, Any]:
+    """Discover only a same-board owner with a complete non-PID identity."""
+    try:
+        previous = read_json(config.status_path)
+        board = previous.get("board")
+        if (
+            type(previous.get("schema")) is int
+            and previous["schema"] == 1
+            and type(previous.get("pid")) is int
+            and previous["pid"] > 0
+            and isinstance(board, str)
+            and os.path.normcase(str(Path(board).resolve()))
+            == os.path.normcase(str(config.board.resolve()))
+            and previous.get("state") in {"running", "stopping"}
+        ):
+            owner = previous.get("ownerId")
+            if isinstance(owner, str) and str(uuid.UUID(owner)) == owner:
+                return previous
+            if owner is None and previous.get("reloadSupported") is True:
+                started = previous.get("startedAt")
+                if isinstance(started, str):
+                    activity_query_bound(started)
+                    return previous
+    except OSError, TypeError, ValueError:
+        pass
+    return {}
+
+
+def request_target(config: Config) -> tuple[str, dict[str, Any]]:
     """Retarget and optionally request a cooperative handoff from the current owner."""
-    previous: dict[str, Any] = {}
-    if config.reload:
-        with contextlib.suppress(OSError, TypeError, ValueError):
-            previous = read_json(config.status_path)
+    request_id = str(uuid.uuid4())
     target: dict[str, object] = {
         "schema": 1,
         "threadId": config.thread_id,
         "updatedAt": now(),
+        "requestId": request_id,
     }
-    if config.reload and isinstance(previous.get("pid"), int):
-        target["reloadPid"] = previous["pid"]
+    with target_transaction(config):
+        previous = published_owner(config) if config.reload else {}
+        if previous:
+            target.update(reload_fields(previous))
+        write_atomic_json(config.target_path, target)
+    return request_id, previous
+
+
+def reload_fields(previous: dict[str, Any]) -> dict[str, object]:
+    """Keep pre-UUID owners upgradeable; new owners require their published UUID."""
+    return {"reloadPid": previous["pid"], "reloadOwnerId": previous.get("ownerId")}
+
+
+def refresh_reload(config: Config, request_id: str, *, cancel: bool = False) -> dict[str, Any]:
+    """Update only this launcher's request while holding the target transaction lock."""
+    target = read_json(config.target_path)
+    if target.get("requestId") != request_id or "stopPid" in target:
+        raise RuntimeError("monitor reload superseded by a newer target request")
+    previous = published_owner(config)
+    if cancel:
+        target.pop("reloadPid", None)
+        target.pop("reloadOwnerId", None)
+    elif previous and "reloadPid" not in target:
+        target.update(reload_fields(previous))
+    else:
+        return previous
     write_atomic_json(config.target_path, target)
     return previous
 
@@ -635,22 +724,21 @@ def watch_board(config: Config) -> Iterator[set[object]]:
 
 def claim_monitor(config: Config) -> tuple[IO[bytes] | None, dict[str, Any]]:
     """Retarget one owner and wait for its cooperative replacement when requested."""
-    previous = request_target(config)
-    lock = acquire_lock(config.lock_path)
+    request_id, previous = request_target(config)
+    with target_transaction(config):
+        if config.reload:
+            previous = refresh_reload(config, request_id) or previous
+        lock = acquire_lock(config.lock_path)
     if lock is None and config.reload:
         deadline = time.monotonic() + MAX_QUIET_SECONDS + 30
         while lock is None and time.monotonic() < deadline:
             time.sleep(0.1)
-            lock = acquire_lock(config.lock_path)
+            with target_transaction(config):
+                previous = refresh_reload(config, request_id) or previous
+                lock = acquire_lock(config.lock_path)
         if lock is None:
-            write_atomic_json(
-                config.target_path,
-                {
-                    "schema": 1,
-                    "threadId": config.thread_id,
-                    "updatedAt": now(),
-                },
-            )
+            with target_transaction(config):
+                refresh_reload(config, request_id, cancel=True)
             raise RuntimeError("monitor reload timed out; replacement did not acquire ownership")
     return lock, previous
 
@@ -706,6 +794,7 @@ def monitor(config: Config) -> int:
         return 0
 
     codex, started_at, runtime = prepare_runtime(config, previous, lock)
+    owner_id = str(uuid.uuid4())
 
     def status(state: str, **extra: object) -> None:
         write_atomic_json(
@@ -714,6 +803,7 @@ def monitor(config: Config) -> int:
                 "schema": 1,
                 "state": state,
                 "pid": os.getpid(),
+                "ownerId": owner_id,
                 "board": str(config.board),
                 "startedAt": started_at,
                 "lastSignature": list(runtime.last_signature),
@@ -768,7 +858,7 @@ def monitor(config: Config) -> int:
             if not changes:
                 handle_idle_cycle(config, codex, runtime, status)
                 if (
-                    reload_requested(config.target_path, os.getpid())
+                    reload_requested(config.target_path, os.getpid(), owner_id)
                     and runtime.pending_alert is None
                 ):
                     status("reload-ready")

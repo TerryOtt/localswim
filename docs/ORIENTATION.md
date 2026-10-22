@@ -195,6 +195,12 @@ Storage validates bounded JSON, rejects duplicate and unknown fields, and refuse
 links or unsafe keys. Cross-process locking covers revision comparison, flushed temporary
 writes, and atomic replacement. Stale revisions return 412; malformed commands return 400,
 oversized requests 413, and storage failures 503. Missing `If-Match` returns 428.
+Persisted read, decoding, size and schema failures are classified separately from command
+validation. Preferences and whole-catalog GETs return a fixed, sanitized 503 response,
+as do valid authenticated POSTs when saved settings are unavailable. No default catalog
+or reset is fabricated; malformed bytes remain intact and valid restoration recovers.
+Admission retains authentication, revision-header and JSON syntax checks before storage;
+semantic command validation follows persisted-state admission and preference CAS.
 
 The sidebar uses fixed grid columns for Blocked, Needs Terry, and Ready for Review.
 Every project reserves all three slots, including blank zero-count slots. Thus a row
@@ -1034,8 +1040,18 @@ document; link to the authoritative data so it cannot drift.
 portable lifetime lock, sanitized CLI attribution, per-board target/status files,
 and cooperative reload. `tests/test_monitor.py` covers fail-open actor filtering,
 event-count independence, quiet-window debounce, PID scoping, lock exclusion,
-and cursor continuity during reload. Ordinary startup validates saved same-board
-pending activity only after taking ownership, preserving failed dispatch and signature
+and cursor continuity during reload. Updated owners publish an `ownerId` UUID; reload
+requests bind both PID and UUID. The launcher can rediscover the first status while the
+existing owner holds the lifetime lock. A per-launch `requestId` and persistent
+`<target path>.lock` serialize
+cooperating target compare/write operations without holding that lock during readiness
+waits. Superseded retries and timeout cleanup preserve newer target, reload or stop data.
+Complete pre-UUID same-board status retains its historical PID-only cooperative upgrade
+path; updated owners require their UUID. Out-of-protocol target writers do not share the
+serialization guarantee. No process is forcibly terminated for reload.
+
+Ordinary startup validates saved same-board pending activity only after taking ownership,
+preserving failed dispatch and signature
 gaps. Foreign or inconsistent metadata is retained and refused, including a pending
 end that differs from the saved cursor. Queue acknowledgement and status persistence
 are separate, so crash recovery has at-least-once duplicate windows. See README's shared board-write monitor

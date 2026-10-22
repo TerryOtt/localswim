@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import sys
 import threading
 from typing import TYPE_CHECKING, cast
 
@@ -230,3 +231,143 @@ def test_gateway_shutdown_reports_sanitized_backup_failure(
         if success
         else "Gateway preferences backup failed during shutdown; local settings retained.\n"
     )
+
+
+def _assert_preferences_unavailable(gateway: RunningWorkspace, revision: int) -> None:
+    for route in (workspace.PREFERENCES_ROUTE, workspace.PREFIX):
+        status, document = request_json(gateway.base + route)
+        assert status == 503
+        assert document == {"error": "preferences storage unavailable"}
+    status, document = request_json(
+        gateway.base + workspace.PREFERENCES_ROUTE,
+        token=gateway.instance.token,
+        revision=revision,
+        body={"action": "pin", "key": "beta/board"},
+    )
+    assert status == 503
+    assert document == {"error": "preferences storage unavailable"}
+
+
+def _assert_preferences_recovered(
+    gateway: RunningWorkspace, previous: workspace_config.GatewayPreferences
+) -> None:
+    for route in (workspace.PREFERENCES_ROUTE, workspace.PREFIX):
+        status, document = request_json(gateway.base + route)
+        assert status == 200
+        assert (document if route == workspace.PREFERENCES_ROUTE else document["preferences"]) == (
+            previous.to_json()
+        )
+    status, document = request_json(
+        gateway.base + workspace.PREFERENCES_ROUTE,
+        token=gateway.instance.token,
+        revision=previous.revision,
+        body={"action": "pin", "key": "beta/board"},
+    )
+    assert status == 200
+    assert (
+        document
+        == workspace_config.GatewayPreferences(
+            revision=previous.revision + 1,
+            autopush=previous.autopush,
+            pins_initialized=True,
+            pinned_boards=(*previous.pinned_boards, "beta/board"),
+        ).to_json()
+    )
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        b'{"private-sentinel":',
+        b"\xff",
+        b'{"schema":1,"schema":1}',
+        b"{}",
+        b"[" * (sys.getrecursionlimit() * 2) + b"0" + b"]" * (sys.getrecursionlimit() * 2),
+        b" " * (workspace_config.MAX_CONFIG_BYTES + 1),
+    ],
+    ids=["malformed", "encoding", "duplicate", "schema", "deep", "oversized"],
+)
+def test_corrupt_persisted_preferences_preserve_bytes_and_recover(
+    gateway: RunningWorkspace, corrupt: bytes
+) -> None:
+    store = workspace_config.GatewayConfigStore(gateway.root, autopush=True)
+    previous = store.apply(
+        store.snapshot().revision,
+        {"action": "pin", "key": "alpha/board"},
+        {"alpha/board", "beta/board"},
+    )
+    valid = store.path.read_bytes()
+    store.path.write_bytes(corrupt)
+    _assert_preferences_unavailable(gateway, previous.revision)
+    assert store.path.read_bytes() == corrupt
+    store.path.write_bytes(valid)
+    _assert_preferences_recovered(gateway, previous)
+
+
+@pytest.mark.parametrize(
+    "failure_type", [workspace_config.GatewayConfigUnavailableError, OSError, TimeoutError]
+)
+def test_persisted_preferences_boundary_failures_are_sanitized_and_recover(
+    gateway: RunningWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[Exception],
+) -> None:
+    store = gateway.instance.settings
+    previous = store.apply(0, {"action": "pin", "key": "alpha/board"}, {"alpha/board"})
+    original = store.path.read_bytes()
+
+    def fail() -> workspace_config.GatewayPreferences:
+        raise failure_type("C:/private/path credential-sentinel saved-pin-sentinel")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(store, "_read", fail)
+        _assert_preferences_unavailable(gateway, previous.revision)
+        assert store.path.read_bytes() == original
+        status, _ = request_json(
+            gateway.base + workspace.PREFERENCES_ROUTE,
+            token="invalid",  # noqa: S106 -- deliberately invalid fixture credential
+            revision=previous.revision,
+            body={"action": "pin", "key": "beta/board"},
+        )
+        assert status == 401
+    _assert_preferences_recovered(gateway, previous)
+
+
+def test_unavailable_preferences_preserve_request_admission_order(
+    gateway: RunningWorkspace,
+) -> None:
+    store = gateway.instance.settings
+    valid = store.path.read_bytes()
+    store.path.write_bytes(b"{")
+    url = gateway.base + workspace.PREFERENCES_ROUTE
+    status, _ = request_json(url, token=gateway.instance.token, body={"action": "erase"})
+    assert status == 428
+    status, document = request_json(
+        url, token=gateway.instance.token, revision=0, body={"action": "erase"}
+    )
+    assert status == 503
+    assert document == {"error": "preferences storage unavailable"}
+    connection = http.client.HTTPConnection("127.0.0.1", int(gateway.base.rsplit(":", 1)[1]))
+    try:
+        connection.request(
+            "POST",
+            workspace.PREFERENCES_ROUTE,
+            b"{",
+            {"Authorization": "Bearer " + gateway.instance.token, "If-Match": '"revision-0"'},
+        )
+        response = connection.getresponse()
+        assert response.status == 400
+        assert json.loads(response.read()) == {"error": "invalid preferences command"}
+    finally:
+        connection.close()
+    assert store.path.read_bytes() == b"{"
+    store.path.write_bytes(valid)
+    status, _ = request_json(
+        url, token=gateway.instance.token, revision=99, body={"action": "erase"}
+    )
+    assert status == 412
+    status, _ = request_json(
+        url, token=gateway.instance.token, revision=0, body={"action": "erase"}
+    )
+    assert status == 400
+    assert store.path.read_bytes() == valid
