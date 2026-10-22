@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from localswim import board_state
+from localswim import api_endpoint, board_state
 from tests.support import USERS
 
 if TYPE_CHECKING:
@@ -313,7 +313,7 @@ def test_legacy_board_without_revision_loads_at_zero(tmp_path: pathlib.Path) -> 
     assert board_state.load(path).revision == 0
 
 
-@pytest.mark.parametrize("revision", [-1, "1", 1.5, None])
+@pytest.mark.parametrize("revision", [True, False, -1, "1", 1.5, None])
 def test_invalid_revision_is_refused(tmp_path: pathlib.Path, revision: object) -> None:
     path = tmp_path / "board.json"
     board = saved_board(path)
@@ -596,3 +596,136 @@ def test_reused_edit_outcome_resets_before_early_failure(
             raise OSError("injected command refusal")
     assert outcome.state == "uncommitted"
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("field", ["from", "ownerFrom", "ownerTo", "priorityFrom", "priorityTo"])
+@pytest.mark.parametrize("value", [True, False, 1, 1.5, [], {}])
+def test_history_optional_types_refuse_without_rewriting(
+    tmp_path: pathlib.Path, field: str, value: object
+) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    event = dict(raw["items"][0]["history"][0])
+    event[field] = value
+    raw["items"][0]["history"].append(event)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(
+        board_state.BoardError, match=rf"items\[0\]\.history\[1\].*{field} must be a string or null"
+    ):
+        board_state.load(path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"ownerTo": "bot", "priorityTo": "P1", "to": ""},
+        {"ownerTo": "bot", "to": "backlog"},
+        {"priorityTo": "P1", "to": "", "from": "backlog"},
+        {"ownerFrom": "bot"},
+        {"priorityFrom": "P3"},
+        {"ownerTo": "bot", "to": "", "priorityFrom": "P3"},
+        {"priorityTo": "P1", "to": "", "ownerFrom": "bot"},
+    ],
+)
+def test_history_mixed_shapes_are_refused(fields: board_state.JsonObject) -> None:
+    event: board_state.JsonObject = {"at": "2026-10-22T12:00:00Z", "by": "bot", "to": "backlog"}
+    event.update(fields)
+    with pytest.raises(board_state.BoardError, match="mixes lane, owner or priority fields"):
+        board_state.Change.from_json(event, "history[1]")
+
+
+@pytest.mark.parametrize("kind", ["lane", "owner", "priority"])
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_legacy_history_shapes_round_trip(kind: str, *, explicit_null: bool) -> None:
+    event: board_state.JsonObject = {"at": "2026-10-22T12:00:00Z", "by": "bot"}
+    if explicit_null:
+        event.update(dict.fromkeys(("from", "ownerFrom", "ownerTo", "priorityFrom", "priorityTo")))
+    if kind == "lane":
+        event["to"] = "backlog"
+    elif kind == "owner":
+        event.update({"ownerTo": "terry", "ownerFrom": "bot"})
+    else:
+        event.update({"priorityTo": "P1", "priorityFrom": "P3"})
+    parsed = board_state.Change.from_json(event, "history[0]")
+    assert parsed.kind == kind
+    assert (
+        board_state.Change.from_json(cast("board_state.JsonObject", parsed.to_json()), "round trip")
+        == parsed
+    )
+
+
+def test_nested_comment_index_and_empty_strings(tmp_path: pathlib.Path) -> None:
+    raw = editable_json(saved_board(tmp_path / "board.json"))
+    raw["items"][0]["comments"].append({"at": "", "by": "", "text": ""})
+    loaded = board_state.Board.from_json(raw, "test")
+    assert loaded.items[0].comments[1] == board_state.Comment("", "", "")
+    raw["items"][0]["comments"][1]["text"] = False
+    with pytest.raises(board_state.BoardError, match=r"items\[0\]\.comments\[1\].*no text"):
+        board_state.Board.from_json(raw, "test")
+
+
+@pytest.mark.parametrize("field", ["ticket", "nextTicket"])
+@pytest.mark.parametrize("value", [True, False])
+def test_boolean_ticket_fields_refuse_without_rewriting(
+    tmp_path: pathlib.Path, field: str, *, value: bool
+) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    target = raw["items"][0] if field == "ticket" else raw
+    target[field] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(board_state.BoardError, match=field):
+        board_state.load(path)
+    assert path.read_bytes() == before
+
+
+def test_legacy_numeric_defaults_zero_and_allocator_high_water(tmp_path: pathlib.Path) -> None:
+    raw = editable_json(saved_board(tmp_path / "board.json"))
+    del raw["revision"]
+    del raw["nextTicket"]
+    del raw["items"][0]["ticket"]
+    raw["items"][0]["history"] = []
+    loaded = board_state.Board.from_json(raw, "legacy")
+    assert (loaded.revision, loaded.next_ticket, loaded.items[0].ticket) == (0, 1, 0)
+    raw["items"][0]["ticket"] = 1000
+    loaded = board_state.Board.from_json(raw, "high water")
+    loaded.create("beta", "Beta", "backlog", "bot")
+    assert (loaded.find("beta").ticket, loaded.next_ticket) == (1001, 1002)
+    assert board_state.Board.from_json(loaded.to_json(), "round trip").to_json() == loaded.to_json()
+
+
+@pytest.mark.parametrize("fault", ["mixed", "unknown_actor", "optional_type"])
+def test_invalid_history_admission_preserves_memory_and_disk(
+    tmp_path: pathlib.Path, fault: str
+) -> None:
+    path = tmp_path / "board.json"
+    accepted = saved_board(path)
+    store = api_endpoint.BoardStore(path)
+    policy = store.policy
+    raw = editable_json(accepted)
+    event: dict[str, object] = {"at": "2026-10-22T12:00:00Z", "by": "bot", "ownerTo": "terry"}
+    if fault == "mixed":
+        event["priorityTo"] = "P1"
+    elif fault == "unknown_actor":
+        event["by"] = "unknown"
+    else:
+        event["ownerFrom"] = False
+    raw["items"][0]["history"].append(event)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(board_state.BoardError, match=r"history\[1\]"):
+        store.snapshot()
+    assert store._board.to_json() == accepted.to_json()  # noqa: SLF001 -- admission memory invariant
+    assert store.policy is policy
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("field", ["history", "comments"])
+def test_nested_non_object_reports_index(tmp_path: pathlib.Path, field: str) -> None:
+    raw = editable_json(saved_board(tmp_path / "board.json"))
+    raw["items"][0][field].append(False)
+    with pytest.raises(board_state.BoardError, match=rf"items\[0\]\.{field}\[1\] is not an object"):
+        board_state.Board.from_json(raw, "test")

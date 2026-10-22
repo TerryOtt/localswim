@@ -1746,3 +1746,47 @@ def test_cli_embeds_policy_into_a_schema_three_board(tmp_path: pathlib.Path) -> 
     migrated = board_state.load(path)
     assert migrated.revision == 1
     assert migrated.policy.states == board_state.TransitionPolicy.load().states
+
+
+@pytest.mark.parametrize("revision", [True, False, -1, 1.5, "1", None, [], {}])
+def test_generic_mutation_invalid_revision_never_posts(
+    tmp_path: pathlib.Path, revision: board_state.JsonValue
+) -> None:
+    with (
+        patch.object(
+            board_state,
+            "_service_descriptor",
+            return_value={"host": "127.0.0.1", "port": 1, "token": "synthetic"},
+        ),
+        patch.object(
+            board_state, "_service_json", return_value={"revision": revision}
+        ) as transport,
+        pytest.raises(board_state.BoardError, match="no valid revision"),
+    ):
+        board_state.apply_remote_mutation(
+            tmp_path / "board.json", board_state.API_PREFIX + "/cards", {}
+        )
+    assert transport.call_count == 1
+    assert "body" not in transport.call_args.kwargs
+
+
+@pytest.mark.parametrize("revision", [0, 5])
+def test_generic_mutation_valid_revision_posts_once(tmp_path: pathlib.Path, revision: int) -> None:
+    with (
+        patch.object(
+            board_state,
+            "_service_descriptor",
+            return_value={"host": "127.0.0.1", "port": 1, "token": "synthetic"},
+        ),
+        patch.object(
+            board_state,
+            "_service_json",
+            side_effect=[{"revision": revision}, {"result": "changed"}],
+        ) as transport,
+    ):
+        result = board_state.apply_remote_mutation(
+            tmp_path / "board.json", board_state.API_PREFIX + "/cards", {"subject": "Synthetic"}
+        )
+    assert result == "changed"
+    assert transport.call_count == 2
+    assert transport.call_args.kwargs == {"body": {"subject": "Synthetic"}, "revision": revision}

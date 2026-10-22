@@ -1776,11 +1776,18 @@ class Change:
 
     @classmethod
     def from_json(cls, raw: JsonObject, where: str) -> Self:
-        owner_to = raw.get("ownerTo")
-        priority_to = raw.get("priorityTo")
+        """Parse exactly one history shape without discarding supplied field values."""
+        optional: dict[str, str | None] = {}
+        for key in ("from", "ownerFrom", "ownerTo", "priorityFrom", "priorityTo"):
+            value = raw.get(key)
+            if value is not None and not isinstance(value, str):
+                raise BoardError(f"{where}: history entry {key} must be a string or null")
+            optional[key] = value
+        owner_to = optional["ownerTo"]
+        priority_to = optional["priorityTo"]
         # **`to` is required on a LANE entry and absent on the other two.** Checking it
         # unconditionally would refuse every board written after either change.
-        moves_lane = not isinstance(owner_to, str) and not isinstance(priority_to, str)
+        moves_lane = owner_to is None and priority_to is None
         at, to, by = raw.get("at"), raw.get("to", ""), raw.get("by")
         required = {"at": at, "by": by}
         if moves_lane:
@@ -1790,18 +1797,26 @@ class Change:
                 raise BoardError(f"{where}: history entry has no {key}")
         if not isinstance(at, str) or not isinstance(to, str) or not isinstance(by, str):
             raise BoardError(f"{where}: history entry contains a non-string field")
-        frm = raw.get("from")
-        owner_frm = raw.get("ownerFrom")
-        priority_frm = raw.get("priorityFrom")
+        frm, owner_frm, priority_frm = (
+            optional[key] for key in ("from", "ownerFrom", "priorityFrom")
+        )
+        if (
+            (owner_to is not None and priority_to is not None)
+            or (moves_lane and (owner_frm is not None or priority_frm is not None))
+            or (not moves_lane and (to or frm is not None))
+            or (owner_to is not None and priority_frm is not None)
+            or (priority_to is not None and owner_frm is not None)
+        ):
+            raise BoardError(f"{where}: history entry mixes lane, owner or priority fields")
         return cls(
             at=at,
             to=to,
             by=by,
-            frm=frm if isinstance(frm, str) else None,
-            owner_frm=owner_frm if isinstance(owner_frm, str) else None,
-            owner_to=owner_to if isinstance(owner_to, str) else None,
-            priority_frm=priority_frm if isinstance(priority_frm, str) else None,
-            priority_to=priority_to if isinstance(priority_to, str) else None,
+            frm=frm,
+            owner_frm=owner_frm,
+            owner_to=owner_to,
+            priority_frm=priority_frm,
+            priority_to=priority_to,
         )
 
 
@@ -1958,6 +1973,18 @@ class ActivityEvent:
         return (
             f"{base}  {self.comment_chars} character(s)" if self.comment_chars is not None else base
         )
+
+
+def _item_event_objects(raw: JsonValue, where: str, field: str) -> list[JsonObject]:
+    """Validate nested event objects while retaining their persisted positions."""
+    if not isinstance(raw, list):
+        raise BoardError(f"{where}: {field} is not a list of objects")
+    objects: list[JsonObject] = []
+    for index, event in enumerate(raw):
+        if not isinstance(event, dict):
+            raise BoardError(f"{where}.{field}[{index}] is not an object")
+        objects.append(event)
+    return objects
 
 
 @dataclass
@@ -2139,7 +2166,7 @@ class Item:
         if not isinstance(priority, str) or priority not in active.priorities:
             raise BoardError(f"{where}: unknown priority {priority!r}")
         ticket = raw.get("ticket", 0)
-        if not isinstance(ticket, int) or ticket < 0:
+        if type(ticket) is not int or ticket < 0:
             raise BoardError(f"{where}: ticket {ticket!r} is not a positive integer")
         # **"Exactly one owner" is ENFORCED here rather than assumed.** An unknown
         # actor is refused outright: a card owned by nobody, or by a name no lane
@@ -2165,16 +2192,8 @@ class Item:
             )
         except (TypeError, ValueError) as exc:
             raise BoardError(f"{where}: {exc}") from exc
-        history_raw = raw.get("history", [])
-        if not isinstance(history_raw, list) or not all(
-            isinstance(change, dict) for change in history_raw
-        ):
-            raise BoardError(f"{where}: history is not a list of objects")
-        comments_raw = raw.get("comments", [])
-        if not isinstance(comments_raw, list) or not all(
-            isinstance(comment, dict) for comment in comments_raw
-        ):
-            raise BoardError(f"{where}: comments is not a list of objects")
+        history_raw = _item_event_objects(raw.get("history", []), where, "history")
+        comments_raw = _item_event_objects(raw.get("comments", []), where, "comments")
         return cls(
             id=item_id,
             subject=subject,
@@ -2195,14 +2214,12 @@ class Item:
             attachment_history=attachment_history,
             cover_attachment=cover,
             history=[
-                Change.from_json(change, where)
-                for change in history_raw
-                if isinstance(change, dict)
+                Change.from_json(change, f"{where}.history[{index}]")
+                for index, change in enumerate(history_raw)
             ],
             comments=[
-                Comment.from_json(comment, where)
-                for comment in comments_raw
-                if isinstance(comment, dict)
+                Comment.from_json(comment, f"{where}.comments[{index}]")
+                for index, comment in enumerate(comments_raw)
             ],
         )
 
@@ -2542,7 +2559,7 @@ class Board:
             raise BoardError(f"{where}: port {port!r} is not a TCP port number")
 
         revision = raw.get("revision", 0)
-        if not isinstance(revision, int) or revision < 0:
+        if type(revision) is not int or revision < 0:
             raise BoardError(f"{where}: revision {revision!r} is not a non-negative integer")
 
         active_policy = _board_policy(raw, where, policy)
@@ -2587,7 +2604,7 @@ class Board:
             items.append(item)
 
         next_ticket = raw.get("nextTicket", max(tickets, default=0) + 1)
-        if not isinstance(next_ticket, int) or next_ticket < 1:
+        if type(next_ticket) is not int or next_ticket < 1:
             raise BoardError(f"{where}: nextTicket {next_ticket!r} is not positive")
         # **The counter MUST be ahead of every ticket in the file.** A hand edit that
         # rewinds it would hand out a number already in use -- caught here rather
@@ -2794,6 +2811,11 @@ class Board:
             #
             # **The other kinds are checked on their own terms instead**, below.
             lane_history = [c for c in item.history if c.kind == "lane"]
+            problems.extend(
+                f"{item.id}: history[{index}] names unknown actor {change.by!r}"
+                for index, change in enumerate(item.history)
+                if change.kind in {"owner", "priority"} and change.by not in known_actors
+            )
             problems.extend(
                 f"{item.id}: history reassigns to {c.owner_to!r}, which is not an actor"
                 for c in item.history
@@ -4393,8 +4415,8 @@ def apply_remote_mutation(
     token = str(descriptor["token"])
     snapshot = _service_json(base + API_PREFIX + "/board", token)
     revision = snapshot.get("revision")
-    if not isinstance(revision, int):
-        raise BoardError("board service response has no revision")
+    if type(revision) is not int or revision < 0:
+        raise BoardError("board service response has no valid revision")
 
     response = _service_json(base + route, token, body=body, revision=revision)
     result = response.get("result")

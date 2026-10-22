@@ -23,7 +23,7 @@ from tests.support import USERS
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 API = api_endpoint.API_PREFIX
 
@@ -546,6 +546,147 @@ def test_status_uses_refreshed_clean_build_id(
 
     assert code == 200
     assert health["build"] == "cafebabe"
+
+
+@pytest.mark.parametrize("failure", ["stat", "read"])
+@pytest.mark.parametrize("recovery", ["identical", "changed", "unreadable"])
+def test_source_uncertainty_retries_at_unchanged_mtime(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    recovery: str,
+) -> None:
+    source = tmp_path / "source.py"
+    source.write_bytes(b"answer = 42\n")
+    mtime = source.stat().st_mtime
+    digest = api_endpoint.hashlib.sha256(source.read_bytes()).hexdigest()
+    real_stat = pathlib.Path.stat
+    real_read = pathlib.Path.read_bytes
+    unavailable = True
+    reads = 0
+
+    def stat(path: pathlib.Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path == source and unavailable and failure == "stat":
+            raise OSError("synthetic stat failure")
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    def read(path: pathlib.Path) -> bytes:
+        nonlocal reads
+        if path == source:
+            reads += 1
+            if unavailable and failure == "read":
+                raise OSError("synthetic read failure")
+            if recovery == "changed":
+                return b"answer = 43\n"
+        return real_read(path)
+
+    monkeypatch.setattr(api_endpoint, "CODE_FILES", (source,))
+    monkeypatch.setattr(api_endpoint, "_BOOT_CODE", ((mtime, digest),))
+    monkeypatch.setattr(api_endpoint, "_seen_code_mtimes", [mtime if failure == "stat" else -1])
+    monkeypatch.setattr(api_endpoint, "_code_differs", [False])
+    monkeypatch.setattr(pathlib.Path, "stat", stat)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", read)
+
+    assert api_endpoint.code_is_stale()
+    assert api_endpoint._seen_code_mtimes == [None]
+    unavailable = recovery == "unreadable"
+    assert api_endpoint.code_is_stale() is (recovery != "identical")
+    if not unavailable:
+        assert source.stat().st_mtime == mtime
+        assert api_endpoint._seen_code_mtimes == [mtime]
+        recovered_reads = reads
+        assert api_endpoint.code_is_stale() is (recovery == "changed")
+        assert reads == recovered_reads, "successful equal-mtime polling should remain cheap"
+    else:
+        assert api_endpoint._seen_code_mtimes == [None]
+
+
+@pytest.mark.parametrize("flush_succeeds", [False, True])
+def test_shutdown_overlap_abandons_only_unhanded_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    flush_succeeds: bool,
+) -> None:
+    queued: list[Callable[[], None]] = []
+    worker_names: list[str] = []
+    shutdowns: list[str] = []
+    releases: list[bool] = []
+
+    class FakeServer:
+        def shutdown(self) -> None:
+            shutdowns.append("shutdown")
+
+    class FakeWorker:
+        def __init__(self, target: Callable[[], None]) -> None:
+            self.target = target
+
+        def start(self) -> None:
+            queued.append(self.target)
+
+    def thread(*, target: Callable[[], None], name: str, daemon: bool) -> FakeWorker:
+        assert daemon
+        worker_names.append(name)
+        return FakeWorker(target)
+
+    def reserve(_server: object) -> bool:
+        stack = contextlib.ExitStack()
+        stack.callback(lambda: releases.append(True))
+        api_endpoint._restart_gate_stack = stack
+        return True
+
+    def flush(_path: pathlib.Path) -> tuple[bool, str]:
+        assert api_endpoint._shutdown_requested.is_set()
+        queued.pop(0)()
+        assert releases == [True]
+        assert api_endpoint._restart_gate_stack is None
+        assert not api_endpoint._restart_scheduled
+        assert not api_endpoint._restart_requested.is_set()
+        return flush_succeeds, "synthetic final flush"
+
+    def sleep(_seconds: float) -> None:
+        """Advance the captured restart directly to its stable-source check."""
+
+    changed = tuple((mtime + 1, digest + "-changed") for mtime, digest in api_endpoint._BOOT_CODE)
+    monkeypatch.setattr(api_endpoint, "_code_stamp", lambda: changed)
+    monkeypatch.setattr(api_endpoint, "_source_startup_problem", lambda: None)
+    monkeypatch.setattr(api_endpoint, "_reserve_board_restart", reserve)
+    monkeypatch.setattr(api_endpoint, "flush_autopush_for_shutdown", flush)
+    for name, value in {
+        "_restart_scheduled": False,
+        "_restart_requested": threading.Event(),
+        "_shutdown_requested": threading.Event(),
+        "_restart_refused_stamp": None,
+        "_restart_problem": None,
+        "_restart_gate_stack": None,
+        "_restart_gate": None,
+    }.items():
+        monkeypatch.setattr(api_endpoint, name, value)
+    monkeypatch.setattr(api_endpoint.time, "sleep", sleep)
+    monkeypatch.setattr(api_endpoint.threading, "Thread", thread)
+    server = cast("Any", FakeServer())
+
+    assert api_endpoint.request_code_restart(server) == (True, None)
+    assert api_endpoint.request_service_shutdown(server) == (
+        flush_succeeds,
+        "synthetic final flush",
+    )
+    if flush_succeeds:
+        queued.pop(0)()
+        assert api_endpoint._shutdown_requested.is_set()
+        assert not api_endpoint._restart_requested.is_set()
+        assert worker_names == ["code-restart", "service-shutdown"]
+    else:
+        assert not api_endpoint._shutdown_requested.is_set()
+        assert api_endpoint.request_code_restart(server) == (True, None)
+        assert api_endpoint.request_code_restart(server) == (True, None)
+        assert len(queued) == 1
+        queued.pop(0)()
+        assert api_endpoint._restart_requested.is_set()
+        assert api_endpoint.request_code_restart(server) == (True, None)
+        assert not queued
+        assert worker_names == ["code-restart", "code-restart"]
+    assert shutdowns == ["shutdown"]
+    api_endpoint._release_restart_gate()
 
 
 def test_valid_source_change_schedules_graceful_shutdown(

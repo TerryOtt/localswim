@@ -573,6 +573,12 @@ terminated to make room for a board service.
 Board JSON contains identities, descriptions, comments and audit history. Keep it out
 of this public source repository.
 
+Saved ticket numbers, revisions and the next-ticket allocator must be genuine integers;
+Boolean values are refused. Optional history fields accept strings or null, with lane,
+owner and priority event shapes kept separate. Verification checks the recorded actor
+for owner and priority events as well as lane moves. These checks detect malformed
+records; they cannot authenticate a hand-edited history.
+
 Automatic Git commits and pushes are OFF by default. Enable them only for a board stored
 in an appropriate Git repository:
 
@@ -587,6 +593,9 @@ process lock. A failed push is retried without requiring another board edit. A v
 board that is not yet tracked is adopted on the first pass; unrelated tracked or
 untracked files remain untouched. The server refuses ignored boards, non-repositories
 and repositories without a remote; it cannot prove that a configured remote is private.
+Quiet and retry intervals use a monotonic clock, so changing the system clock does not
+shorten or extend them. Displayed timestamps still use wall-clock time; shutdown's final
+flush does not wait for the asynchronous deadlines.
 
 Large attachment histories do not expand into one process command line. Snapshot
 status checks use bounded path batches; staging and commit receive exact literal
@@ -740,6 +749,10 @@ keeps its actual listening port, including a port assigned by `--port 0`. Startu
 restart coordination prevents another launch from taking ownership during replacement.
 Process IDs and browser/CLI credentials may change; clients use the replacement service
 descriptor and refresh browser credentials.
+
+An unreadable source remains stale until a later successful digest comparison, even
+if its modification time is unchanged. A canceled restart releases its scheduling slot
+so a later source poll can try again; successful explicit shutdown remains authoritative.
 
 Board connections allow 30 seconds of idle input. When HTTP server shutdown or close
 starts, incomplete headers and bodies share an absolute two-second budget, observed

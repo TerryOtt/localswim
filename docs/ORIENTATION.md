@@ -407,8 +407,13 @@ Item history has three event shapes:
 
 `Board.verify()` replays lane history, checks legal actors and chain continuity, and
 compares the result to stored state. It also validates owner and priority targets in
-their history entries. It detects direct state edits but cannot prove that a hand-edited
-history entry naming an actor on a legal edge was really made by that actor.
+their history entries and requires their actors to belong to the board's users, without
+making ownership an authorization rule. Optional event fields must be strings or null;
+lane, owner and priority fields cannot form mixed event shapes. Nested history/comment
+refusals include their item indices. Tickets, revisions and the next-ticket allocator
+reject Boolean values while retaining supported legacy defaults. Verification detects
+direct state edits but cannot prove that a hand-edited history entry naming an actor on
+a legal edge was really made by that actor.
 
 Link and unlink actions append a board-level `relationshipHistory` entry containing the
 timestamp, actor, caller-facing relationship direction, and both stable card IDs. It is
@@ -590,6 +595,11 @@ over a pending restart. Failed replacement stops its owned child and releases ow
 and launch admission, leaving recovery to a later start. Gateway-only re-exec does not
 own a board lease.
 
+Source stat/read uncertainty is retryable until a digest comparison succeeds, including
+same-mtime recovery; successful unchanged-mtime checks keep their cheap polling path.
+A restart worker canceled by explicit shutdown releases the launch gate and clears its
+abandoned scheduled flag under the restart lock. A successful handoff is not abandoned.
+
 `BoardHttpServer` tracks accepted sockets that are still reading input. Ordinary
 input inactivity is limited to 30 seconds. HTTP server shutdown or close fixes one
 absolute two-second incomplete-input deadline; repeated shutdown calls and trickled bytes do
@@ -701,6 +711,8 @@ An explicit revision avoids the snapshot GET, not identity verification. CLI POS
 still use only the descriptor's CLI credential; the probe does not grant browser
 authority. Workspace consumers retain browser token/userCSS checks, legacy upgrade
 handling and exact workspaceLaunch ownership checks during child cleanup.
+Generic CLI mutations also refuse a snapshot revision that is not a nonnegative genuine
+integer before dispatching any POST; zero remains valid.
 
 Metadata failures produce sanitized refusal or unavailable/recovery behavior, without
 including capabilities. Service replacement can occur after a successful identity
@@ -876,6 +888,9 @@ paths, and pushes
 the board repository's current branch. Every service using the same Git common
 directory serializes that whole operation with an operating-system file lock in
 the common directory; process exit releases the lock without stale-lock recovery.
+Dirty-write quiet periods and retry backoff use monotonic deadlines throughout the
+publisher loop; wall-clock jumps affect neither. Status and commit timestamps remain
+epoch-based, and synchronous final flush bypasses the asynchronous deadlines.
 
 The first pass adopts an otherwise valid untracked board at that exact path. It neither
 stages nor commits unrelated tracked or untracked files. It refuses boards that are

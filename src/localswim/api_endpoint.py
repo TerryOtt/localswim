@@ -267,7 +267,7 @@ def refresh_build_id_if_clean() -> str:
 # **Per-file state, so the answer is REMEMBERED rather than recomputed.** The mtime
 # says when to look; these say what was found. Without them a changed file would be
 # re-hashed on every poll forever, which is the cost the mtime check exists to avoid.
-_seen_code_mtimes = [m for m, _ in _BOOT_CODE]
+_seen_code_mtimes: list[float | None] = [m for m, _ in _BOOT_CODE]
 _code_differs = [False] * len(CODE_FILES)
 
 
@@ -281,21 +281,25 @@ def code_is_stale() -> bool:
 
     **An edit reverted before the next poll CLEARS the flag**, because the verdict is
     the digest comparison rather than "has the mtime ever moved".
+    A failed stat or read leaves its observation unconfirmed, so recovery retries
+    the digest even if the next readable file has the same mtime.
     """
     for i, path in enumerate(CODE_FILES):
         try:
             mtime = path.stat().st_mtime
         except OSError:
+            _seen_code_mtimes[i] = None
             _code_differs[i] = True
             continue
         if mtime == _seen_code_mtimes[i]:
             continue
-        _seen_code_mtimes[i] = mtime
         try:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
+            _seen_code_mtimes[i] = None
             _code_differs[i] = True
             continue
+        _seen_code_mtimes[i] = mtime
         _code_differs[i] = digest != _BOOT_CODE[i][1]
     return any(_code_differs)
 
@@ -396,7 +400,12 @@ def request_code_restart(
                 _restart_problem = "board launch gate is busy; restart will retry"
             return
         if _shutdown_requested.is_set():
-            _release_restart_gate()
+            with _restart_lock:
+                _release_restart_gate()
+                # A failed final flush can cancel shutdown and need another worker.
+                # A restart already handed off remains authoritative.
+                if not _restart_requested.is_set():
+                    _restart_scheduled = False
             return
         print("  Python source changed; restarting server.", flush=True)
         _restart_requested.set()
@@ -1011,6 +1020,7 @@ def _push_loop(board_path: pathlib.Path) -> None:
 
     **It starts armed.** The first pass reconciles whatever changed while no server was
     running, which is exactly the window this card exists to cover.
+    Quiet and retry deadlines use elapsed monotonic time, independent of wall-clock changes.
     """
     why = push_unavailable(board_path)
     if why:
@@ -1023,7 +1033,7 @@ def _push_loop(board_path: pathlib.Path) -> None:
         seen = board_path.stat().st_mtime
     except OSError:
         seen = 0.0
-    dirty_at: float | None = time.time()
+    dirty_at: float | None = time.monotonic()
     retry_at: float | None = None
     while True:
         time.sleep(_PUSH_TICK_S)
@@ -1035,11 +1045,11 @@ def _push_loop(board_path: pathlib.Path) -> None:
             continue
         if now_mtime != seen:
             seen = now_mtime
-            dirty_at = time.time()
+            dirty_at = time.monotonic()
             retry_at = None
             _set_push("pending", "board changed; waiting for it to go quiet")
             continue
-        now = time.time()
+        now = time.monotonic()
         changed_is_due = dirty_at is not None and now - dirty_at >= _PUSH_QUIET_S
         retry_is_due = retry_at is not None and now >= retry_at
         if not changed_is_due and not retry_is_due:
@@ -1051,7 +1061,7 @@ def _push_loop(board_path: pathlib.Path) -> None:
         ok, detail = _push_once(board_path)
         if not ok:
             print(f"  AUTOPUSH FAILED: {detail}", flush=True)
-            retry_at = time.time() + _PUSH_RETRY_S
+            retry_at = time.monotonic() + _PUSH_RETRY_S
 
 
 def start_autopush(

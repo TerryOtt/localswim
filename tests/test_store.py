@@ -752,9 +752,11 @@ def test_clean_board_reconciles_an_already_committed_push_failure(tmp_path: path
     )
 
 
+@pytest.mark.parametrize("wall_jump", [-10_000.0, 10_000.0])
 def test_autopush_loop_retries_failure_without_another_board_write(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    wall_jump: float,
 ) -> None:
     class StopLoopError(Exception):
         """Terminate the deliberately infinite daemon loop after recovery."""
@@ -788,7 +790,8 @@ def test_autopush_loop_retries_failure_without_another_board_write(
     monkeypatch.setattr(api_endpoint, "push_unavailable", push_is_available)
     monkeypatch.setattr(api_endpoint, "_PUSH_QUIET_S", 0.0)
     monkeypatch.setattr(api_endpoint, "_PUSH_RETRY_S", 2.0)
-    monkeypatch.setattr(api_endpoint.time, "time", fake_time)
+    monkeypatch.setattr(api_endpoint.time, "monotonic", fake_time)
+    monkeypatch.setattr(api_endpoint.time, "time", lambda: wall_jump * clock)
     monkeypatch.setattr(api_endpoint.time, "sleep", fake_sleep)
     monkeypatch.setattr(api_endpoint, "_push_once", fake_push)
 
@@ -800,6 +803,54 @@ def test_autopush_loop_retries_failure_without_another_board_write(
     assert sleeps[-1] == 5.5
     assert board.read_bytes() == original_bytes
     assert board.stat().st_mtime_ns == original_mtime
+
+
+@pytest.mark.parametrize("wall_jump", [-10_000.0, 10_000.0])
+@pytest.mark.parametrize("new_write", [False, True])
+def test_autopush_quiet_deadline_ignores_wall_clock_changes(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wall_jump: float,
+    *,
+    new_write: bool,
+) -> None:
+    class StopLoopError(Exception):
+        """Stop the synthetic publisher after checking recovery quiescence."""
+
+    board = tmp_path / "board.json"
+    board.write_bytes(b"{}\n")
+    initial_mtime = board.stat().st_mtime
+    clock = 0.0
+    calls: list[float] = []
+
+    def sleep(_seconds: float) -> None:
+        nonlocal clock
+        clock += 0.5
+        if new_write and clock == 1.0:
+            os.utime(board, (initial_mtime + 1, initial_mtime + 1))
+        if clock > 5:
+            raise StopLoopError
+
+    def push(_path: pathlib.Path) -> tuple[bool, str]:
+        calls.append(clock)
+        return True, "repository synchronized"
+
+    def available(_path: pathlib.Path) -> str:
+        return ""
+
+    monkeypatch.setattr(api_endpoint, "push_unavailable", available)
+    monkeypatch.setattr(api_endpoint, "_PUSH_QUIET_S", 2.0)
+    monkeypatch.setattr(api_endpoint, "_push_stop", api_endpoint.threading.Event())
+    monkeypatch.setattr(api_endpoint.time, "sleep", sleep)
+    monkeypatch.setattr(api_endpoint.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(api_endpoint.time, "time", lambda: wall_jump * clock)
+    monkeypatch.setattr(api_endpoint, "_push_once", push)
+
+    with pytest.raises(StopLoopError):
+        api_endpoint._push_loop(board)  # noqa: SLF001 -- test elapsed quiet scheduling
+
+    assert calls == ([3.0] if new_write else [2.0])
+    assert clock == 5.5
 
 
 def test_autopush_is_disabled_unless_explicitly_enabled(
@@ -831,6 +882,11 @@ def test_shutdown_flush_pushes_final_snapshot(
 
     monkeypatch.setattr(api_endpoint, "_autopush_enabled", True)
     monkeypatch.setattr(api_endpoint, "push_board", successful_push)
+
+    def unexpected_clock() -> float:
+        raise AssertionError("synchronous final flush must bypass asynchronous deadlines")
+
+    monkeypatch.setattr(api_endpoint.time, "monotonic", unexpected_clock)
 
     result = api_endpoint.flush_autopush_for_shutdown(board)
 

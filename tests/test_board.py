@@ -464,3 +464,20 @@ def test_verify_detects_illegal_recorded_transition(board: board_state.Board) ->
     )
     board.items.append(item)
     assert any("permission table forbids" in problem for problem in board.verify())
+
+
+@pytest.mark.parametrize("kind", ["owner", "priority"])
+@pytest.mark.parametrize("actor", ["bot", "terry", "unknown"])
+def test_non_lane_history_actor_membership(board: board_state.Board, kind: str, actor: str) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    # Attribution is checked against the board cast, independently of card ownership.
+    board.assign("alpha", "terry", "bot")
+    if kind == "priority":
+        board.set_priority("alpha", "P1", "bot")
+    item = board.find("alpha")
+    index = len(item.history) - 1
+    item.history[index].by = actor
+    expected = (
+        [] if actor != "unknown" else [f"alpha: history[{index}] names unknown actor 'unknown'"]
+    )
+    assert board.verify() == expected

@@ -306,6 +306,11 @@ fresh per-turn owner approval before any Astra use remain unchanged.
   field-specific messages. Preserve unknown-field rejection where a structure defines
   it explicitly, especially transition edge objects; do not claim every board object
   currently rejects additional keys.
+  Keep optional Change fields string-or-null and lane/owner/priority event shapes
+  compatible, with indexed nested diagnostics. Verify owner/priority actor membership
+  without inventing owner permissions. Ticket/revision/allocator values reject bool;
+  generic client revisions must be nonnegative genuine integers before POST.
+  Preserve missing numeric defaults and existing valid legacy histories.
 - Creation rejects empty required ID/subject strings before allocation or mutation.
   HTTP creation takes its omitted priority from the locked candidate policy. Generated
   IDs try the free base, actual next-ticket suffix, then unused ordinal suffixes
