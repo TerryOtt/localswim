@@ -1056,3 +1056,54 @@ gaps. Foreign or inconsistent metadata is retained and refused, including a pend
 end that differs from the saved cursor. Queue acknowledgement and status persistence
 are separate, so crash recovery has at-least-once duplicate windows. See README's shared board-write monitor
 section for launch arguments and migration from the old FGA-local watcher.
+
+## Private schema-5 preparation (#0129)
+
+`write_protocol.py` provides an inert preparation boundary for the accepted restore
+protocol. Production `SCHEMA`, initialization, load/save, HTTP, CLI, browser and
+workspace behavior remain schema 4 / write protocol 1. There is no feature switch,
+public schema-5 writer, migration command or runtime generation allocation.
+
+The private envelope contains the existing `Board`, one canonical lowercase UUID
+and an optional immutable latest maintenance receipt. It is not a `Board` and has
+no `to_json` interface, so public save cannot silently discard its generation.
+`_parse_schema5` and `_serialize_schema5` validate complete state using isolated
+board policy/users and audit verification. Ordinary round trips allocate nothing
+and preserve generation, revision and receipt. Preparation uses the same supported
+priority adoption followed by audit verification as live candidate admission;
+rejected candidates never install ambient actors or policy.
+
+`_prepare_initial_schema5` retains the supplied initial revision;
+`_prepare_migration_schema5` advances schema-4 revision exactly once. Both require
+an explicit generation allocator, invoked once after successful admission. Future
+restore planning must supply its independently allocated generation and final
+reviewed revision; these helpers do not implement restore execution or receipts.
+
+`WriteToken` accepts exactly `"generation-UUID-revision-N"`, including the quotes,
+with a canonical lowercase UUID and a non-Boolean nonnegative integer revision.
+`N` has no leading zeros except zero itself. Missing/malformed input raises
+`InvalidWriteToken`; a valid differing generation or revision raises
+`StaleWriteToken("state_changed")`. Future adapters map these to 428 and 412 and
+must compare under the transaction lock before any mutation or attachment write.
+
+A present `restoreReceipt` requires exactly `operationId`, `planDigest`,
+`sourceSnapshotDigest`, `priorRawDigest`, `timestamp` and `authority`. Operation ID
+is a canonical lowercase UUID; digests are lowercase 64-character SHA-256 hex.
+`priorRawDigest` may instead be the explicit string `missing`, never null or an
+omitted field. Timestamp is offset-bearing RFC 3339; authority is exactly
+`local-maintenance`. An absent receipt is valid. Receipt data is validated and
+copied into immutable values; returned JSON cannot change canonical receipt state.
+
+Later adapter integration checklist:
+
+- Keep this boundary private until server, CLI, browser and workspace preparations
+  pass independent review and coordinated isolated release acceptance together.
+- Add explicit stopped-board initialization/migration ownership and persistence;
+  preserve generation and receipt in every supported maintenance/write path.
+- Require the complete token under the writer transaction lock; never accept a
+  schema-5 numeric fallback. Advertise protocol 2 and retain captured intent tokens
+  across polls, credential refresh and gateway forwarding.
+- Restore planning allocates/seals generation, revision, receipt time and content
+  once; apply validates the same sealed bytes and performs no new allocation.
+- Coordinate consumer rollout separately; this preparation authorizes no live
+  migration, installation, restart, restore or backup configuration change.

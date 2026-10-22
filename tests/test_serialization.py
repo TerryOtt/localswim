@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from localswim import api_endpoint, board_state
+from localswim.write_protocol import _prepare_migration_schema5 as prepare_schema5
+from localswim.write_protocol import _serialize_schema5 as serialize_schema5
 from tests.support import USERS
 
 if TYPE_CHECKING:
@@ -729,3 +731,22 @@ def test_nested_non_object_reports_index(tmp_path: pathlib.Path, field: str) -> 
     raw["items"][0][field].append(False)
     with pytest.raises(board_state.BoardError, match=rf"items\[0\]\.{field}\[1\] is not an object"):
         board_state.Board.from_json(raw, "test")
+
+
+def test_private_schema5_stays_out_of_public_load_save(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    original = saved_board(path)
+    original_bytes = path.read_bytes()
+    snapshot = prepare_schema5(
+        original.to_json(),
+        "private",
+        allocate_generation=lambda: "65e18b13-6c3b-483d-8c50-81e08fc12b56",
+    )
+    with pytest.raises(AttributeError, match="to_json"):
+        board_state.save(cast("board_state.Board", snapshot), path)
+    assert path.read_bytes() == original_bytes
+    path.write_text(json.dumps(serialize_schema5(snapshot)), encoding="utf-8")
+    with pytest.raises(board_state.BoardError, match="this build reads 4"):
+        board_state.load(path)
+    assert board_state.SCHEMA == 4
+    assert original.to_json()["schema"] == 4
