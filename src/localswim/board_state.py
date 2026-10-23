@@ -796,6 +796,7 @@ def _parse_priorities(
     if not isinstance(priorities_raw, list) or not priorities_raw:
         raise BoardError(f"{path}: 'priorities' is missing or empty")
     rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for index, priority in enumerate(priorities_raw):
         spot = f"priorities[{index}]"
         if not isinstance(priority, dict):
@@ -803,6 +804,9 @@ def _parse_priorities(
         priority_id, label = priority.get("id"), priority.get("label")
         if not isinstance(priority_id, str) or not priority_id:
             raise BoardError(f"{path}: {spot}.id is not a nonempty string")
+        if priority_id in seen:
+            raise BoardError(f"{path}: {spot}.id repeats id {priority_id!r}")
+        seen.add(priority_id)
         if not isinstance(label, str) or not label:
             raise BoardError(f"{path}: {spot}.label is not a nonempty string")
         rows.append((priority_id, label))
@@ -2618,7 +2622,7 @@ class Board:
         browser_user = _pick_role(raw, "browserUser", users, HUMAN, pathlib.Path(where))
         cli_user = _pick_role(raw, "cliUser", users, BOT, pathlib.Path(where))
         default_owner = raw.get("defaultOwner") or cli_user
-        if default_owner not in {u.id for u in users}:
+        if not isinstance(default_owner, str) or default_owner not in {u.id for u in users}:
             raise BoardError(f"{where}: defaultOwner names unknown user {default_owner!r}")
         install_users(
             users,
@@ -3995,12 +3999,19 @@ def _resolved_policy(
     permissions_path: pathlib.Path,
 ) -> tuple[JsonObject, tuple[User, ...], str, str, str]:
     """Resolve human-readable initialization inputs into one persisted policy."""
-    if description.get("schema") != DESCRIPTION_SCHEMA:
+    # Retain integral 1.0 compatibility, but Boolean markers are not schema versions.
+    if (
+        isinstance(description.get("schema"), bool)
+        or description.get("schema") != DESCRIPTION_SCHEMA
+    ):
         raise BoardError(
             f"{description_path}: description schema {description.get('schema')!r}, "
             f"want {DESCRIPTION_SCHEMA}"
         )
-    if permissions.get("schema") != PERMISSIONS_SCHEMA:
+    if (
+        isinstance(permissions.get("schema"), bool)
+        or permissions.get("schema") != PERMISSIONS_SCHEMA
+    ):
         raise BoardError(
             f"{permissions_path}: permissions schema {permissions.get('schema')!r}, "
             f"want {PERMISSIONS_SCHEMA}"

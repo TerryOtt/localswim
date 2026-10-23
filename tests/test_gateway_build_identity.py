@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 NODE_DRIVER = r"""
 const fs = require('fs'), vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+(async()=>{
 const elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, {textContent:'', className:'', value:'draft',
@@ -46,7 +47,54 @@ function section(source,start,end) {
   if(a<0||b<0)throw Error('Production helper boundary not found: '+start);
   return source.slice(a,b);
 }
-if(input.mode==='normalize'){
+if(input.mode==='rendering'){
+  // These deliberately small DOM seams verify production helper plumbing. The
+  // synthetic browser smoke covers the real template parser and DOM boundaries.
+  function node(tag){
+    return {tag,className:'',textContent:'',children:[],htmlWrites:[],
+      append(...children){this.children.push(...children)},
+      set innerHTML(value){this.htmlWrites.push(value);this.html=value;
+        if(tag==='template'){
+          let text=value.replace(/<b class="mdh">([^]*?)<\/b>/g,'$1 ')
+            .replace(/<[^>]*>/g,'');
+          text=text.replace(/&(?:amp|lt|gt|quot|#x27|#39);/g,
+            entity=>({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"',
+              '&#x27;':"'",'&#39;':"'"}[entity]));
+          this.content={textContent:text,querySelectorAll(){return []}};
+        }},get innerHTML(){return this.html}};
+  }
+  context.document.createElement=node;
+  context.data={actors:input.actors};
+  vm.runInContext(section(input.page,'function userLabel(',
+    '// **The owner control CYCLES'),context);
+  vm.runInContext(section(input.page,'const HAY =','function paint()'),context);
+  context.items=input.items;
+  const haystacks=vm.runInContext('items.map(hay)',context);
+  const cached=vm.runInContext(`items[0].subject='replacement';hay(items[0])`,context);
+  // A changed payload must invalidate the existing ID through the actual poll handler.
+  Object.assign(context,{pollingEpoch:null,seen:0,API_PREFIX:'/api/v001',
+    apiGet:async path=>path.endsWith('/status')?{ok:true,mtime:1}:
+      {actors:input.actors,lanes:[{state:'completed',items:input.items}]},
+    paint(){},restoreStaleReloadState(){},renderLive(){}});
+  context.window.workspaceEpoch=1;
+  vm.runInContext(section(input.page,'async function tick()', '\ntick();'),context);
+  await vm.runInContext('tick()',context);
+  const refreshed=vm.runInContext('hay(items[0])',context);
+  context.comments=input.comments;
+  const headers=vm.runInContext('comments.map(renderComment)',context);
+  context.query='needle';
+  context.CSS={escape:value=>value};
+  context.visibleItems=lane=>lane.items.filter(item=>!item.hidden);
+  context.data.lanes=[{state:'completed',items:input.filterItems}];
+  element('board').querySelector=selector=>element(selector);
+  element('board').querySelectorAll=()=>[];
+  vm.runInContext('applyFilter()',context);
+  const filtered={found:element('findn').textContent,
+    count:element('.lane[data-lane="completed"] .n').textContent};
+  context.query='';vm.runInContext('applyFilter()',context);
+  process.stdout.write(JSON.stringify({haystacks,cached,refreshed,headers,filtered,
+    unfiltered:element('.lane[data-lane="completed"] .n').textContent}));
+}else if(input.mode==='normalize'){
   vm.runInContext(section(input.workspaceSource,
     '  function normalizePageStatus(', '\n  function '),context);
   process.stdout.write(JSON.stringify(input.values.map(value=>vm.runInContext('normalizePageStatus('+JSON.stringify(value)+')',context))));
@@ -101,6 +149,7 @@ if(input.mode==='normalize'){
     staleShown:element('stale').classList.values.has('show'),restart:element('restart').textContent,
     restartShown:element('restart').classList.values.has('show'),stored}));
 }
+})().catch(error=>{process.stderr.write(String(error));process.exitCode=1});
 """
 
 
@@ -126,6 +175,63 @@ def browser_helpers(**values: Any) -> Any:  # noqa: ANN401 - JSON browser test b
         check=True,
     )
     return json.loads(result.stdout)
+
+
+def test_rendered_search_and_comment_header_boundaries() -> None:
+    actor = 'reviewer " data-probe="inert"><i id="inert-header">markup</i>'
+    result = browser_helpers(
+        mode="rendering",
+        actors=[{"id": actor, "label": "Configured reviewer"}, {"id": "bot", "label": "Bot"}],
+        items=[
+            {
+                "id": "literal",
+                "ticket": "#0166",
+                "subject": "x < y > z",
+                "detail": api_endpoint.inline("## Header\n`a * b ** c` & readable <literal>"),
+                "detailRaw": "raw-only-artifact",
+                "comments": [
+                    {"text": api_endpoint.inline("**café** & 'quote' <script>inert</script>")}
+                ],
+            }
+        ],
+        comments=[
+            {"by": actor, "when": "now", "text": api_endpoint.inline("**formatted** `a*b`")},
+            {"by": "bot", "when": "earlier", "text": "ordinary"},
+            {"by": "unknown with spaces", "when": "oldest", "text": "fallback"},
+        ],
+        filterItems=[
+            {"id": "visible", "subject": "needle"},
+            {"id": "hidden", "subject": "needle", "hidden": True},
+        ],
+    )
+    hay = result["haystacks"][0]
+    for phrase in (
+        "#0166",
+        "x < y > z",
+        "a * b ** c",
+        "header a * b ** c & readable",
+        "café & 'quote'",
+    ):
+        assert phrase in hay
+    for artifact in ("<strong>", "&amp;", "&lt;", "raw-only-artifact", 'class="mdh"'):
+        assert artifact not in hay
+    assert result["cached"] == hay
+    assert "replacement" in result["refreshed"]
+    assert "x < y > z" not in result["refreshed"]
+    first, ordinary, fallback = result["headers"]
+    head, body = first["children"]
+    assert first["htmlWrites"] == head["htmlWrites"] == []
+    assert [child["tag"] for child in head["children"]] == ["span", "span"]
+    who, at = head["children"]
+    assert who["className"] == "who " + actor
+    assert who["textContent"] == "Configured reviewer"
+    assert who["htmlWrites"] == at["htmlWrites"] == []
+    assert at["textContent"] == "  ·  now"
+    assert body["htmlWrites"] == ["<strong>formatted</strong> <code>a*b</code>"]
+    assert ordinary["children"][0]["children"][0]["textContent"] == "Bot"
+    assert fallback["children"][0]["children"][0]["textContent"] == "unknown with spaces"
+    assert result["filtered"] == {"found": "1 found", "count": 1}
+    assert result["unfiltered"] == 1
 
 
 @pytest.mark.parametrize("board_build", ["bbbbbbb", "ccccccc", None])

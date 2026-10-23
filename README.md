@@ -222,11 +222,21 @@ the offending field path. Exact duplicate IDs are refused. Accepted strings reta
 their case and contents: loading and initialization never trim, coerce or repair them.
 This does not impose a new color format.
 
+Priority IDs must be unique with their exact case preserved. A selected nonempty
+`defaultOwner` must be a string identifying a user; omitted or falsy values keep
+the existing owner fallback. The two schema-1 initialization inputs reject Boolean
+schema markers. Both `1` and the previously accepted `1.0` remain supported.
+
 User IDs are case-sensitive. The embedded policy's two transition actors MUST exactly
 match browserUser and cliUser. Malformed JSON, ambiguous names, slug collisions, and
 invalid fields fail with a path, line, or field-specific explanation.
 
 ## Daily use
+
+Browser search matches literal subjects and ticket numbers, plus readable description
+and comment text. Inline code retains literal operators such as `*` and `**`;
+formatting markup is excluded from rendered-text searches. Comment attribution uses
+DOM text boundaries, so actor IDs remain literal data even when they contain markup.
 
 The browser supports creating, moving, editing, assigning, prioritizing and relating
 cards. The CLI can inspect the snapshot while the service is stopped or running:
@@ -710,6 +720,15 @@ The catalog includes each board's stable key, project name, the three attention 
 key encoded as one URL segment, for example `localswim%2Flocalswim`. The gateway forwards
 requests to that board's sole writer, preserving revision checks and browser actor
 attribution. Attachment links use the same origin and selected board.
+
+Forwarded response entities are limited to **96 MiB**, inclusive, before JSON decoding.
+Successful attachment downloads retain the **10 MiB** limit; the browser-session
+metadata handshake remains limited to **64 KiB**. Unsupported or ambiguous HTTP framing,
+unsupported content encoding, truncated bodies and oversized entities produce a small
+sanitized 502 response. A failure after forwarding a POST has an unknown outcome:
+inspect the board before retrying; the gateway never replays that mutation.
+These are per-response entity limits, not a bound on total gateway memory or final
+decorated JSON size. The gateway closes each upstream connection after use.
 
 The catalog also includes `preferences` and `gatewayPush`. Preferences use schema 1:
 `revision`, `autopush`, `pinsInitialized`, and the ordered stable-key array

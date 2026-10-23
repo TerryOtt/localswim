@@ -1365,6 +1365,83 @@ def test_lane_migration_refuses_a_listening_board_port(tmp_path: pathlib.Path) -
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("document", ["description", "permissions"])
+@pytest.mark.parametrize("schema", [True, False, 0, 2, "1", None])
+def test_cli_initializer_refuses_invalid_document_schema_without_target(
+    tmp_path: pathlib.Path, document: str, schema: object
+) -> None:
+    path = tmp_path / "board.json"
+    description, permissions = initialization_inputs(tmp_path)
+    source = description if document == "description" else permissions
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw["schema"] = schema
+    source.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(board_state.BoardError, match=f"{document} schema"):
+        board_state.initialize_board(path, description, permissions)
+    assert not path.exists()
+
+    result = run_cli(path, "board", "init", str(description), str(permissions))
+    assert result.returncode != 0
+    assert f"{document} schema" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not path.exists()
+
+    before = b"existing target must survive invalid schema\n"
+    path.write_bytes(before)
+    result = run_cli(path, "board", "init", str(description), str(permissions))
+    assert result.returncode != 0
+    assert "refusing to overwrite" in result.stderr
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("document", ["description", "permissions"])
+@pytest.mark.parametrize("schema", [1, 1.0])
+def test_cli_initializer_preserves_integral_schema_compatibility(
+    tmp_path: pathlib.Path, document: str, schema: float
+) -> None:
+    """Schema 1.0 remains accepted alongside integer 1 for both input documents."""
+    path = tmp_path / "board.json"
+    description, permissions = initialization_inputs(tmp_path)
+    source = description if document == "description" else permissions
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw["schema"] = schema
+    source.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = run_cli(path, "board", "init", str(description), str(permissions))
+
+    assert result.returncode == 0, result.stderr
+    board = board_state.load(path)
+    assert board.revision == 0
+    assert board.items == []
+    assert board.verify() == []
+
+
+@pytest.mark.parametrize(
+    "invalid", ["duplicate-priority", "default-owner-list", "default-owner-dict"]
+)
+def test_cli_initializer_refuses_ambiguous_policy_without_target(
+    tmp_path: pathlib.Path, invalid: str
+) -> None:
+    path = tmp_path / "board.json"
+    description, permissions = initialization_inputs(tmp_path)
+    raw = json.loads(description.read_text(encoding="utf-8"))
+    if invalid == "duplicate-priority":
+        raw["priorities"].append({**raw["priorities"][0], "label": "Replacement"})
+        field = f"priorities[{len(raw['priorities']) - 1}].id"
+    else:
+        raw["defaultOwner"] = ["bot"] if invalid == "default-owner-list" else {"id": "bot"}
+        field = "defaultOwner"
+    description.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = run_cli(path, "board", "init", str(description), str(permissions))
+
+    assert result.returncode != 0
+    assert field in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not path.exists()
+
+
 def test_cli_initializes_stable_slugs_and_resolves_name_permissions(
     tmp_path: pathlib.Path,
 ) -> None:

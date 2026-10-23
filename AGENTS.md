@@ -251,6 +251,15 @@ native board monitoring is an optional extra.
   gateway restart. Confirm actual listener/process health; saved monitor status can be
   stale after its launching process exits.
 
+- Bound forwarded entities inclusively at 96 MiB, successful raw attachments at
+  10 MiB and the existing metadata handshake at 64 KiB. Validate raw framing and
+  content encoding before bounded body reads; close every upstream connection.
+  Return sanitized 502 failures and report POST outcome uncertainty after forwarding
+  begins, without replay. Final decorated-output limits remain a separate boundary.
+  Protect code spans before prose emphasis; search literal subjects/tickets and
+  safely decoded readable rendered bodies. Build comment attribution with DOM text
+  boundaries while keeping the formatted comment body separate.
+
 ## Subagents on authorized tickets
 
 Terry updated the global ceiling on 2026-10-17 to up to 16 direct subagents (width 16),
@@ -326,6 +335,10 @@ fresh per-turn owner approval before any Astra use remain unchanged.
   stamp for older parsed permissions. Preserve stable-invalid refusal behavior,
   embedded admission and documented timestamp-preserving-edit limits.
 - Creation rejects empty required ID/subject strings before allocation or mutation.
+  Policy priority IDs must be exactly unique before rank/label construction. Validate
+  a selected nonempty defaultOwner as a string before membership checks, preserving
+  the established falsy fallback. Schema-1 initialization document markers reject
+  Boolean values while retaining compatibility with integral 1.0 markers.
   HTTP creation takes its omitted priority from the locked candidate policy. Generated
   IDs try the free base, actual next-ticket suffix, then unused ordinal suffixes
   starting at `-0002`; explicit duplicates still refuse atomically. Single-card

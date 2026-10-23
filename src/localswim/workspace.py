@@ -7,6 +7,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import secrets
 import stat
 import subprocess
@@ -35,6 +36,11 @@ PREFIX = board_state.API_PREFIX + "/workspace"
 BOARD_PREFIX = PREFIX + "/boards/"
 PREFERENCES_ROUTE = PREFIX + "/preferences"
 MAX_PREFERENCES_BYTES = 64 * 1024
+MAX_UPSTREAM_ENTITY_BYTES = 96 * 1024 * 1024
+MAX_ATTACHMENT_ENTITY_BYTES = 10 * 1024 * 1024
+UPSTREAM_READ_BYTES = 64 * 1024
+UPSTREAM_RESPONSE_REJECTED = "board service response rejected"
+POST_OUTCOME_UNKNOWN = "board command outcome is unknown; inspect board before retrying"
 # Discovery only: roughly five times the largest representative 1.7 MB snapshot.
 # This is not a board-service payload or attachment limit.
 MAX_CANDIDATE_BYTES = 8 * 1024 * 1024
@@ -627,6 +633,110 @@ def _unique_json_object(pairs: list[tuple[str, board_state.JsonValue]]) -> board
     return value
 
 
+def _upstream_entity_limit(tail: str, status: int, *, write: bool) -> int:
+    """Mirror the service's successful raw-attachment GET grammar."""
+    if not write and status == HTTPStatus.OK and tail.startswith("cards/"):
+        parts = [urllib.parse.unquote(part) for part in tail.strip("/").split("/")]
+        if (
+            len(parts) == api_endpoint.ATTACHMENT_READ_PARTS
+            and parts[0] == "cards"
+            and parts[2] == "attachments"
+            and parts[1]
+            and parts[3]
+        ):
+            return MAX_ATTACHMENT_ENTITY_BYTES
+    return MAX_UPSTREAM_ENTITY_BYTES
+
+
+def _read_upstream_entity(response: http.client.HTTPResponse, limit: int) -> bytes:
+    """Validate framing and read at most limit+1 decoded transfer octets.
+
+    HTTPResponse hides bytes beyond Content-Length. Closing the connection, rather
+    than reusing it, contains that surplus; this reader cannot detect it generally.
+    """
+    if response.headers.defects:
+        raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+    lengths = response.headers.get_all("Content-Length", [])
+    transfers = response.headers.get_all("Transfer-Encoding", [])
+    encodings = response.headers.get_all("Content-Encoding", [])
+    declared: str | None = None
+    if lengths:
+        declared = lengths[0].strip(" \t")
+        if len(lengths) != 1 or not declared or not declared.isascii() or not declared.isdecimal():
+            raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+        declared = declared.lstrip("0") or "0"
+    if transfers and (
+        lengths or len(transfers) != 1 or transfers[0].strip(" \t").lower() != "chunked"
+    ):
+        raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+    if encodings and (len(encodings) != 1 or encodings[0].strip(" \t").lower() != "identity"):
+        raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+    if HTTPStatus.CONTINUE <= response.status < HTTPStatus.OK or response.status in (
+        HTTPStatus.NO_CONTENT,
+        HTTPStatus.NOT_MODIFIED,
+    ):
+        return b""
+    if declared is not None and (len(declared), declared) > (len(str(limit)), str(limit)):
+        raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+    if transfers:
+        return _read_chunked_entity(response, limit)
+    expected = int(declared) if declared is not None else None
+    blob = bytearray()
+    while True:
+        chunk = response.read(min(UPSTREAM_READ_BYTES, limit + 1 - len(blob)))
+        blob.extend(chunk)
+        if len(blob) > limit:
+            raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+        if not chunk:
+            break
+    if expected is not None and len(blob) != expected:
+        raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+    return bytes(blob)
+
+
+def _read_chunked_entity(response: http.client.HTTPResponse, limit: int) -> bytes:
+    """Check chunk delimiters and terminal trailers that HTTPResponse otherwise tolerates."""
+    stream = response.fp
+    blob = bytearray()
+    token = rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+    quoted = rb'"(?:[\t !#-\[\]-~\x80-\xff]|\\[\t !-~\x80-\xff])*"'
+    extension = (
+        rb"[ \t]*;[ \t]*" + token + rb"(?:[ \t]*=[ \t]*(?:" + token + b"|" + quoted + rb"))?"
+    )
+    while True:
+        line = stream.readline(UPSTREAM_READ_BYTES + 1)
+        if len(line) > UPSTREAM_READ_BYTES or not line.endswith(b"\r\n"):
+            raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+        if re.fullmatch(rb"[0-9A-Fa-f]+(?:" + extension + rb")*", line[:-2]) is None:
+            raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+        size_text = line[:-2].split(b";", 1)[0].strip(b" \t").lstrip(b"0") or b"0"
+        # A huge chunk declaration cannot become a huge integer or allocation.
+        size = limit + 1 if len(size_text) > len(f"{limit:x}") else int(size_text, 16)
+        if size == 0:
+            for _ in range(101):
+                trailer = stream.readline(UPSTREAM_READ_BYTES + 1)
+                if trailer == b"\r\n":
+                    return bytes(blob)
+                if (
+                    len(trailer) > UPSTREAM_READ_BYTES
+                    or not trailer.endswith(b"\r\n")
+                    or re.fullmatch(token + rb":[\t\x20-\x7e\x80-\xff]*\r\n", trailer) is None
+                ):
+                    raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+            raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+        remaining = size
+        while remaining:
+            chunk = stream.read(min(UPSTREAM_READ_BYTES, remaining, limit + 1 - len(blob)))
+            if not chunk:
+                raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+            blob.extend(chunk)
+            if len(blob) > limit:
+                raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+            remaining -= len(chunk)
+        if stream.read(1) + stream.read(1) != b"\r\n":
+            raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+
+
 class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
     """Serve the shared page and proxy scoped requests with the browser actor."""
 
@@ -731,22 +841,31 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
                     headers["If-Match"] = revision
             try:
                 connection.request("POST" if write else "GET", target, body=body, headers=headers)
-                response = connection.getresponse()
-                blob = response.read()
-                content_type = response.getheader("Content-Type", "application/octet-stream")
-                blob = self._decorate_board(blob, tail, response.status, encoded_key, endpoint)
-                passthrough = {
-                    key: value
-                    for key in (
-                        "Content-Disposition",
-                        "Content-Security-Policy",
-                        "X-Content-Type-Options",
+                with connection.getresponse() as response:
+                    blob = _read_upstream_entity(
+                        response, _upstream_entity_limit(tail, response.status, write=write)
                     )
-                    if (value := response.getheader(key)) is not None
-                }
-                self._send(blob, content_type, response.status, passthrough)
+                    content_type = response.getheader("Content-Type", "application/octet-stream")
+                    blob = self._decorate_board(
+                        blob, "" if write else tail, response.status, encoded_key, endpoint
+                    )
+                    passthrough = {
+                        key: value
+                        for key in (
+                            "Content-Disposition",
+                            "Content-Security-Policy",
+                            "X-Content-Type-Options",
+                        )
+                        if (value := response.getheader(key)) is not None
+                    }
+            except OSError, http.client.HTTPException, ValueError, RecursionError:
+                self._json(
+                    {"error": POST_OUTCOME_UNKNOWN if write else UPSTREAM_RESPONSE_REJECTED}, 502
+                )
+                return
             finally:
                 connection.close()
+            self._send(blob, content_type, response.status, passthrough)
         except ValueError as exc:
             self._json({"error": str(exc)}, 404)
         except (OSError, http.client.HTTPException) as exc:

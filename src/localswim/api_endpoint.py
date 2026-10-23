@@ -1139,7 +1139,6 @@ INLINE = (
     # author's newline in as well renders a heading, a blank line, and then another
     # blank line before the body. Absorbing one puts it back to a single gap.
     (re.compile(r"^#{2,6}[ \t]+(.+)$\n?", re.MULTILINE), r'<b class="mdh">\1</b>'),
-    (re.compile(r"`([^`]+)`"), r"<code>\1</code>"),
     (re.compile(r"\*\*([^*]+)\*\*"), r"<strong>\1</strong>"),
     (re.compile(r"\*([^*]+)\*"), r"<em>\1</em>"),
 )
@@ -1512,14 +1511,21 @@ def brand_data_uri() -> str:
 
 
 def inline(text: str) -> str:
-    """Escape HTML, THEN apply the three inline spans.
+    """Protect literal code, escape all input, then format prose only."""
+    marker = "\x00code"
+    while marker in text:
+        marker += "\x00"
+    code: list[str] = []
 
-    **That order is the whole safety of it.** Reversing it would escape the markup this
-    function just produced and leave the content raw.
-    """
-    out = html.escape(text)
+    def protect(match: re.Match[str]) -> str:
+        code.append(f"<code>{html.escape(match[1])}</code>")
+        return f"{marker}{len(code) - 1}\x00"
+
+    out = html.escape(re.sub(r"`([^`]+)`", protect, text))
     for pattern, repl in INLINE:
         out = pattern.sub(repl, out)
+    for index, literal in enumerate(code):
+        out = out.replace(f"{marker}{index}\x00", literal)
     return out
 
 
@@ -2679,6 +2685,26 @@ function userLabel(id) {
   return u ? u.label : (id || '?');
 }
 
+function renderComment(c) {
+  const d = document.createElement('div');
+  d.className = 'comment';
+  const head = document.createElement('div');
+  head.className = 'head';
+  const who = document.createElement('span');
+  who.className = 'who ' + c.by;
+  who.textContent = userLabel(c.by);
+  const at = document.createElement('span');
+  at.className = 'at';
+  at.textContent = '  \\u00b7  ' + c.when;
+  head.append(who, at);
+  const body = document.createElement('div');
+  body.className = 'text';
+  // Only the server-rendered comment body crosses the HTML boundary.
+  body.innerHTML = c.text;
+  d.append(head, body);
+  return d;
+}
+
 // **The owner control CYCLES rather than flips**, because there may be more than two.
 // The old line read `owner === 'terry' ? 'claude' : 'terry'`, which is a flip and is
 // correct only for exactly two actors.
@@ -3322,13 +3348,7 @@ function openCard(id) {
   // newest response next to them instead of making the reader cross old history.
   // Copy before reversing because the board payload remains the rendering authority.
   for (const c of [...it.comments].reverse()) {
-    const d = document.createElement('div');
-    d.className = 'comment';
-    d.innerHTML = '<div class="head"><span class="who ' + c.by + '"></span>'
-      + '<span class="at"></span></div><div class="text">' + c.text + '</div>';
-    d.querySelector('.who').textContent = userLabel(c.by);
-    d.querySelector('.at').textContent = '  \\u00b7  ' + c.when;
-    cs.appendChild(d);
+    cs.appendChild(renderComment(c));
   }
 
   // Three cells per entry, appended straight into the grid -- no row wrapper, so
@@ -4065,17 +4085,26 @@ let query = (staleReloadState && typeof staleReloadState.query === 'string')
   ? staleReloadState.query : '';
 const HAY = new Map();
 
+function readableRenderedText(rendered) {
+  // Template contents stay inert: decode entities without fetching or executing
+  // resources. Only rendered detail/comment fields use this projection.
+  const template = document.createElement('template');
+  template.innerHTML = rendered || '';
+  // Block headings consume their source newline; retain a searchable word boundary.
+  template.content.querySelectorAll('.mdh').forEach(node => node.append(' '));
+  return template.content.textContent || '';
+}
+
 function hay(item) {
   // **Built once per card and cached**, because a repaint plus a keystroke would
   // otherwise rebuild every haystack on every character.
   //
-  // **Tags are stripped.** `detail` arrives as HTML from `inline()`, so a search for
-  // "span" would otherwise match every card that contains a line break.
+  // Subject/ticket are literal data; detail/comments carry server-rendered HTML.
   let text = HAY.get(item.id);
   if (text === undefined) {
-    text = [item.ticket, item.subject, item.detail || '',
-            ...(item.comments || []).map(c => c.text || '')]
-      .join(' ').replace(/<[^>]*>/g, ' ').toLowerCase();
+    text = [item.ticket, item.subject, readableRenderedText(item.detail),
+            ...(item.comments || []).map(c => readableRenderedText(c.text))]
+      .join(' ').toLowerCase();
     HAY.set(item.id, text);
   }
   return text;

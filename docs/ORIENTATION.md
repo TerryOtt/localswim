@@ -147,6 +147,15 @@ selected board's existing `/api/v001/<board-api-path>`. Encode the key as one se
 (`localswim%2Flocalswim`), even though the browser deep link uses readable slashes.
 Attachment URLs are rebased through that gateway as well.
 
+Forwarded entity reading has a separate per-response boundary: 96 MiB inclusive for
+board and general responses, and 10 MiB for exact successful attachment routes.
+The browser-session handshake remains 64 KiB. Count bytes after HTTP transfer framing
+and before JSON decoding; preserve the existing JSON Unicode encodings without HTTP
+decompression. Reject ambiguous or invalid raw framing, unsupported content encoding,
+truncation and excess length with sanitized 502 responses, closing the connection.
+A dispatched POST is never replayed; response failure requires inspecting its unknown
+outcome before retrying. This does not limit final decorated JSON or aggregate memory.
+
 The gateway reuses a healthy descriptor only when it identifies the correct board.
 It coordinates launches with the same startup gate used by direct board starts and
 hot restarts. Missing or refused rendezvous while the writer lease is busy triggers a
@@ -313,6 +322,12 @@ such as `users[2].id`. Class is exactly `human` or `bot`; accepted strings other
 retain their original contents. No trimming, case folding, string coercion, identity
 repair or new color syntax validation occurs. Invalid initialization does not create
 or replace its target, and parsing invalid persisted users does not rewrite bytes.
+
+Priority IDs reject exact duplicates before rank/label construction; case-distinct IDs
+remain distinct and declared order is retained. A selected nonempty `defaultOwner`
+must be a string before membership checks; the existing omitted/falsy fallback remains.
+Both schema-1 initialization inputs reject Boolean markers while retaining integer
+`1` and compatible `1.0`; invalid initialization never publishes a target.
 
 User and policy IDs join case-sensitively. Keep IDs lower-case: request values passed
 through `as_actor()` are trimmed and lowercased before matching, while configured IDs

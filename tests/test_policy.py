@@ -28,6 +28,51 @@ def policy_doc(path: pathlib.Path) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
 
 
+@pytest.mark.parametrize("embedded", [False, True])
+def test_duplicate_priority_ids_refuse_before_label_collapse(
+    tmp_path: pathlib.Path, *, embedded: bool
+) -> None:
+    path = policy_file(tmp_path, "rules.json")
+    doc = policy_doc(path)
+    doc["priorities"].append({"id": doc["priorities"][0]["id"], "label": "Replacement"})
+    index = len(doc["priorities"]) - 1
+
+    message = rf"priorities\[{index}\]\.id repeats id"
+    if embedded:
+        raw = board_state.Board(
+            project="Duplicate priorities", users=USERS, browser_user="terry", cli_user="bot"
+        ).to_json()
+        raw["policy"] = doc
+        with pytest.raises(board_state.BoardError, match=message):
+            board_state.Board.from_json(raw, str(tmp_path / "board.json"))
+    else:
+        write_policy(path, doc)
+        with pytest.raises(board_state.BoardError, match=message):
+            board_state.TransitionPolicy.load(path)
+
+
+def test_custom_priority_identity_labels_and_fallback_order(tmp_path: pathlib.Path) -> None:
+    doc = policy_doc(policy_file(tmp_path, "rules.json"))
+    doc["priorities"] = [
+        {"id": "urgent", "label": "First label"},
+        {"id": "Urgent", "label": "Second label"},
+        {"id": " retained ", "label": " Last label "},
+    ]
+    doc.pop("defaultPriority", None)
+
+    policy = board_state.TransitionPolicy.from_json(doc, "custom priorities")
+
+    assert policy.priorities == ("urgent", "Urgent", " retained ")
+    assert policy.priority_label == {
+        "urgent": "First label",
+        "Urgent": "Second label",
+        " retained ": " Last label ",
+    }
+    assert policy.default_priority == "Urgent"
+    assert board_state.priority_ranks(policy) == {"urgent": 0, "Urgent": 1, " retained ": 2}
+    assert policy.to_json()["priorities"] == doc["priorities"]
+
+
 def write_policy(path: pathlib.Path, doc: dict[str, Any], *, advance: bool = False) -> None:
     old_stamp = path.stat().st_mtime_ns
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")

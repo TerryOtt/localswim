@@ -28,6 +28,26 @@ if TYPE_CHECKING:
 API = api_endpoint.API_PREFIX
 
 
+@pytest.mark.parametrize(
+    ("raw", "rendered"),
+    [
+        ("`a * b ** c`", "<code>a * b ** c</code>"),
+        ("`x < y > z` and `a -- b`", "<code>x &lt; y &gt; z</code> and <code>a -- b</code>"),
+        ("**bold `a*b`** *soft*", "<strong>bold <code>a*b</code></strong> <em>soft</em>"),
+        ("`unmatched **bold**", "`unmatched <strong>bold</strong>"),
+        (
+            "<script>**bold**</script> *soft*",
+            "&lt;script&gt;<strong>bold</strong>&lt;/script&gt; <em>soft</em>",
+        ),
+        ("`<script>**x**</script>`", "<code>&lt;script&gt;**x**&lt;/script&gt;</code>"),
+        ("## Heading `a*b`\nbody", '<b class="mdh">Heading <code>a*b</code></b>body'),
+        ("\x00code0\x00 `literal*`", "\x00code0\x00 <code>literal*</code>"),
+    ],
+)
+def test_inline_keeps_code_literal(raw: str, rendered: str) -> None:
+    assert api_endpoint.inline(raw) == rendered
+
+
 @dataclass(frozen=True)
 class RunningApi:
     base: str
@@ -119,6 +139,31 @@ def test_board_and_status_reads(api: RunningApi) -> None:
     assert health_code == 200
     assert health["ok"] is True
     assert health["restarting"] is False
+
+
+def test_board_payload_keeps_literal_subject_and_raw_detail(api: RunningApi) -> None:
+    raw = "`a * b ** c` & <literal>"
+    code, _ = request_json(
+        api.base + API + "/cards",
+        token=api_endpoint.CLI_TOKEN,
+        revision=0,
+        body={"subject": "x < y > z", "state": "backlog", "detail": raw},
+    )
+    assert code == 200
+    code, _ = request_json(
+        api.base + API + "/cards/1/comment",
+        token=api_endpoint.CLI_TOKEN,
+        revision=1,
+        body={"text": raw},
+    )
+    assert code == 200
+    code, board = request_json(api.base + API + "/board")
+    assert code == 200
+    item = next(item for lane in board["lanes"] for item in lane["items"])
+    assert item["subject"] == "x < y > z"
+    assert item["detailRaw"] == raw
+    assert item["detail"] == "<code>a * b ** c</code> &amp; &lt;literal&gt;"
+    assert item["comments"][0]["text"] == item["detail"]
 
 
 @pytest.fixture

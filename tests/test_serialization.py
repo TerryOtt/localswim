@@ -41,6 +41,39 @@ def test_save_load_round_trip(tmp_path: pathlib.Path) -> None:
     assert board_state.load(path).to_json() == original.to_json()
 
 
+@pytest.mark.parametrize("value", [["bot"], {"id": "bot"}, True, 1, "unknown"])
+def test_selected_default_owner_refuses_with_field_context_without_rewriting(
+    tmp_path: pathlib.Path, value: object
+) -> None:
+    path = tmp_path / "board.json"
+    raw = editable_json(saved_board(path))
+    raw["defaultOwner"] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    previous = path.read_bytes()
+
+    with pytest.raises(board_state.BoardError, match="defaultOwner names unknown user"):
+        board_state.load(path)
+
+    assert path.read_bytes() == previous
+
+
+@pytest.mark.parametrize("value", [None, False, 0, "", [], {}])
+def test_falsy_default_owner_preserves_cli_fallback(tmp_path: pathlib.Path, value: object) -> None:
+    raw = editable_json(saved_board(tmp_path / "board.json"))
+    raw["defaultOwner"] = value
+    assert board_state.Board.from_json(raw, "falsy default owner").default_owner == "bot"
+    del raw["defaultOwner"]
+    assert board_state.Board.from_json(raw, "omitted default owner").default_owner == "bot"
+
+
+def test_default_owner_accepts_user_without_actor_role(tmp_path: pathlib.Path) -> None:
+    raw = editable_json(saved_board(tmp_path / "board.json"))
+    raw["users"].append({"id": "Owner", "label": "Owner", "class": "human", "color": "blue"})
+    raw["defaultOwner"] = "Owner"
+    board = board_state.Board.from_json(raw, "owner only user")
+    assert (board.browser_user, board.cli_user, board.default_owner) == ("terry", "bot", "Owner")
+
+
 @pytest.mark.parametrize("field", ["id", "label", "class", "color"])
 @pytest.mark.parametrize("value", [1, 1.5, True, False, None, [], {}, ""])
 def test_malformed_user_fields_are_refused_without_rewriting(

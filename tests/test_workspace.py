@@ -3,6 +3,8 @@
 import base64
 import contextlib
 import datetime as dt
+import http.client
+import io
 import json
 import os
 import stat
@@ -29,6 +31,256 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
 
 API = board_state.API_PREFIX
+
+
+class _FiniteResponseStream(io.BytesIO):
+    """Track explicit reads, with short reads even below the HTTP framing layer."""
+
+    def __init__(self, raw: bytes) -> None:
+        super().__init__(raw)
+        self.requests: list[int] = []
+
+    def read(self, size: int | None = -1) -> bytes:
+        assert size is not None
+        assert size > 0
+        self.requests.append(size)
+        return super().read(min(size, 3))
+
+
+class _FiniteResponseSocket:
+    """A finite raw HTTP response without a real upstream listener."""
+
+    def __init__(self, raw: bytes) -> None:
+        self.stream = _FiniteResponseStream(raw)
+
+    def makefile(self, mode: str) -> io.BytesIO:
+        assert mode == "rb"
+        return self.stream
+
+
+def _finite_response(headers: bytes, body: bytes, status: int = 200) -> http.client.HTTPResponse:
+    response = http.client.HTTPResponse(
+        cast(
+            "Any",
+            _FiniteResponseSocket(
+                f"HTTP/1.1 {status} Result\r\n".encode() + headers + b"\r\n" + body
+            ),
+        )
+    )
+    response.begin()
+    return response
+
+
+def test_upstream_entity_numeric_contract() -> None:
+    assert workspace.MAX_UPSTREAM_ENTITY_BYTES == 100663296
+    assert workspace.MAX_ATTACHMENT_ENTITY_BYTES == 10485760
+    assert service_ownership.MAX_METADATA_BYTES == 65536
+
+
+@pytest.mark.parametrize("write", [False, True])
+@pytest.mark.parametrize("status", [200, 201, 400, 401, 412, 500])
+@pytest.mark.parametrize(
+    ("tail", "attachment"),
+    [
+        ("board", False),
+        ("board/", False),
+        ("status", False),
+        ("cards/card/attachments/id", True),
+        ("cards/card/attachments/id/", True),
+        ("cards/a%2Fb/%61ttachments/id", True),
+        ("%63ards/card/attachments/id", False),
+        ("cards//attachments/id", False),
+        ("cards/card/attachments/", False),
+        ("cards/card/attachment/id", False),
+        ("cards/card/attachments/id/extra", False),
+        ("image.png", False),
+    ],
+)
+def test_upstream_entity_route_classes(
+    tail: str, status: int, *, write: bool, attachment: bool
+) -> None:
+    expected = (
+        workspace.MAX_ATTACHMENT_ENTITY_BYTES
+        if attachment and status == 200 and not write
+        else workspace.MAX_UPSTREAM_ENTITY_BYTES
+    )
+    assert workspace._upstream_entity_limit(tail, status, write=write) == expected  # noqa: SLF001
+
+
+@pytest.mark.parametrize("size", [15, 16, 17])
+@pytest.mark.parametrize("framing", ["eof", "length", "chunked"])
+def test_upstream_entity_inclusive_and_bounded(
+    size: int, framing: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"x" * size
+    headers = b""
+    body = payload
+    if framing == "length":
+        headers = f"Content-Length: {size}\r\n".encode()
+    if framing == "chunked":
+        headers = b"Transfer-Encoding: chunked\r\n"
+        body = f"{size:x}\r\n".encode() + payload + b"\r\n0\r\n\r\n"
+    response = _finite_response(headers, body)
+    stream = cast("_FiniteResponseStream", response.fp)
+    original = response.read
+    requests: list[int] = []
+    received = 0
+
+    def short_read(amount: int) -> bytes:
+        nonlocal received
+        assert 0 < amount <= 17 - received
+        requests.append(amount)
+        chunk = original(min(amount, 3))
+        received += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(response, "read", short_read)
+    if size > 16:
+        with pytest.raises(ValueError, match=workspace.UPSTREAM_RESPONSE_REJECTED):
+            workspace._read_upstream_entity(response, 16)  # noqa: SLF001
+        if framing == "length":
+            assert not requests
+    else:
+        assert workspace._read_upstream_entity(response, 16) == payload  # noqa: SLF001
+    assert received <= 17
+    assert all(0 < amount <= 17 for amount in stream.requests)
+    response.close()
+
+
+@pytest.mark.parametrize(
+    ("headers", "body", "expected"),
+    [
+        (b"Content-Length: 2\r\n", b"{}", b"{}"),
+        (b"Content-Length: \t0002 \t\r\n", b"{}", b"{}"),
+        (b"Content-Length: 3\r\n", b"{}", None),
+        (b"Content-Length: 2\r\nContent-Length: 2\r\n", b"{}", None),
+        (b"Content-Length: 2\r\nContent-Length: 3\r\n", b"{}", None),
+        (b"Content-Length: 2, 2\r\n", b"{}", None),
+        (b"Content-Length: +2\r\n", b"{}", None),
+        (b"Content-Length: -2\r\n", b"{}", None),
+        (b"Content-Length: 2x\r\n", b"{}", None),
+        (b"Content-Length: \r\n", b"{}", None),
+        (b"Content-Length: " + b"9" * 1000 + b"\r\n", b"{}", None),
+        (b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n", b"{}", None),
+        (b"Transfer-Encoding: gzip\r\n", b"{}", None),
+        (b"Transfer-Encoding: gzip, chunked\r\n", b"{}", None),
+        (b"Transfer-Encoding: chunked;foo=bar\r\n", b"{}", None),
+        (b"Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n", b"{}", None),
+        (b"Transfer-Encoding: chunked\r\n", b"2\r\n{}\r\n0\r\n\r\n", b"{}"),
+        (b"Transfer-Encoding: Chunked \t\r\n", b"2\r\n{}\r\n0\r\n\r\n", b"{}"),
+        (b"Transfer-Encoding: chunked\r\n", b'2;x="a b"\r\n{}\r\n0\r\nX-Note: ok\r\n\r\n', b"{}"),
+        (b"Transfer-Encoding: chunked\r\n", b"Z\r\n{}\r\n0\r\n\r\n", None),
+        (b"Transfer-Encoding: chunked\r\n", b"2\r\n{", None),
+        (b"Transfer-Encoding: chunked\r\n", b"2\r\n{}XX0\r\n\r\n", None),
+        (b"Transfer-Encoding: chunked\r\n", b"2\r\n{}\r\n", None),
+        (b"Transfer-Encoding: chunked\r\n", b"0\r\n", None),
+        (b"Transfer-Encoding: chunked\r\n", b"0\r\ninvalid trailer\r\n\r\n", None),
+        (b"Content-Encoding: identity\r\n", b"{}", b"{}"),
+        (b"Content-Encoding: IDENTITY \t\r\n", b"{}", b"{}"),
+        (b"Content-Encoding: gzip\r\n", b"{}", None),
+        (b"Content-Encoding: identity, identity\r\n", b"{}", None),
+        (b"Content-Encoding: identity\r\nContent-Encoding: identity\r\n", b"{}", None),
+    ],
+)
+def test_upstream_entity_raw_framing(headers: bytes, body: bytes, expected: bytes | None) -> None:
+    response = _finite_response(headers, body)
+    if expected is None:
+        with pytest.raises(ValueError, match=workspace.UPSTREAM_RESPONSE_REJECTED):
+            workspace._read_upstream_entity(response, 16)  # noqa: SLF001
+    else:
+        assert workspace._read_upstream_entity(response, 16) == expected  # noqa: SLF001
+    response.close()
+
+
+@pytest.mark.parametrize("status", [200, 204, 304])
+@pytest.mark.parametrize(
+    "headers",
+    [
+        b"Content-Length : 2\r\n",
+        b"Content-Length: 2\r\nContent-Length : 999\r\n",
+        b"Content-Length: 2\r\nMalformed header\r\nTransfer-Encoding: chunked\r\n",
+    ],
+)
+def test_upstream_header_parser_defects_refused_before_read(
+    headers: bytes, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _finite_response(headers, b"{}sentinel-private-body", status) as response:
+        assert response.headers.defects
+
+        def forbidden_read(_amount: int) -> bytes:
+            pytest.fail("defective headers must be refused before any body read")
+
+        monkeypatch.setattr(response, "read", forbidden_read)
+        with pytest.raises(ValueError, match=workspace.UPSTREAM_RESPONSE_REJECTED):
+            workspace._read_upstream_entity(response, 16)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("extension", "accepted"),
+    [
+        (b'"\x80\xff"', True),
+        (b'"\\\x80\\\xff"', True),
+        (b'"a\\"b"', True),
+        (b'"\x00"', False),
+        (b'"\\\x00"', False),
+        (b'"\x7f"', False),
+        (b'"\\\x7f"', False),
+        (b'"\r\n"', False),
+        (b'"unfinished', False),
+        (b'"dangling\\"', False),
+    ],
+)
+def test_upstream_chunk_extension_quoted_octets(extension: bytes, *, accepted: bool) -> None:
+    body = b"2;x=" + extension + b"\r\n{}\r\n0\r\n\r\n"
+    with _finite_response(b"Transfer-Encoding: chunked\r\n", body) as response:
+        if accepted:
+            assert workspace._read_upstream_entity(response, 16) == b"{}"  # noqa: SLF001
+        else:
+            with pytest.raises(ValueError, match=workspace.UPSTREAM_RESPONSE_REJECTED):
+                workspace._read_upstream_entity(response, 16)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("status", [204, 304])
+@pytest.mark.parametrize("length", [b"", b"Content-Length: 9999999999999999999999\r\n"])
+def test_upstream_entity_no_body_semantics(
+    status: int, length: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = _finite_response(length, b"unframed surplus", status)
+
+    def forbidden_read(_amount: int) -> bytes:
+        pytest.fail("no-body response must not read an entity")
+
+    monkeypatch.setattr(response, "read", forbidden_read)
+    assert workspace._read_upstream_entity(response, 16) == b""  # noqa: SLF001
+    response.close()
+
+
+@pytest.mark.parametrize("status", [204, 304])
+def test_upstream_entity_no_body_still_validates_headers(status: int) -> None:
+    with (
+        _finite_response(b"Content-Length: 0\r\nContent-Length: 0\r\n", b"", status) as response,
+        pytest.raises(ValueError, match=workspace.UPSTREAM_RESPONSE_REJECTED),
+    ):
+        workspace._read_upstream_entity(response, 16)  # noqa: SLF001
+
+
+def test_upstream_entity_underdeclared_surplus_is_not_visible() -> None:
+    response = _finite_response(b"Content-Length: 2\r\n", b"{}hidden surplus")
+    assert workspace._read_upstream_entity(response, 16) == b"{}"  # noqa: SLF001
+    response.close()
+    # The framing layer hides surplus; the proxy must close, never pool, the connection.
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
+def test_upstream_entity_preserves_json_unicode_encoding(encoding: str) -> None:
+    payload = '{"name":"é"}'.encode(encoding)
+    with _finite_response(f"Content-Length: {len(payload)}\r\n".encode(), payload) as response:
+        blob = workspace._read_upstream_entity(response, 256)  # noqa: SLF001
+    handler = object.__new__(workspace.WorkspaceHandler)
+    decorated = handler._decorate_board(
+        blob, "board", 200, "key", workspace.Endpoint(1, "unused", "local CSS")
+    )
+    assert json.loads(decorated) == {"name": "é", "userCSS": "local CSS"}
 
 
 @pytest.mark.parametrize("route", ["browser-session", "status"])
@@ -156,6 +408,169 @@ def gateway(tmp_path: pathlib.Path) -> Iterator[RunningWorkspace]:
 def catalog_boards(instance: workspace.Workspace) -> list[dict[str, Any]]:
     """Narrow the JSON catalog at the test boundary."""
     return cast("list[dict[str, Any]]", instance.catalog()["boards"])
+
+
+@pytest.mark.parametrize(
+    ("tail", "write", "upstream_status", "size", "expected"),
+    [
+        ("board", False, 200, 31, 200),
+        ("board?refresh=1", False, 200, 32, 200),
+        ("board", False, 200, 33, 502),
+        ("status", False, 200, 31, 200),
+        ("status?refresh=1", False, 200, 32, 200),
+        ("status", False, 200, 33, 502),
+        ("status", False, 200, 65537, 200),
+        ("board?malformed=1", False, 200, 2, 502),
+        ("cards/card/attachments/id", False, 200, 15, 200),
+        ("cards/card/%61ttachments/id/?download=1", False, 200, 16, 200),
+        ("cards/card/attachments/id", False, 200, 17, 502),
+        ("cards/card/attachments/id", False, 404, 32, 404),
+        ("cards/card/attachments/id", True, 200, 32, 200),
+        ("board", True, 200, 32, 200),
+        ("board/", False, 200, 32, 200),
+        ("image.png", False, 200, 32, 200),
+        ("%63ards/card/attachments/id", False, 200, 32, 200),
+        ("cards/card/attachment/id", False, 200, 32, 200),
+    ],
+)
+def test_gateway_entity_route_boundaries(  # noqa: PLR0913 -- explicit route/status/size matrix
+    gateway: RunningWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tail: str,
+    upstream_status: int,
+    size: int,
+    expected: int,
+    write: bool,
+) -> None:
+    monkeypatch.setattr(workspace, "MAX_UPSTREAM_ENTITY_BYTES", 65537 if size == 65537 else 32)
+    monkeypatch.setattr(workspace, "MAX_ATTACHMENT_ENTITY_BYTES", 16)
+    payload = b"{}" + b" " * (size - 2)
+    if "malformed" in tail:
+        payload = b"\xff\xff"
+
+    class Handler(workspace.http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 -- HTTP protocol
+            if self.command == "POST":
+                self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(upstream_status)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        do_POST = do_GET  # noqa: N815 -- HTTP handler protocol
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    server = workspace.http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    closed: list[int] = []
+    original_close = http.client.HTTPConnection.close
+
+    def close(connection: http.client.HTTPConnection) -> None:
+        if connection.port == server.server_address[1]:
+            closed.append(connection.port)
+        original_close(connection)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "close", close)
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint:
+        return workspace.Endpoint(server.server_address[1], "upstream-secret", "")
+
+    monkeypatch.setattr(gateway.instance, "_existing", existing)
+    try:
+        code, result = request_json(
+            board_route(gateway.base, "alpha/board", tail),
+            token=gateway.instance.token if write else None,
+            revision=0 if write else None,
+            body={} if write else None,
+        )
+        assert code == expected
+        assert closed
+        if expected == 502:
+            assert result == {"error": workspace.UPSTREAM_RESPONSE_REJECTED}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["oversized", "headers", "malformed-name", "hidden-framing", "disconnect", "exception"],
+)
+def test_gateway_committed_post_response_failure_is_uncertain(
+    gateway: RunningWorkspace, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    persisted = gateway.root / "command-receipt.txt"
+    persisted.write_text("0", encoding="utf-8")
+    observed: list[tuple[str | None, str | None]] = []
+    monkeypatch.setattr(workspace, "MAX_UPSTREAM_ENTITY_BYTES", 32)
+
+    class Handler(workspace.http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 -- HTTP protocol
+            self.rfile.read(int(self.headers["Content-Length"]))
+            observed.append((self.headers.get("Authorization"), self.headers.get("If-Match")))
+            persisted.write_text(str(int(persisted.read_text()) + 1), encoding="utf-8")
+            if failure in ("disconnect", "exception"):
+                return
+            self.send_response(200)
+            if failure == "headers":
+                self.send_header("Content-Length", "2")
+                self.send_header("Content-Length", "2")
+            elif failure == "malformed-name":
+                self.send_header("Content-Length", "2")
+                self.send_header("Content-Length ", "999")
+            elif failure == "hidden-framing":
+                self.send_header("Content-Length", "2")
+                self.send_header("Malformed header\r\nTransfer-Encoding", "chunked")
+            else:
+                self.send_header("Content-Length", "33")
+            self.end_headers()
+            self.wfile.write(b"sentinel-private-body")
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    server = workspace.http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint:
+        return workspace.Endpoint(server.server_address[1], "upstream-secret", "")
+
+    monkeypatch.setattr(gateway.instance, "_existing", existing)
+    original_response = http.client.HTTPConnection.getresponse
+
+    if failure == "exception":
+        # Consume the committed request's disconnect, then expose a private transport exception.
+        def private_exception(connection: http.client.HTTPConnection) -> http.client.HTTPResponse:
+            try:
+                return original_response(connection)
+            except http.client.HTTPException as exc:
+                raise OSError("sentinel-exception upstream-secret") from exc
+
+        monkeypatch.setattr(http.client.HTTPConnection, "getresponse", private_exception)
+    try:
+        code, result = request_json(
+            board_route(gateway.base, "alpha/board", "cards/card/attachments/id"),
+            token=gateway.instance.token,
+            revision=7,
+            body={"subject": "one dispatch"},
+        )
+        assert code == 502
+        assert result == {"error": workspace.POST_OUTCOME_UNKNOWN}
+        assert persisted.read_text() == "1"
+        assert observed == [("Bearer upstream-secret", '"revision-7"')]
+        assert "sentinel" not in json.dumps(result)
+        assert "upstream-secret" not in json.dumps(result)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_discovery_excludes_configuration_and_attachment_files(tmp_path: pathlib.Path) -> None:
@@ -691,7 +1106,7 @@ def test_discovery_recovery_never_replays_proxy_post(
             revision=0,
             body={"id": "one", "subject": "One mutation", "state": "backlog"},
         )
-        assert code == (503 if disconnect else 200)
+        assert code == (502 if disconnect else 200)
         assert posts == 1
     finally:
         server.shutdown()
