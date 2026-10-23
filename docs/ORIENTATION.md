@@ -949,6 +949,14 @@ Important UI mechanics:
   text/background pair exceeds the WCAG enhanced text-contrast requirement of 7:1.
 - Derive draggable edges, creatable lanes, labels, priorities, actors, and colors from
   server data rather than duplicating policy in JavaScript.
+- Card-title native buttons expose names and visible focus. Tab/Enter/Space open
+  the intended drawer once. Capture keyed opener focus around board repaint and
+  restore the same visible card after reordering; missing/filtered cards fall back
+  to search. Closing the drawer returns to its source opener when visible. Preserve
+  unrelated focus, pointer dragging and independent nested actions without adding
+  an ARIA grid. Production-handler tests, real-browser keyboard/focus/drag checks
+  and bounded accessibility-tree observations remain distinct from screen-reader
+  speech or whole-site accessibility certification.
 - Validate the actual drop callback's payload before submitting a move. Contain
   request/read errors, distinguish refusal from unknown outcome, always clear drag
   decoration, and contain the final authoritative refresh. Never replay the POST.

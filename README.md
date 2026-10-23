@@ -133,6 +133,12 @@ updates. If a preference cannot be saved, the page reports that it applies only
 to the current page. Permission requests remain tied to your opt-in gesture.
 A failed delivery is not attempted again on every unchanged repaint.
 
+Card titles are keyboard buttons. Tab to a title and press Enter or Space to open
+that card. The drawer receives focus, and closing it returns focus to the visible
+source card. Board repaints preserve card focus by stable identity, including
+reordering. If the card disappears or is filtered out, focus returns to card search.
+Pointer dragging and independent controls inside a card remain separate actions.
+
 The English application chrome declares its language. Restart warnings and the
 Add card, Save description, and Comment buttons use text/background pairs with
 at least 4.5:1 contrast, while configured accent colors remain unchanged for

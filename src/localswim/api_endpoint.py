@@ -2030,6 +2030,9 @@ PAGE = """<!doctype html>
           margin-bottom: 7px; box-shadow: 0 1px 1px rgba(9,30,66,.25);
           display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
   .card.dragging { opacity: .4; }
+  .card-open { appearance: none; border: 0; padding: 0; background: transparent;
+               color: inherit; font: inherit; text-align: left; cursor: pointer; width: 100%; }
+  .card-open:focus-visible { outline: 2px solid #172B4D; outline-offset: 3px; }
   /* **A card that MOVED glides from where it was.** Terry asked to watch Claude's
      moves happen: "a motion animation would be fun af for me to watch in realtime."
      The transform is set by the FLIP pass in paint(); this rule only says how it
@@ -2469,7 +2472,7 @@ edit leaves the current process running and reports the failing check here."></s
   <div id="scrim"></div>
   <aside id="panel">
     <header>
-      <button id="close" title="Close">&times;</button>
+      <button id="close" type="button" title="Close card" aria-label="Close card">&times;</button>
       <div class="head">
         <!-- **A SELECT rather than a toggle, and the count is the reason.** Owner has
              exactly two values so a click that flips it is honest; priority has six,
@@ -3304,7 +3307,8 @@ function openCard(id) {
   // clear at the end of this function wiped Terry's draft on somebody else's write.
   // The comparison MUST happen BEFORE openId is reassigned, or every call looks like
   // a refresh and a genuinely new card inherits the previous card's text.
-  if (openId !== id) {
+  const opening = openId !== id;
+  if (opening) {
     const box = document.getElementById('say');
     if (openId) drafts[openId] = box.value;
     box.value = drafts[id] || '';
@@ -3440,6 +3444,7 @@ function openCard(id) {
 
   document.getElementById('scrim').classList.add('show');
   document.getElementById('panel').classList.add('show');
+  if (opening) document.getElementById('close').focus();
   // **Nothing touches the textarea here.** The element is never replaced -- the
   // comment list is a sibling -- so leaving its value alone also preserves focus
   // and caret position through a repaint, for free.
@@ -3449,15 +3454,13 @@ function closeCard() {
   // **Escape is one keypress away at all times.** Dropping the draft on close is the
   // same defect as dropping it on repaint, just slower to notice.
   if (openId) drafts[openId] = document.getElementById('say').value;
-  const leavingSubject = editing === 'subject'
-    && (document.activeElement === document.getElementById('p-subject-edit')
-        || document.activeElement === document.body);
+  const source = openId;
   closeEditors(false);
   relationshipDraft = null;
   openId = null;
   document.getElementById('scrim').classList.remove('show');
   document.getElementById('panel').classList.remove('show');
-  if (leavingSubject) document.getElementById('find').focus();
+  if (source) restoreCardFocus(source);
 }
 
 document.getElementById('close').addEventListener('click', closeCard);
@@ -3791,7 +3794,7 @@ function card(item) {
   d.dataset.state = item.state;
   d.innerHTML = '<div class="head"><span class="pri"></span>'
     + '<span class="tix"></span></div>'
-    + '<span class="subject"></span>'
+    + '<button type="button" class="subject card-open"></button>'
     + (item.comments.length ? '<span class="marks"></span>' : '');
   // **No leading hash.** Display only -- find() still takes 0003, #0003, 3 or the
   // slug, because he may paste a hash from an older message or a commit.
@@ -3801,7 +3804,9 @@ function card(item) {
   pri.className = 'pri ' + item.priority;
   pri.title = item.priorityLabel;
   // Set as text, so a stray angle bracket in a subject cannot become markup.
-  d.querySelector('.subject').textContent = item.subject;
+  const action = d.querySelector('.card-open');
+  action.textContent = item.subject;
+  action.setAttribute('aria-label', 'Open card ' + item.ticket + ': ' + item.subject);
   // A card with discussion on it should say so without being opened. At 11px on
   // the top row Terry could not see it -- "it's too small for me to see" -- so it
   // is 22px on its own bottom row now, and absent entirely when there is nothing
@@ -3834,14 +3839,28 @@ function card(item) {
     count.querySelector('.n').textContent = files.length;
     d.append(count);
   }
-  d.addEventListener('click', () => openCard(item.id));
+  // One bubbling listener handles the native button and pointer clicks on the face.
+  // Independent controls remain siblings, never nested in the open button.
+  const independentControl = target => {
+    const control = target.closest('button, a, input, select, textarea, [role="button"]');
+    return control && control !== action;
+  };
+  let dragged = false;
+  d.addEventListener('click', ev => {
+    if (!dragged && !independentControl(ev.target)) openCard(item.id);
+  });
   d.addEventListener('dragstart', ev => {
+    if (independentControl(ev.target)) { ev.preventDefault(); return; }
+    dragged = true;
     ev.dataTransfer.setData('text/plain',
       JSON.stringify({id: item.id, from: item.state}));
     ev.dataTransfer.effectAllowed = 'move';
     d.classList.add('dragging');
   });
-  d.addEventListener('dragend', () => d.classList.remove('dragging'));
+  d.addEventListener('dragend', () => {
+    d.classList.remove('dragging');
+    setTimeout(() => { dragged = false; }, 0);
+  });
   return d;
 }
 
@@ -4234,7 +4253,24 @@ function applyFilter() {
   findn.textContent = total ? total + ' found' : 'no match';
 }
 
+// Card IDs survive reordering; positions and old DOM nodes do not. If an action
+// disappears (removal, archive, old-card hiding or search), return to search.
+function focusedCardId() {
+  const active = document.activeElement;
+  if (!active || !active.matches('.card-open')) return null;
+  return active.closest('.card').dataset.id;
+}
+
+function restoreCardFocus(id) {
+  const board = document.getElementById('board');
+  const face = board.querySelector('.card[data-id="' + CSS.escape(id) + '"]');
+  const action = face && !face.classList.contains('nomatch')
+    ? face.querySelector('.card-open') : null;
+  (action || document.getElementById('find')).focus({preventScroll: true});
+}
+
 function paint() {
+  const focusId = focusedCardId();
   const laneScroll = window.WorkspaceUI ? window.WorkspaceUI.scrolls() : null;
   // The project name is board data, not page-build data. Update both title surfaces on
   // every changed-board paint so `--set-project` reaches an already-open tab without a
@@ -4262,6 +4298,7 @@ function paint() {
   // time Terry moved a card or Claude wrote a comment -- 400 ms later, with his query
   // still sitting in the box. Card #0061.
   applyFilter();
+  if (focusId) restoreCardFocus(focusId);
 
   const banner = document.getElementById('banner');
   banner.classList.toggle('show', !!data.error);

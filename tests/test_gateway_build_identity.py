@@ -47,7 +47,72 @@ function section(source,start,end) {
   if(a<0||b<0)throw Error('Production helper boundary not found: '+start);
   return source.slice(a,b);
 }
-if(input.mode==='drop'){
+if(input.mode==='card-focus'){
+  const assert=require('assert/strict');let opened=[],cards=[],rendered=[];
+  function node(tag){
+    const n={tag,dataset:{},listeners:{},children:[],attrs:{},className:'',
+      classList:{values:new Set(),add(k){this.values.add(k)},remove(k){this.values.delete(k)},
+        contains(k){return this.values.has(k)},toggle(k,v){v?this.add(k):this.remove(k)}},
+      setAttribute(k,v){this.attrs[k]=v},addEventListener(k,fn){this.listeners[k]=fn},
+      focus(){context.document.activeElement=this},
+      matches(s){return s==='.card-open'&&this===this.face?.action},
+      closest(s){return s==='.card'?this.face:(this.tag==='button'?this:null)},
+      append(...c){this.children.push(...c)},appendChild(c){this.children.push(c)},
+      prepend(c){this.children.unshift(c)},replaceChildren(){this.children=[]},
+      querySelector(s){if(s==='.card-open')return this.action;
+        if(!this.parts[s])this.parts[s]=node('span');return this.parts[s]},parts:{}};
+    Object.defineProperty(n,'innerHTML',{set(){n.action=node('button');n.action.face=n}});
+    return n;
+  }
+  elements.clear();context.document.body=node('body');context.document.activeElement=context.document.body;
+  context.document.createElement=node;
+  context.document.getElementById=id=>{
+    if(!elements.has(id))elements.set(id,node(id));return elements.get(id)};
+  const get=context.document.getElementById,board=get('board');
+  board.querySelector=s=>rendered.find(c=>s.includes('"'+c.dataset.id+'"'))||null;
+  board.replaceChildren=()=>{rendered=[];
+    if(context.document.activeElement.face)context.document.activeElement=context.document.body};
+  board.appendChild=lane=>rendered.push(...lane);
+  Object.assign(context,{CSS:{escape:s=>s},setTimeout:fn=>fn(),attachmentImage:()=>false,
+    laneEl:lane=>lane.items.map(item=>vm.runInContext('card(testItem)',Object.assign(context,{testItem:item}))),
+    userLabel:()=>'',measureCards:()=>new Map(),alignCardStarts(){},playFlip(){},announce(){},
+    closeEditors(){},relationshipDraft:null,openCard:id=>opened.push(id)});
+  vm.runInContext(section(input.page,'function card(', '// **ONE place decides'),context);
+  vm.runInContext(section(input.page,'// Card IDs survive reordering;',
+    '// ---- proof of life'),context);
+  context.applyFilter=()=>{
+    for(const c of rendered)if(c.dataset.id===context.filterOut)c.classList.add('nomatch')};
+  const item=id=>({id,ticket:'#0001',subject:'Title '+id,state:'ready',
+    priority:'P3',comments:[],draggable:true});
+  context.data={lanes:[{items:[item('a'),item('b')]}]};vm.runInContext('paint()',context);
+  const a=rendered[0];assert.equal(a.action.tag,'button');
+  assert.equal(a.action.attrs['aria-label'],'Open card #0001: Title a');
+  a.listeners.click({target:a.action});assert.deepEqual(opened,['a']);opened=[];
+  a.listeners.click({target:node('button')});assert.equal(opened.length,0);
+  a.action.focus();context.data.lanes[0].items.reverse();vm.runInContext('paint()',context);
+  assert.equal(context.document.activeElement,rendered[1].action);assert.equal(opened.length,0);
+  context.data.lanes[0].items=[item('b')];vm.runInContext('paint()',context);
+  assert.equal(context.document.activeElement,get('find'));
+  const b=rendered[0];b.action.focus();context.filterOut='b';
+  vm.runInContext('paint()',context);assert.equal(context.document.activeElement,get('find'));
+  get('say').focus();vm.runInContext('paint()',context);
+  assert.equal(context.document.activeElement,get('say'));
+  context.openId='b';vm.runInContext(section(input.page,'function closeCard()',
+    "document.getElementById('close').addEventListener"),context);
+  vm.runInContext('closeCard()',context);assert.equal(context.document.activeElement,get('find'));
+  context.data.lanes[0].items=[item('a')];vm.runInContext('paint()',context);
+  context.openId='a';get('close').focus();vm.runInContext('closeCard()',context);
+  assert.equal(context.document.activeElement,rendered[0].action);
+  const face=rendered[0],transfer={setData(k,v){this.value=JSON.parse(v)}};
+  face.listeners.dragstart({target:face,dataTransfer:transfer});
+  assert.equal(transfer.value.id,'a');assert.equal(transfer.effectAllowed,'move');
+  face.listeners.click({target:face});assert.equal(opened.length,0);
+  face.listeners.dragend();face.listeners.click({target:face});assert.deepEqual(opened,['a']);
+  let prevented=false;face.listeners.dragstart({target:node('button'),
+    preventDefault(){prevented=true}});
+  assert.equal(prevented,true);
+  process.stdout.write(JSON.stringify({verified:true}));
+}else if(input.mode==='drop'){
   const assert=require('assert/strict');
   function node(){return {dataset:{},listeners:{},classList:{values:new Set(['over','deny']),
     add(k){this.values.add(k)},remove(k){this.values.delete(k)}},
@@ -93,7 +158,7 @@ if(input.mode==='drop'){
     element(id).replaceChildren=()=>{};element(id).appendChild=()=>{};
   }
   Object.assign(context,{userLabel:()=> 'Synthetic reader',measureCards:()=>new Map(),
-    alignCardStarts(){},playFlip(){},applyFilter(){}});
+    alignCardStarts(){},playFlip(){},applyFilter(){},focusedCardId:()=>null});
   context.document.createElement=()=>({});
   vm.runInContext(section(input.page,'function paint()', '\n// ---- proof of life'),context);
   if(input.gesture){element('alerts').checked=true;await listeners.change()}
@@ -325,6 +390,11 @@ def browser_helpers(**values: Any) -> Any:  # noqa: ANN401 - JSON browser test b
         check=True,
     )
     return json.loads(result.stdout)
+
+
+def test_card_native_action_keyed_repaint_close_and_drag_handlers() -> None:
+    """Actual handlers with narrow DOM seams; native keyboard is browser evidence."""
+    assert browser_helpers(mode="card-focus")["verified"] is True
 
 
 def test_drawer_attachment_identity_and_subject_keyboard_handlers() -> None:

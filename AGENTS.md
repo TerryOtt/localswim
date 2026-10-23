@@ -222,6 +222,12 @@ native board monitoring is an optional extra.
   Add card/Save description/Comment text contrast at least 4.5:1; derive action ink
   separately from the exact configured decorative accent. Do not infer content
   language or claim whole-site accessibility from these checks.
+  Render named ordinary keyboard card-opening controls with visible focus, keeping
+  the draggable face and nested controls independent. Enter and Space activate once.
+  Preserve focus by stable card identity through repaint/reordering; do not steal
+  unrelated focus. Drawer close returns to the visible source opener, with card
+  search as the documented fallback for missing or filtered cards. Keep this a
+  finite control correction, not a new ARIA grid or global keyboard scheme.
 - The Attention sidebar's Blocked, Needs Terry, and Ready for Review counts MUST use
   three fixed columns across all project rows. Zero counts leave blank reserved slots;
   they never shift another circle into the empty column. Preserve category labels and
