@@ -584,17 +584,26 @@ card regardless of its owner; transition policy alone grants movement.
 The storage sequence is designed so a reader sees the old complete snapshot or the new
 complete snapshot:
 
-1. Create `board.json.lock` with `O_CREAT | O_EXCL`.
+1. Resolve the board canonically and acquire its thread mutex and persistent
+   `board.json.transaction.lock` OS ownership under one monotonic budget.
 2. Load and validate while holding the lock.
 3. Mutate and verify the candidate.
 4. Increment the revision for a service mutation.
 5. Serialize indented UTF-8 JSON with a trailing LF to a same-directory PID temp file.
 6. Flush and `fsync` the temp file.
 7. Atomically replace the target.
-8. Remove the lock.
+8. Release OS ownership and close the owned descriptor; retain the sidecar identity.
 
-Lock acquisition waits up to one second. A lock older than ten seconds is considered
-abandoned and may be removed. Atomic replacement retries only transient Windows
+This NONWATCHED candidate replaces age-based lock stealing. Lock acquisition waits
+up to one second across thread and OS contention together, refuses same-thread
+recursion, and never infers abandonment from age or PID. The descriptor is
+noninheritable and remains held through read/body/save. Windows byte reservation
+occurs only after locking; no pre-lock racing write, truncation or pathname
+replacement is permitted. Unexpected acquisition errors and legacy `.lock` presence
+fail closed. Release is idempotent for the owned descriptor, attempts close even
+after unlock failure, and preserves the original body or save exception.
+
+Atomic replacement retries only transient Windows
 `PermissionError` failures: six attempts, 40 ms apart. Other I/O failures surface.
 Failures before replacement leave the prior snapshot in place; a failure after
 entering replacement may have committed and must not be treated as proof of rollback.
@@ -611,8 +620,20 @@ A fresh admitted read reconciles accepted board/policy memory with committed dis
 state. Preserve the original failure and any compensation diagnostics; do not
 acknowledge success or automatically retry an upload after an ambiguous failure.
 The contract is application-crash/interrupted-write safety with backups, not latest
-edit survival across power loss or hardware failure. No directory-sync or lock
-ownership redesign is implied.
+edit survival across power loss or hardware failure. No directory-sync guarantee
+or network-filesystem support is implied.
+
+`transaction_lock.py` is a dependency-free leaf. The established service and
+maintenance order remains lifecycle/startup admission, transaction ownership,
+load/body/save, then reverse release. The leaf never acquires lifecycle or publisher
+locks. Existing edit context installation and committed/unknown outcome reporting
+remain separate contracts; failed cleanup cannot justify deleting attachment bytes.
+
+This candidate is not a safe rolling replacement for legacy writers. All consumers
+of a board must be quiescent and accounted for before a separately approved cutover
+or rollback. Preserve backups, validate the concrete consumer/source inventory and
+do not retire legacy locks or migrate live boards as part of qualification. No
+candidate bytes are installed into the active shared package by this ticket.
 
 The server adds an in-process `RLock` around the filesystem lock. Two clients writing
 the same revision produce one winner and one HTTP 412 response; a stale command never

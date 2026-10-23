@@ -10,6 +10,8 @@ native board monitoring is an optional extra.
   policy checks, storage helpers, and reporting primitives.
 - `src/localswim/attachments.py` owns attachment metadata, replayable audit,
   bounded file validation, safe storage paths, and immutable file integrity.
+- `src/localswim/transaction_lock.py` owns the dependency-free persistent local
+  transaction lock, canonical thread serialization and owned-descriptor cleanup.
 - `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
@@ -41,6 +43,20 @@ native board monitoring is an optional extra.
   Do not edit, re-subset, or rename them casually.
 
 ## Safety and product invariants
+
+- This branch is a NONWATCHED transaction-ownership qualification candidate. Do
+  not copy, merge or install it into active shared source, or restart live services,
+  without concrete all-consumer quiescence/rollback preflight and explicit rollout
+  approval. Review acceptance is not operational rollout approval.
+  Keep the board-adjacent `.transaction.lock` identity persistent: no unlink,
+  truncation, pathname replacement, age takeover or PID recovery inference. Hold a
+  noninheritable descriptor through load/body/save; reserve a Windows byte only
+  after ownership. One monotonic budget covers canonical-path mutex and OS waits;
+  refuse same-thread recursion and legacy `.lock` presence. Preserve primary
+  failures while attempting unlock and close exactly for the owned descriptor.
+  Keep lifecycle/startup ownership before transaction ownership; never enter
+  lifecycle or publisher locking from the transaction primitive. Do not migrate
+  other OS lock consumers or expand filesystem/durability support.
 
 - Keep the service bound to loopback. Do not add remote exposure, external runtime
   services, or browser network dependencies without an explicit product decision.

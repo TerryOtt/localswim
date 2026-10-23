@@ -73,6 +73,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Self, cast
 
 from . import attachments as card_attachments
+from . import transaction_lock
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping, Sequence
@@ -3652,69 +3653,27 @@ def service_descriptor_path(path: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(tempfile.gettempdir()) / "claude-status" / name
 
 
-# **How long to wait for another writer, and when to call a lock abandoned.**
-# A real edit is a file read, a dict mutation and a 13 KB write -- microseconds. A
-# second of patience covers any honest contention; ten means the holder is dead.
+# One acquisition budget covers in-process and OS contention; elapsed time never
+# proves the holder is dead. OS descriptor ownership survives pauses of any length.
 LOCK_WAIT_S = 1.0
-LOCK_STALE_S = 10.0
 
 
 @contextlib.contextmanager
 def locked(path: pathlib.Path) -> Generator[None]:
-    """Hold an exclusive lock on a board for the whole read-modify-write.
+    """Hold canonical local snapshot ownership through read, body and save.
 
-    **Terry asked whether this was needed:** *"are we (do we need to?) file locking
-    as it's our 'Database'? ... if it's cheap seems like peace of mind to get atomic
-    test and set."* **It is needed, and the race is real rather than theoretical.**
-
-    **Two writers exist and both rewrite the WHOLE file.** Terry's drag goes through
-    the server's `do_POST`; Claude's edits go through `board_state.py --move`. Each loads
-    the entire board, mutates it and saves it. Overlap them and the second save
-    silently discards everything the first one did -- a lost update, and the atomic
-    rename in `save()` makes that outcome CLEANER rather than safer, because the
-    file left behind is perfectly valid and simply missing a card's move.
-
-    **`O_CREAT | O_EXCL` is the primitive**, because it is the one atomic
-    test-and-set every filesystem agrees on, including the SMB share `X:` lives on.
-    No dependency, and nothing to configure.
-
-    **A stale lock is stolen rather than waited on forever.** A process killed
-    mid-edit would otherwise wedge the board permanently, and a board that cannot be
-    written is a worse failure than the race this prevents. The holder's pid is
-    written into the file so an abandoned one can be identified.
+    The persistent board-adjacent ``.transaction.lock`` sidecar is never removed,
+    truncated or replaced. Thread serialization and OS ownership share one wait
+    budget; recursion is refused. There is no age or PID takeover. A legacy
+    ``.lock`` refuses admission and requires coordinated all-consumer quiescence.
+    Lifecycle claims precede this boundary; it never enters lifecycle/publisher
+    code. These are local filesystem guarantees, not network or power-loss claims.
     """
-    lock = path.with_name(path.name + ".lock")
-    deadline = time.monotonic() + LOCK_WAIT_S
-    while True:
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            # **Steal only a lock that is provably old.** Age is read from the lock
-            # file itself, so a live holder refreshing nothing still keeps it for
-            # LOCK_STALE_S -- far longer than any real edit takes.
-            try:
-                age = time.time() - lock.stat().st_mtime
-            except OSError:
-                continue  # It vanished between the two calls. Try again.
-            if age > LOCK_STALE_S:
-                lock.unlink(missing_ok=True)
-                continue
-            if time.monotonic() > deadline:
-                raise BoardError(
-                    f"{path.name} is locked by another writer "
-                    f"(held {age:.1f}s). Nothing was changed."
-                ) from None
-            time.sleep(0.02)
-            continue
-        try:
-            os.write(fd, str(os.getpid()).encode("ascii"))
-        finally:
-            os.close(fd)
-        break
     try:
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
+        with transaction_lock.hold(pathlib.Path(path).resolve(), LOCK_WAIT_S):
+            yield
+    except transaction_lock.LockRefusedError as exc:
+        raise BoardError(str(exc)) from exc
 
 
 @dataclass
@@ -3748,6 +3707,7 @@ def edit(
     """
     if outcome is not None:
         outcome.state = "uncommitted"
+    path = pathlib.Path(path).resolve()
     with locked(path):
         board = load(path, policy, install_context=install_context)
         yield board

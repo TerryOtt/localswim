@@ -1,5 +1,9 @@
 # localswim
 
+> This branch is a nonwatched transaction-ownership qualification candidate.
+> It is not installed in the active shared package. Adoption and rollback require
+> separate approval and coordinated quiescence of every consumer of a board.
+
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among
 boards with an Attention sidebar. It binds only to loopback and has no core runtime dependency
@@ -408,6 +412,26 @@ services without leases. Stop the service before maintenance; do not delete owne
 lock files to force access. They validate and replay the complete result before
 replacing the snapshot and increment its revision. Failure releases maintenance
 admission; the existing snapshot-save outcome rules still apply.
+
+The transaction-ownership candidate holds an operating-system lock on the persistent
+`<board>.transaction.lock` file throughout load, mutation, and save. A canonical-path
+thread mutex and the OS lock share one monotonic acquisition budget. Same-thread
+recursion is refused. The sidecar is never removed, truncated, or replaced; age and
+PID guesses cannot take ownership from a live holder. Process exit releases the OS
+lock while the same sidecar remains available to the next owner.
+
+A legacy `<board>.lock` refuses admission. This is not a rolling-upgrade protocol:
+old and new consumers use different lock names and must never write the same board
+together. Before adoption, stop and verify all board writers, offline maintenance
+clients, and other transaction consumers; preserve backups and obtain explicit
+approval for the concrete cutover. This candidate does not retire legacy locks or
+migrate live boards. Rollback also requires all consumers to be quiescent. Persistent
+transaction sidecars must not be deleted to force access.
+
+The support boundary remains local filesystems and application-crash safety with
+backups. It does not add network-filesystem, cross-host, multiuser, or power-loss
+guarantees. Snapshot outcome reporting and conservative attachment-byte retention
+remain in force even when cleanup fails after replacement.
 
 Add a lane to a stopped board with explicit creation and bidirectional move rights.
 Existing cards and their history remain in place:
