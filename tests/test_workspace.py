@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -28,7 +29,8 @@ from tests.test_cli import run_cli
 
 if TYPE_CHECKING:
     import pathlib
-    from collections.abc import Callable, Generator, Iterator
+    from collections.abc import Callable, Generator, Iterable, Iterator
+    from typing import SupportsIndex
 
 API = board_state.API_PREFIX
 
@@ -73,6 +75,7 @@ def _finite_response(headers: bytes, body: bytes, status: int = 200) -> http.cli
 
 def test_upstream_entity_numeric_contract() -> None:
     assert workspace.MAX_UPSTREAM_ENTITY_BYTES == 100663296
+    assert workspace.MAX_DECORATED_BOARD_BYTES == 100663296
     assert workspace.MAX_ATTACHMENT_ENTITY_BYTES == 10485760
     assert service_ownership.MAX_METADATA_BYTES == 65536
 
@@ -281,6 +284,224 @@ def test_upstream_entity_preserves_json_unicode_encoding(encoding: str) -> None:
         blob, "board", 200, "key", workspace.Endpoint(1, "unused", "local CSS")
     )
     assert json.loads(decorated) == {"name": "é", "userCSS": "local CSS"}
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_decorated_board_final_escaped_output_limit(
+    monkeypatch: pytest.MonkeyPatch, offset: int
+) -> None:
+    key = urllib.parse.quote("long 'é/😀" * 20, safe="")
+    css = "body::before {content: 'é😀\\\"';}" * 3
+    url = API + "/cards/card/attachments/id"
+    value = {"name": "é'😀", "files": [{"url": url}] * 8, "other": url}
+    source = json.dumps(value, ensure_ascii=False).encode()
+    expected = json.dumps(
+        {
+            **value,
+            "files": [{"url": workspace.BOARD_PREFIX + key + url.removeprefix(API)}] * 8,
+            "userCSS": css,
+        }
+    ).encode()
+    assert len(source) < len(expected) - 1
+    monkeypatch.setattr(workspace, "MAX_DECORATED_BOARD_BYTES", len(expected) + offset)
+    handler = object.__new__(workspace.WorkspaceHandler)
+    endpoint = workspace.Endpoint(1, "unused", css)
+    if offset < 0:
+        with pytest.raises(ValueError, match=workspace.UPSTREAM_RESPONSE_REJECTED):
+            handler._decorate_board(source, "board", 200, key, endpoint)
+    else:
+        assert handler._decorate_board(source, "board", 200, key, endpoint) == expected
+
+
+def test_decorated_encoder_stops_before_excess_append_or_later_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace, "MAX_DECORATED_BOARD_BYTES", 4)
+    monkeypatch.setattr(workspace, "UPSTREAM_READ_BYTES", 2)
+    appended: list[bytes] = []
+
+    class Buffer(bytearray):
+        def extend(self, value: Iterable[SupportsIndex]) -> None:
+            appended.append(bytes(value))
+            super().extend(value)
+
+    def tokens(_self: json.JSONEncoder, _value: object) -> Iterator[str]:
+        yield "abcdef"
+        pytest.fail("encoder must stop consuming tokens at refusal")
+
+    def forbidden_dumps(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("decoration must not serialize the complete output first")
+
+    monkeypatch.setattr(workspace, "bytearray", Buffer, raising=False)
+    monkeypatch.setattr(json.JSONEncoder, "iterencode", tokens)
+    monkeypatch.setattr(json, "dumps", forbidden_dumps)
+    with pytest.raises(ValueError, match=workspace.UPSTREAM_RESPONSE_REJECTED):
+        workspace._encode_decorated_board({})  # noqa: SLF001
+    assert appended == [b"ab", b"cd"]
+
+
+@pytest.mark.parametrize("value", [None, True, 1, "é😀", [1, {"url": API + "/cards/id"}]])
+def test_decorated_board_preserves_nondictionary_json(value: board_state.JsonValue) -> None:
+    handler = object.__new__(workspace.WorkspaceHandler)
+    expected = workspace._rebase(value, workspace.BOARD_PREFIX + "key")  # noqa: SLF001
+    assert (
+        handler._decorate_board(
+            json.dumps(value).encode(), "board", 200, "key", workspace.Endpoint(1, "", "CSS")
+        )
+        == json.dumps(expected).encode()
+    )
+
+
+def _proxy_payload(  # noqa: PLR0913 -- explicit upstream response controls
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+    *,
+    tail: str = "board",
+    status: int = 200,
+    write: bool = False,
+    declared: int | None = None,
+) -> list[tuple[bytes, str, int, dict[str, str] | None]]:
+    """Exercise the handler's response boundary without a real upstream listener."""
+    response = _finite_response(
+        f"Content-Length: {len(payload) if declared is None else declared}\r\n"
+        "Content-Type: application/json\r\n".encode(),
+        payload,
+        status,
+    )
+
+    def request(*_args: object, **_kwargs: object) -> None:
+        pass
+
+    connection = SimpleNamespace(
+        request=request,
+        getresponse=lambda: response,
+        close=lambda: None,
+    )
+
+    def connect(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return connection
+
+    def resolve(_key: str) -> tuple[None, workspace.Endpoint]:
+        return None, workspace.Endpoint(1, "secret", "CSS")
+
+    monkeypatch.setattr(http.client, "HTTPConnection", connect)
+    handler = object.__new__(workspace.WorkspaceHandler)
+    handler.server = cast(
+        "Any",
+        SimpleNamespace(
+            workspace=SimpleNamespace(
+                token="gateway-token",  # noqa: S106 -- isolated test credential
+                resolve_endpoint=resolve,
+            )
+        ),
+    )
+    handler.headers = http.client.HTTPMessage()
+    handler.headers["Authorization"] = "Bearer gateway-token"
+    handler.headers["Content-Length"] = "2"
+    handler.rfile = io.BytesIO(b"{}")
+    handler.path = workspace.BOARD_PREFIX + "key/" + tail
+    sent: list[tuple[bytes, str, int, dict[str, str] | None]] = []
+
+    def send(
+        blob: bytes, kind: str, code: int = 200, headers: dict[str, str] | None = None
+    ) -> None:
+        sent.append((blob, kind, code, headers))
+
+    monkeypatch.setattr(handler, "_send", send)
+    handler._proxy(urllib.parse.urlsplit(handler.path).path, write=write)
+    return sent
+
+
+@pytest.mark.parametrize(
+    ("tail", "status", "write", "decorated"),
+    [
+        ("board", 200, False, True),
+        ("board?refresh=1", 200, False, True),
+        ("board?download=1", 200, False, True),
+        ("board", 200, True, False),
+        ("board", 401, False, False),
+        ("board", 412, False, False),
+        ("board/", 200, False, False),
+        ("boards", 200, False, False),
+    ],
+)
+def test_decoration_get_exact_board_200_only(
+    monkeypatch: pytest.MonkeyPatch, tail: str, status: int, *, write: bool, decorated: bool
+) -> None:
+    payload = b'{"name": "example"} '
+    sent = _proxy_payload(monkeypatch, payload, tail=tail, status=status, write=write)
+    assert len(sent) == 1
+    assert sent[0][2] == status
+    expected = b'{"name": "example", "userCSS": "CSS"}' if decorated else payload
+    assert sent[0][0] == expected
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "unicode",
+        "json",
+        "decode-depth",
+        "rebase",
+        "encode-depth",
+        "encode-unicode",
+        "encode-value",
+        "size",
+    ],
+)
+def test_decoration_failure_is_one_sanitized_response(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str
+) -> None:
+    payload = b'{"private-sentinel": "secret"}'
+    if failure == "unicode":
+        payload = b'"private-sentinel\xff"'
+    if failure == "json":
+        payload = b'{"private-sentinel":'
+    if failure == "decode-depth":
+        payload = b"[" * 2000 + b'"private-sentinel"' + b"]" * 2000
+    if failure == "rebase":
+        deep: board_state.JsonValue = "private-sentinel"
+        for _ in range(2000):
+            deep = [deep]
+
+        def parsed(_blob: bytes) -> board_state.JsonValue:
+            return deep
+
+        monkeypatch.setattr(json, "loads", parsed)
+    if failure.startswith("encode-"):
+
+        class FailingEncoder(json.JSONEncoder):
+            def iterencode(self, o: object, _one_shot: bool = False) -> Iterator[str]:  # noqa: ARG002, FBT001, FBT002 -- base protocol
+                yield "partial private-sentinel"
+                if failure == "encode-unicode":
+                    raise UnicodeEncodeError("utf-8", "private-sentinel", 0, 1, "secret")
+                if failure == "encode-value":
+                    raise ValueError("private-sentinel secret")
+                raise RecursionError("private-sentinel secret")
+
+        monkeypatch.setattr(json, "JSONEncoder", FailingEncoder)
+    if failure == "size":
+        monkeypatch.setattr(workspace, "MAX_DECORATED_BOARD_BYTES", 2)
+    sent = _proxy_payload(monkeypatch, payload)
+    assert len(sent) == 1
+    assert sent[0][:3] == (b'{"error": "board service response rejected"}', "application/json", 502)
+    captured = capsys.readouterr()
+    assert "private-sentinel" not in captured.out + captured.err + sent[0][0].decode()
+
+
+def test_attachment_real_cap_plus_one_refused_before_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden_read(_self: _FiniteResponseStream, _size: int | None = -1) -> bytes:
+        pytest.fail("oversized declaration must be refused before reading")
+
+    monkeypatch.setattr(_FiniteResponseStream, "read", forbidden_read)
+    sent = _proxy_payload(
+        monkeypatch,
+        b"",
+        tail="cards/card/attachments/id",
+        declared=10485761,
+    )
+    assert len(sent) == 1
+    assert sent[0][:3] == (b'{"error": "board service response rejected"}', "application/json", 502)
 
 
 @pytest.mark.parametrize("route", ["browser-session", "status"])
@@ -1539,6 +1760,52 @@ def test_attachment_proxy_rebases_urls_and_preserves_download_headers(
         assert response.read() == PNG
         assert response.headers["Content-Disposition"].startswith("attachment;")
     assert board_state.load(gateway.second).revision == 0
+
+
+def test_gateway_real_exact_ten_mib_attachment(gateway: RunningWorkspace) -> None:
+    unit = b"synthetic attachment bytes\n"
+    payload = (unit * (10485760 // len(unit) + 1))[:10485760]
+    assert len(payload) == attachments.MAX_BYTES == 10485760
+    token = gateway.instance.token
+    code, _ = request_json(
+        board_route(gateway.base, "alpha/board", "cards"),
+        token=token,
+        revision=0,
+        body={"id": "large-file", "subject": "Large synthetic attachment", "state": "backlog"},
+    )
+    assert code == 200
+    code, result = request_json(
+        board_route(gateway.base, "alpha/board", "cards/large-file/attachment"),
+        token=token,
+        revision=1,
+        body={"name": "synthetic.bin", "data": base64.b64encode(payload).decode("ascii")},
+    )
+    assert code == 200, result
+    tail = "cards/large-file/attachments/" + str(result["attachment"]["id"])
+    endpoint = gateway.instance._existing(gateway.first)  # noqa: SLF001 -- isolated writer
+    assert endpoint is not None
+    with (
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{endpoint.port}{API}/{tail}", timeout=5
+        ) as upstream,
+        urllib.request.urlopen(
+            board_route(gateway.base, "alpha/board", tail), timeout=5
+        ) as response,
+    ):
+        assert upstream.read() == payload
+        assert response.read() == payload
+        assert response.headers["Content-Length"] == "10485760"
+        for header in (
+            "Content-Type",
+            "Content-Disposition",
+            "X-Content-Type-Options",
+            "Content-Security-Policy",
+        ):
+            assert response.headers[header] == upstream.headers[header]
+        assert response.headers["Content-Type"] == "application/octet-stream"
+        assert response.headers["Content-Disposition"].startswith("attachment;")
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert "sandbox" in response.headers["Content-Security-Policy"]
 
 
 @contextlib.contextmanager

@@ -1691,8 +1691,14 @@ def parse_stamp(raw: str | None) -> dt.datetime:
     **It NEVER raises.** A malformed stamp returns the fallback, because the board is
     rendered every 400 ms and one bad string MUST NOT take a lane off the screen.
     """
+    parsed = _parse_stamp(raw)
+    return parsed if parsed is not None else _BEGINNING_OF_TIME
+
+
+def _parse_stamp(raw: str | None) -> dt.datetime | None:
+    """Distinguish a parsed instant from the permissive display fallback."""
     if raw is None:
-        return _BEGINNING_OF_TIME
+        return None
 
     text = raw.strip()
     parsed: dt.datetime | None = None
@@ -1710,10 +1716,13 @@ def parse_stamp(raw: str | None) -> dt.datetime:
             parsed = None
 
     if parsed is None:
-        return _BEGINNING_OF_TIME
+        return None
 
     if parsed.tzinfo is None:
-        return parsed.astimezone()
+        try:
+            return parsed.astimezone()
+        except ValueError, OverflowError, OSError:
+            return None
     return parsed
 
 
@@ -1928,8 +1937,8 @@ class ActivityEvent:
     """One sanitized, time-addressable board event for CLI inspection.
 
     Comment text is deliberately absent. A board-write monitor needs to identify what
-    changed, not copy private prose into a terminal transcript. The source timestamp is
-    retained verbatim for audit output while `instant` supplies a comparable value.
+    changed, not copy private prose into a terminal transcript. Timestamp output is
+    derived from `instant`; tolerated legacy suffixes remain only in source history.
     """
 
     ticket: int
@@ -1955,13 +1964,19 @@ class ActivityEvent:
     parent_to_id: str | None = None
     sequence: int = 0
 
+    def _timestamp(self) -> str:
+        """Serialize only the parsed timestamp, retaining customary UTC notation."""
+        return self.instant.isoformat().removesuffix("+00:00") + (
+            "Z" if self.instant.utcoffset() == dt.timedelta(0) else ""
+        )
+
     def to_json(self) -> JsonObject:
         """Return the public CLI shape without the internal sort fields."""
         out: JsonObject = {
             "ticket": self.ticket,
             "id": self.item_id,
             "kind": self.kind,
-            "at": self.at,
+            "at": self._timestamp(),
             "by": self.by,
         }
         if self.lane_from is not None:
@@ -1995,7 +2010,7 @@ class ActivityEvent:
 
     def describe(self) -> str:
         """One compact human-readable line with no card or comment prose."""
-        base = f"{self.at}  #{self.ticket:04d} {self.item_id}  {self.kind} by {self.by}"
+        base = f"{self._timestamp()}  #{self.ticket:04d} {self.item_id}  {self.kind} by {self.by}"
         if self.kind in {"created", "moved"}:
             source = self.lane_from if self.lane_from is not None else "(new)"
             return f"{base}  {source} -> {self.lane_to}"
@@ -5460,9 +5475,9 @@ def _activity_bounds(
 
 def _event_instant(raw: str, where: str) -> dt.datetime:
     """Parse a stored event timestamp and refuse to hide malformed audit data."""
-    instant = parse_stamp(raw)
-    if instant == _BEGINNING_OF_TIME:
-        raise BoardError(f"{where} has an unreadable timestamp {raw!r}")
+    instant = _parse_stamp(raw)
+    if instant is None:
+        raise BoardError(f"{where} has an unreadable timestamp")
     return instant
 
 

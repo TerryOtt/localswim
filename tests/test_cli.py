@@ -1,5 +1,6 @@
 """CLI-to-service boundary tests."""
 
+import datetime as dt
 import json
 import os
 import pathlib
@@ -7,13 +8,14 @@ import socket
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import click
 import pytest
 
-from localswim import api_endpoint, board_state, cli
+from localswim import api_endpoint, attachments, board_state, cli
 from tests.support import USERS
 from tests.test_completed_dependencies import complete
 
@@ -1019,6 +1021,110 @@ def test_newest_comments_rejects_invalid_arguments(
     assert result.returncode != 0
     assert message in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_activity_timestamp_output_strips_suffix_across_families(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+    board = board_state.load(path)
+    board.set_detail("alpha", "Private detail", "bot")
+    board.set_archived("alpha", archived=True, by="bot")
+    for records in (
+        board.find("alpha").history,
+        board.find("beta").history,
+        board.find("alpha").comments,
+        board.relationship_history,
+        board.parent_history,
+        board.subject_history,
+        board.detail_history,
+    ):
+        for record in records:
+            record.at = "2026-08-23T10:00:00Z HARMLESS_SUFFIX_SENTINEL"
+    board.archive_history[0] = replace(
+        board.archive_history[0], at="2026-08-23T10:00:00Z HARMLESS_SUFFIX_SENTINEL"
+    )
+    board.add_attachment(
+        "alpha",
+        attachments.Attachment(
+            "00000000-0000-4000-8000-000000000001",
+            "example.txt",
+            1,
+            "application/octet-stream",
+            "0" * 64,
+            "2026-08-23T12:00:00+02:00",
+            "bot",
+        ),
+    )
+    board_state.save(board, path)
+    before = path.read_bytes()
+    arguments = ("activity", "between", "2026-08-23T10:00:00Z", "2026-08-23T10:00:00Z")
+    result = run_cli(path, *arguments, "--json")
+    human = run_cli(path, *arguments)
+    exported = run_cli(path, "board", "show", "--json")
+    assert result.returncode == human.returncode == exported.returncode == 0
+    events = cast("list[dict[str, Any]]", json.loads(result.stdout))
+    assert {event["kind"] for event in events} == {
+        "created",
+        "renamed",
+        "moved",
+        "assigned",
+        "prioritized",
+        "commented",
+        "linked",
+        "unlinked",
+        "parented",
+        "unparented",
+        "detail_changed",
+        "archived",
+        "attached",
+    }
+    expected = board_state.activity_events(board, dt.datetime(2026, 8, 23, 10, tzinfo=dt.UTC), None)
+    assert events == [event.to_json() for event in expected]
+    assert [(event.ticket, event.sequence, event.kind) for event in expected] == sorted(
+        (event.ticket, event.sequence, event.kind) for event in expected
+    )
+    assert all(event["by"] == "bot" for event in events)
+    assert all(dt.datetime.fromisoformat(event["at"]) == expected[0].instant for event in events)
+    assert "HARMLESS_SUFFIX_SENTINEL" not in result.stdout + human.stdout
+    assert "HARMLESS_SUFFIX_SENTINEL" in exported.stdout
+    assert json.loads(exported.stdout) == board.to_json()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_activity_timestamp_refusal_omits_raw_value(
+    tmp_path: pathlib.Path, *, as_json: bool
+) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+    board = board_state.load(path)
+    board.find("alpha").history[0].at = "unreadable HARMLESS_ERROR_SENTINEL"
+    board_state.save(board, path)
+    before = path.read_bytes()
+    result = run_cli(
+        path, "activity", "since", "2026-08-23T10:00:00Z", *(["--json"] if as_json else [])
+    )
+    assert result.returncode != 0
+    assert "alpha history[0] has an unreadable timestamp" in result.stderr
+    assert result.stdout == ""
+    assert "HARMLESS_ERROR_SENTINEL" not in result.stderr
+    assert "Traceback" not in result.stderr
+    assert path.read_bytes() == before
+
+
+def test_activity_earliest_aware_instant_cli(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    activity_board(path)
+    board = board_state.load(path)
+    board.find("alpha").history[0].at = "0001-01-01T00:00:00Z"
+    board_state.save(board, path)
+    result = run_cli(
+        path, "activity", "between", "0001-01-01T00:00:00Z", "0001-01-01T00:00:00Z", "--json"
+    )
+    assert result.returncode == 0, result.stderr
+    events = cast("list[dict[str, Any]]", json.loads(result.stdout))
+    assert len(events) == 1
+    assert events[0]["at"] == "0001-01-01T00:00:00Z"
 
 
 def test_activity_between_is_inclusive_chronological_and_sanitized(

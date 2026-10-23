@@ -101,11 +101,16 @@ function section(start, end) {
 const button = {hidden: true, disabled: false, textContent: '', addEventListener() {}};
 const events = [], say = {value: 'unsent'};
 const elements = {'p-approve': button, say};
+const document = {body: {}, activeElement: null, getElementById: id => elements[id]};
+document.activeElement = document.body;
+for (const id of ['p-subject', 'p-subject-edit', 'p-detail', 'p-detail-editor', 'find']) {
+  elements[id] = {hidden: false, focus() {document.activeElement = this;}};
+}
 for (const id of ['scrim', 'panel']) {
   elements[id] = {classList: {remove(name) {events.push([id, name]);}}};
 }
 const ctx = vm.createContext({input, button, events, say, JSON, Set, encodeURIComponent,
-  document: {getElementById: id => elements[id]}});
+  document});
 vm.runInContext(`
 let API_PREFIX = '/alpha', API_TOKEN = 'synthetic', openId = 'review', seen = 'fresh';
 let data = {revision: 4, browserUser: 'terry', actors: [{id:'terry', class:'human'}],
@@ -126,7 +131,8 @@ function fetch(path, options) {
 }
 ` + section('async function apiPost(', '// **The repaint counter') +
 section('const pendingApprovals =', 'function openCard('), ctx);
-vm.runInContext(section('function closeCard()',
+vm.runInContext(section('let editing = null;', 'function startSubjectEdit()') +
+  section('function closeCard()',
   "document.getElementById('close').addEventListener"), ctx);
 vm.runInContext(`this.run = async () => {
   renderApproval(card);

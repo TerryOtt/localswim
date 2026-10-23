@@ -37,6 +37,7 @@ BOARD_PREFIX = PREFIX + "/boards/"
 PREFERENCES_ROUTE = PREFIX + "/preferences"
 MAX_PREFERENCES_BYTES = 64 * 1024
 MAX_UPSTREAM_ENTITY_BYTES = 96 * 1024 * 1024
+MAX_DECORATED_BOARD_BYTES = 96 * 1024 * 1024
 MAX_ATTACHMENT_ENTITY_BYTES = 10 * 1024 * 1024
 UPSTREAM_READ_BYTES = 64 * 1024
 UPSTREAM_RESPONSE_REJECTED = "board service response rejected"
@@ -633,6 +634,22 @@ def _unique_json_object(pairs: list[tuple[str, board_state.JsonValue]]) -> board
     return value
 
 
+def _encode_decorated_board(value: board_state.JsonValue) -> bytes:
+    """Count final UTF-8 JSON before appending each bounded encoded piece.
+
+    Keep the ordinary serializer defaults. This bounds accepted output, not the
+    decoded/rebased object or the encoder's individual string tokens.
+    """
+    blob = bytearray()
+    for token in json.JSONEncoder().iterencode(value):
+        for start in range(0, len(token), UPSTREAM_READ_BYTES):
+            chunk = token[start : start + UPSTREAM_READ_BYTES].encode("utf-8")
+            if len(blob) + len(chunk) > MAX_DECORATED_BOARD_BYTES:
+                raise ValueError(UPSTREAM_RESPONSE_REJECTED)
+            blob.extend(chunk)
+    return bytes(blob)
+
+
 def _upstream_entity_limit(tail: str, status: int, *, write: bool) -> int:
     """Mirror the service's successful raw-attachment GET grammar."""
     if not write and status == HTTPStatus.OK and tail.startswith("cards/"):
@@ -797,7 +814,7 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
         value = cast("board_state.JsonValue", json.loads(blob))
         if isinstance(value, dict):
             value["userCSS"] = endpoint.user_css
-        return json.dumps(_rebase(value, BOARD_PREFIX + key)).encode("utf-8")
+        return _encode_decorated_board(_rebase(value, BOARD_PREFIX + key))
 
     def _proxy(self, route: str, *, write: bool = False) -> None:
         encoded_key, separator, tail = route.removeprefix(BOARD_PREFIX).partition("/")

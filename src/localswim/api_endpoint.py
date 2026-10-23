@@ -2242,7 +2242,9 @@ PAGE = """<!doctype html>
      The title input is styled to MATCH the h1 it replaces rather than to look like a
      form field. A control that jumps in size when you click it makes you lose your
      place on the line you are about to retype. */
-  #p-subject { cursor: text; }
+  #p-subject { cursor: text; font: inherit; color: inherit; text-align: left;
+               background: none; border: 0; padding: 0; }
+  #p-subject:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   #p-subject-edit { font: inherit; font-size: 18px; font-weight: 700;
                     letter-spacing: -.01em; width: 100%; box-sizing: border-box;
                     margin: 6px 0 0; padding: 1px 3px; color: var(--ink);
@@ -2481,7 +2483,8 @@ the audit trail."></select></span>
            pencil icon competing with the text, and the whole line is the target. The
            `title` attribute is the only affordance, which is the same weight the owner
            chip carries. -->
-      <h1 id="p-subject" title="Click to rename. Enter saves, Escape cancels."></h1>
+      <h1><button id="p-subject" type="button" aria-label="Rename card title"
+        title="Rename card title. Enter saves, Escape cancels."></button></h1>
       <input id="p-subject-edit" hidden aria-label="Card title">
       <div class="sub" id="p-sub"></div>
       <!-- **OWNER IS A LABEL, and the control says so by being a plain toggle rather
@@ -2719,20 +2722,28 @@ function nextOwner(current) {
 // **One variable rather than two booleans**, because "both open at once" is a state
 // nobody wants and a pair of flags is a state machine that permits it.
 let editing = null;
+let subjectEdit = null;
 
-function closeEditors() {
+function closeEditors(returnFocus = true) {
+  const subject = document.getElementById('p-subject-edit');
+  const restore = returnFocus && editing === 'subject'
+    && document.activeElement === subject;
   editing = null;
+  subjectEdit = null;
   document.getElementById('p-subject').hidden = false;
   document.getElementById('p-subject-edit').hidden = true;
   document.getElementById('p-detail').hidden = false;
   document.getElementById('p-detail-editor').hidden = true;
+  if (restore && openId && itemById(openId)) document.getElementById('p-subject').focus();
 }
 
 function startSubjectEdit() {
   const it = itemById(openId);
   if (!it || editing) return;
   editing = 'subject';
+  subjectEdit = {};
   const box = document.getElementById('p-subject-edit');
+  box.disabled = false;
   // **Seeded from `data`, never from the rendered heading.** The heading is text the
   // browser has already normalized; `it.subject` is what the board actually holds.
   box.value = it.subject;
@@ -2744,25 +2755,39 @@ function startSubjectEdit() {
 
 async function saveSubject() {
   const box = document.getElementById('p-subject-edit');
+  if (editing !== 'subject' || box.disabled) return;
+  const source = openId, prefix = API_PREFIX, epoch = window.workspaceEpoch;
+  const session = subjectEdit;
+  const stillHere = () => openId === source && API_PREFIX === prefix
+    && window.workspaceEpoch === epoch && subjectEdit === session && editing === 'subject';
   const wanted = box.value.trim();
   if (!wanted) { toast('A card needs a title', true); return; }
   const it = itemById(openId);
   if (it && wanted === it.subject) { closeEditors(); return; }
   box.disabled = true;
   try {
-    const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(openId) + '/subject',
+    const res = await apiPost(prefix + '/cards/' + encodeURIComponent(source) + '/subject',
                               {subject: wanted});
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
+    if (!stillHere()) return;
     if (!res.ok) { toast(out.error || 'Rename refused', true); return; }
     toast(out.result);
     seen = null;
-    closeEditors();
+    const restore = document.activeElement === box || document.activeElement === document.body;
+    closeEditors(false);
+    if (restore && itemById(source)
+        && document.getElementById('panel').classList.contains('show')) {
+      document.getElementById('p-subject').focus();
+    }
   } catch (err) {
     toast('Could not reach the board: ' + err, true);
   } finally {
-    box.disabled = false;
+    if (stillHere()) {
+      box.disabled = false;
+      if (document.activeElement === document.body) box.focus();
+    } else if (subjectEdit === null) box.disabled = false;
   }
 }
 
@@ -3134,9 +3159,11 @@ async function attachmentCommand(source, action, body) {
 
 function paintAttachments(it) {
   const box = document.getElementById('p-attachments');
+  const identity = JSON.stringify([API_PREFIX, window.workspaceEpoch, it.id]);
   const signature = JSON.stringify([it.id, it.attachments || [], it.coverAttachment]);
-  if (box.dataset.signature === signature || box.querySelector('button:disabled')
-      || box.contains(document.activeElement)) return;
+  if (box.dataset.identity === identity && (box.dataset.signature === signature
+      || box.querySelector('button:disabled') || box.contains(document.activeElement))) return;
+  box.dataset.identity = identity;
   box.dataset.signature = signature;
   box.replaceChildren();
   const files = it.attachments || [];
@@ -3278,7 +3305,9 @@ function openCard(id) {
     // **A different card means the editors close.** Leaving one open would show card
     // A's title in an input attached to card B, and saving it would rename the wrong
     // one. Cards #0081 and #0082.
-    closeEditors();
+    const leavingSubject = document.activeElement === document.getElementById('p-subject-edit');
+    closeEditors(false);
+    if (leavingSubject) document.getElementById('close').focus();
     relationshipDraft = null;
   }
   openId = id;
@@ -3317,6 +3346,8 @@ function openCard(id) {
   // lose focus to its own Save button and still hold unsent text.
   if (editing !== 'subject') {
     document.getElementById('p-subject').textContent = it.subject;
+    document.getElementById('p-subject').setAttribute('aria-label',
+      'Rename card title: ' + it.subject);
   }
   document.getElementById('p-sub').textContent =
     it.laneLabel + '  \\u00b7  ' + it.id;
@@ -3412,10 +3443,15 @@ function closeCard() {
   // **Escape is one keypress away at all times.** Dropping the draft on close is the
   // same defect as dropping it on repaint, just slower to notice.
   if (openId) drafts[openId] = document.getElementById('say').value;
+  const leavingSubject = editing === 'subject'
+    && (document.activeElement === document.getElementById('p-subject-edit')
+        || document.activeElement === document.body);
+  closeEditors(false);
   relationshipDraft = null;
   openId = null;
   document.getElementById('scrim').classList.remove('show');
   document.getElementById('panel').classList.remove('show');
+  if (leavingSubject) document.getElementById('find').focus();
 }
 
 document.getElementById('close').addEventListener('click', closeCard);
@@ -3501,8 +3537,9 @@ document.getElementById('p-detail-cancel').addEventListener('click', closeEditor
 // box's rule applies rather than the description's -- cards #0039 and #0040 drew that
 // distinction and this follows it rather than inventing a third convention.
 document.getElementById('p-subject-edit').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && ev.isComposing) return;
   if (ev.key === 'Enter') { ev.preventDefault(); saveSubject(); }
-  if (ev.key === 'Escape') { ev.preventDefault(); closeEditors(); }
+  if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closeEditors(); }
 });
 
 // **Escape abandons the description too, and Enter does NOT save it.** A description is

@@ -238,6 +238,11 @@ and comment text. Inline code retains literal operators such as `*` and `**`;
 formatting markup is excluded from rendered-text searches. Comment attribution uses
 DOM text boundaries, so actor IDs remain literal data even when they contain markup.
 
+The drawer's card-title rename button supports Tab, Enter and Space. Saving or canceling
+returns focus to the still-current control; a failed save retains the editor. Enter
+during composition does not submit a partial title. Attachment controls remain bound
+to their board and card while an operation is pending or the drawer switches cards.
+
 The browser supports creating, moving, editing, assigning, prioritizing and relating
 cards. The CLI can inspect the snapshot while the service is stopped or running:
 
@@ -333,6 +338,12 @@ output order, not a recoverable causal order.
 New audit events retain microsecond precision so a filesystem monitor can supply
 consecutive, non-overlapping activity windows without repeating a boundary event.
 Existing whole-second event timestamps remain valid and require no migration.
+
+Sanitized activity output uses timestamp-only values derived from parsed instants;
+tolerated legacy suffix text is excluded from output and refusal diagnostics.
+Original timestamp strings remain unchanged in the board and full exports. Strict
+activity parsing accepts the earliest valid aware UTC instant and reports indexed
+conversion errors rather than confusing that value with the display fallback.
 
 CLI mutations use the running REST service so browser and CLI writes share validation,
 locking and revision checks:
@@ -727,8 +738,14 @@ metadata handshake remains limited to **64 KiB**. Unsupported or ambiguous HTTP 
 unsupported content encoding, truncated bodies and oversized entities produce a small
 sanitized 502 response. A failure after forwarding a POST has an unknown outcome:
 inspect the board before retrying; the gateway never replays that mutation.
-These are per-response entity limits, not a bound on total gateway memory or final
-decorated JSON size. The gateway closes each upstream connection after use.
+GET responses for the exact board route with HTTP 200 also have a **96 MiB** limit
+on final decorated UTF-8 JSON, counted during encoding after CSS insertion and attachment
+URL rebasing. Escaping and rebasing can make the result exceed the upstream entity size.
+Supported JSON Unicode encodings remain accepted. Decoration failures return a small
+sanitized 502 without a partial response. Other methods, statuses and nearby routes
+retain their upstream response behavior.
+These limits do not bound total gateway memory or promise that every supported snapshot
+fits after decoration. The gateway closes each upstream connection after use.
 
 The catalog also includes `preferences` and `gatewayPush`. Preferences use schema 1:
 `revision`, `autopush`, `pinsInitialized`, and the ordered stable-key array

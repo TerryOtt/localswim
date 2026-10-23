@@ -1,11 +1,103 @@
 """Board behavior at the domain-model boundary."""
 
 import copy
+import datetime as dt
 import re
+from unittest.mock import patch
 
 import pytest
 
-from localswim import board_state
+from localswim import attachments, board_state
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    ["2026-08-23T10:00:00", "2026-08-23 10:00:00 EDT", "2026-08-23 10:00:00 EST"],
+)
+def test_parse_stamp_retains_legacy_local_time(stamp: str) -> None:
+    expected = dt.datetime(2026, 8, 23, 10, tzinfo=None).astimezone()
+    assert board_state.parse_stamp(stamp) == expected
+    assert board_state._event_instant(stamp, "history[0]") == expected  # noqa: SLF001 -- strict parse seam
+
+
+@pytest.mark.parametrize("failure", [ValueError, OverflowError, OSError])
+def test_stamp_local_conversion_failure_is_contained(
+    board: board_state.Board, failure: type[Exception]
+) -> None:
+    class UnconvertibleDatetime(dt.datetime):
+        def astimezone(self, tz: dt.tzinfo | None = None) -> dt.datetime:  # noqa: ARG002 -- forced failure
+            raise failure("conversion sentinel")
+
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.find("alpha").history[0].at = "2026-08-23T10:00:00"
+    start = dt.datetime.min.replace(tzinfo=dt.UTC)
+    with patch.object(board_state.dt, "datetime", UnconvertibleDatetime):
+        assert board_state.parse_stamp("2026-08-23T10:00:00") == start
+        with pytest.raises(
+            board_state.BoardError, match=r"alpha history\[0\] has an unreadable timestamp$"
+        ):
+            board_state.activity_events(board, start, None)
+
+
+@pytest.mark.parametrize("stamp", ["0001-01-01T00:00:00", "9999-12-31T23:59:59.999999"])
+def test_stamp_naive_extrema_follow_platform_conversion(
+    board: board_state.Board, stamp: str
+) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.find("alpha").history[0].at = stamp
+    start = dt.datetime.min.replace(tzinfo=dt.UTC)
+    try:
+        expected = dt.datetime.fromisoformat(stamp).astimezone()
+    except ValueError, OverflowError, OSError:
+        assert board_state.parse_stamp(stamp) == start
+        with pytest.raises(board_state.BoardError, match=r"alpha history\[0\]"):
+            board_state.activity_events(board, start, None)
+    else:
+        assert board_state.parse_stamp(stamp) == expected
+        assert board_state.activity_events(board, expected, expected)[0].instant == expected
+
+
+def test_activity_accepts_earliest_aware_instant_without_rewriting(
+    board: board_state.Board,
+) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.find("alpha").history[0].at = "0001-01-01T00:00:00Z"
+    before = copy.deepcopy(board.to_json())
+    start = dt.datetime.min.replace(tzinfo=dt.UTC)
+    events = board_state.activity_events(board, start, start)
+    assert len(events) == 1
+    assert events[0].to_json()["at"] == "0001-01-01T00:00:00Z"
+    assert board.to_json() == before
+
+
+def test_attachment_activity_uses_same_timestamp_only_output(board: board_state.Board) -> None:
+    """Exercise the shared serializer directly; attachment admission requires ISO input."""
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.find("alpha").attachment_history.append(
+        attachments.AttachmentEvent(
+            "2026-08-23T12:00:00+02:00 SYNTHETIC_SUFFIX",
+            "bot",
+            "attached",
+            "00000000-0000-4000-8000-000000000001",
+            ".txt",
+        )
+    )
+    start = dt.datetime(2026, 8, 23, 10, tzinfo=dt.UTC)
+    events = board_state._attachment_activity_events(board, start, start)  # noqa: SLF001 -- no admission
+    assert len(events) == 1
+    assert events[0].to_json()["at"] == "2026-08-23T12:00:00+02:00"
+    assert "SYNTHETIC_SUFFIX" not in events[0].describe()
+    assert "SYNTHETIC_SUFFIX" in board.find("alpha").attachment_history[0].at
+
+
+@pytest.mark.parametrize("stamp", [None, "", "unreadable SENTINEL_SUFFIX"])
+def test_parse_stamp_malformed_fallback_is_distinct_from_activity(stamp: str | None) -> None:
+    assert board_state.parse_stamp(stamp) == dt.datetime.min.replace(tzinfo=dt.UTC)
+    if stamp is not None:
+        with pytest.raises(
+            board_state.BoardError, match=r"history\[2\] has an unreadable timestamp$"
+        ):
+            board_state._event_instant(stamp, "history[2]")  # noqa: SLF001 -- strict parse seam
 
 
 def test_now_persists_microsecond_precision_with_local_offset() -> None:

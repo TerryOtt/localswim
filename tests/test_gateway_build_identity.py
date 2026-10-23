@@ -47,7 +47,94 @@ function section(source,start,end) {
   if(a<0||b<0)throw Error('Production helper boundary not found: '+start);
   return source.slice(a,b);
 }
-if(input.mode==='rendering'){
+if(input.mode==='drawer'){
+  const assert=require('assert/strict');
+  function node(tag){
+    return {tag,children:[],dataset:{},hidden:false,disabled:false,value:'',listeners:{},
+      classList:{contains:()=>true},
+      append(...children){this.children.push(...children)},
+      replaceChildren(){this.children=[]},setAttribute(k,v){this[k]=v},
+      addEventListener(k,v){this.listeners[k]=v},
+      focus(){context.document.activeElement=this},select(){},
+      contains(target){return this===target||this.children.some(c=>c.contains(target))},
+      querySelector(){return this.children.flatMap(function walk(c){
+        return [c,...c.children.flatMap(walk)]}).find(c=>c.tag==='button'&&c.disabled)}};
+  }
+  elements.clear();
+  context.document.getElementById=id=>{
+    if(!elements.has(id))elements.set(id,node(id));return elements.get(id)};
+  context.document.createElement=node;
+  context.document.body=node('body');context.document.activeElement=context.document.body;
+  const get=context.document.getElementById, calls=[];
+  let resolve;
+  Object.assign(context,{API_PREFIX:'/api/a',seen:1,
+    itemById:id=>({id,subject:'Original'}),toast:()=>{},acceptRevision:()=>{},
+    apiPost:(path,body)=>{calls.push({path,body});return new Promise(r=>{resolve=r})}});
+  vm.runInContext(section(input.page,'let editing = null;', 'function startDetailEdit()'),context);
+  vm.runInContext(section(input.page,'function attachmentImage(', 'function fileBase64('),context);
+  vm.runInContext(section(input.page,"document.getElementById('p-subject-edit').addEventListener('keydown'",
+    "document.getElementById('p-detail-text').addEventListener"),context);
+  const key=(key,isComposing=false)=>{
+    const ev={key,isComposing,prevented:false,stopped:false,
+      preventDefault(){this.prevented=true},stopPropagation(){this.stopped=true}};
+    get('p-subject-edit').listeners.keydown(ev);return ev};
+  context.openId='a';vm.runInContext('startSubjectEdit()',context);
+  get('p-subject-edit').value='New title';
+  assert.equal(key('Enter',true).prevented,false);assert.equal(calls.length,0);
+  assert.equal(key('Enter').prevented,true);key('Enter');assert.equal(calls.length,1);
+  resolve({ok:true,json:async()=>({result:'saved'})});await new Promise(setImmediate);
+  assert.equal(context.document.activeElement,get('p-subject'));
+  vm.runInContext('startSubjectEdit()',context);
+  assert.equal(key('Escape').stopped,true);
+  assert.equal(context.document.activeElement,get('p-subject'));
+  vm.runInContext('startSubjectEdit()',context);get('p-subject-edit').value='Failed';key('Enter');
+  context.document.activeElement=context.document.body;
+  resolve({ok:false,json:async()=>({error:'refused'})});await new Promise(setImmediate);
+  assert.equal(get('p-subject-edit').hidden,false);assert.equal(get('p-subject-edit').disabled,false);
+  assert.equal(context.document.activeElement,get('p-subject-edit'));
+  key('Enter');context.openId='b';vm.runInContext('closeEditors(false);startSubjectEdit()',context);
+  get('p-subject-edit').value='B draft';
+  resolve({ok:true,json:async()=>({result:'saved A'})});await new Promise(setImmediate);
+  assert.equal(get('p-subject-edit').value,'B draft');
+  assert.equal(get('p-subject-edit').hidden,false);
+  assert.equal(get('p-subject-edit').disabled,false);
+  get('p-subject-edit').value='pending B';key('Enter');
+  vm.runInContext('closeEditors(false);startSubjectEdit()',context);
+  get('p-subject-edit').value='Fresh B session';
+  resolve({ok:true,json:async()=>({result:'saved previous session'})});
+  await new Promise(setImmediate);
+  assert.equal(get('p-subject-edit').hidden,false);
+  assert.equal(get('p-subject-edit').value,'Fresh B session');
+  get('close').focus();key('Escape');
+  assert.equal(context.document.activeElement,get('close')); // no unrelated focus theft
+  vm.runInContext('startSubjectEdit()',context);
+  const beforeNoop=calls.length;key('Enter');
+  assert.equal(calls.length,beforeNoop);
+  assert.equal(context.document.activeElement,get('p-subject'));
+  for(const action of ['cover','attachment'])for(const ok of [true,false]){
+    context.attachmentRefusal=()=>{};
+    const a={id:'a',attachments:[{id:'file-a',name:'A.png',url:'/a',size:8,mediaType:'image/png'}]};
+    const b={id:'b',attachments:[{id:'file-b',name:'B.png',url:'/b',size:8,mediaType:'image/png'}]};
+    context.card=a;vm.runInContext('paintAttachments(card)',context);
+    const box=get('p-attachments'), row=box.children[0], actions=row.children.at(-1);
+    const button=actions.children[action==='cover'?0:1];button.focus();
+    const pending=button.listeners.click();const count=calls.length;
+    context.card={...a,coverAttachment:'file-a'};vm.runInContext('paintAttachments(card)',context);
+    assert.equal(box.children[0],row); // same-card pending/focus is preserved
+    context.card=b;vm.runInContext('paintAttachments(card)',context);
+    assert.notEqual(box.children[0],row);assert.equal(box.children[0].children[1].textContent,'B.png');
+    resolve({ok,json:async()=>({result:'done',error:'refused'})});await pending;
+    assert.equal(button.disabled,false);
+    assert.equal(calls.length,count);assert.equal(calls.at(-1).path,'/api/a/cards/a/'+action);
+    assert.equal(box.children[0].children[1].textContent,'B.png');
+    const bRow=box.children[0];bRow.children.at(-1).children[0].focus();
+    context.card={...b,coverAttachment:'file-b'};vm.runInContext('paintAttachments(card)',context);
+    assert.equal(box.children[0],bRow); // same-card focused control is preserved
+    context.API_PREFIX='/api/other';vm.runInContext('paintAttachments(card)',context);
+    assert.notEqual(box.children[0],bRow);context.API_PREFIX='/api/a';
+  }
+  process.stdout.write(JSON.stringify({verified:true,calls:calls.length}));
+}else if(input.mode==='rendering'){
   // These deliberately small DOM seams verify production helper plumbing. The
   // synthetic browser smoke covers the real template parser and DOM boundaries.
   function node(tag){
@@ -175,6 +262,17 @@ def browser_helpers(**values: Any) -> Any:  # noqa: ANN401 - JSON browser test b
         check=True,
     )
     return json.loads(result.stdout)
+
+
+def test_drawer_attachment_identity_and_subject_keyboard_handlers() -> None:
+    """Production handlers under narrow DOM seams; real keyboard evidence is separate."""
+    assert browser_helpers(mode="drawer")["verified"] is True
+
+
+def test_subject_rename_uses_native_named_button_inside_heading() -> None:
+    assert '<h1><button id="p-subject" type="button" aria-label="Rename card title"' in (
+        api_endpoint.PAGE
+    )
 
 
 def test_rendered_search_and_comment_header_boundaries() -> None:

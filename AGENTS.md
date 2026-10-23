@@ -255,10 +255,22 @@ native board monitoring is an optional extra.
   10 MiB and the existing metadata handshake at 64 KiB. Validate raw framing and
   content encoding before bounded body reads; close every upstream connection.
   Return sanitized 502 failures and report POST outcome uncertainty after forwarding
-  begins, without replay. Final decorated-output limits remain a separate boundary.
+  begins, without replay. For GET exact-board HTTP 200, count final escaped UTF-8
+  output incrementally after CSS insertion and attachment URL rebasing, inclusive
+  at 96 MiB. Preserve JSON Unicode/BOM decoding and serializer defaults; contain
+  decode/rebase/encode failures before any partial send. Other routes pass through.
+  Do not infer a peak or aggregate memory bound from the entity/output limits.
   Protect code spans before prose emphasis; search literal subjects/tickets and
   safely decoded readable rendered bodies. Build comment attribution with DOM text
   boundaries while keeping the formatted comment body separate.
+  Bind attachment controls to explicit board/card identity across pending requests
+  and drawer switches. Use a native named card-title rename button with current
+  editor/trigger focus handling. Composing Enter must not submit a partial title;
+  keep ordinary Enter save and Escape cancel distinct from drawer close.
+  Strict activity parsing distinguishes failure from a valid minimum UTC instant,
+  contains local conversion failures, and emits timestamp-only sanitized values.
+  Preserve raw stored timestamps and permissive display fallback; diagnostic
+  failures name the event location without echoing tolerated timestamp suffixes.
 
 ## Subagents on authorized tickets
 

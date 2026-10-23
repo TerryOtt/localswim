@@ -154,7 +154,11 @@ and before JSON decoding; preserve the existing JSON Unicode encodings without H
 decompression. Reject ambiguous or invalid raw framing, unsupported content encoding,
 truncation and excess length with sanitized 502 responses, closing the connection.
 A dispatched POST is never replayed; response failure requires inspecting its unknown
-outcome before retrying. This does not limit final decorated JSON or aggregate memory.
+outcome before retrying. GET exact-board HTTP 200 decoration separately counts final
+escaped UTF-8 JSON during encoding, after CSS insertion and URL rebasing, with the same
+inclusive 96 MiB cap. Supported Unicode JSON byte encodings and serializer defaults
+remain compatible. Decode, rebase and encode failures become sanitized 502 responses
+before partial output. This does not bound parse/rebase object memory or aggregate memory.
 
 The gateway reuses a healthy descriptor only when it identifies the correct board.
 It coordinates launches with the same startup gate used by direct board starts and
@@ -260,6 +264,12 @@ card, filter, lane scroll, comment/editor drafts, and new-card drafts are stored
 session storage scoped to the window; one window's selection does not force another
 window to change. Sidebar collapse is remembered per window. Source upgrades retain
 the separate guarded reload mechanism; ordinary board selection must never use it.
+
+Drawer attachment containers carry board/card identity before pending/focus preservation.
+A deferred operation on one card cannot leave its controls actionable under another
+card's header. The card-title rename trigger is a named native button within the heading;
+save/cancel/failure focus guards remain tied to the current edit session. Composing Enter
+does not submit, and editor Escape cancels without also closing the drawer.
 
 Workspace JSON reads use a 20-second abort deadline and one active poll per navigation
 epoch. Late errors from another epoch cannot replace the current board. The snapshot
@@ -488,6 +498,14 @@ false, checks the actor and alternating states, and compares it with every store
 Both configured mutation actors may archive or restore a card in any lane; this grants
 no additional lane transitions. No deletion operation exists, and all identifiers,
 relationships, comments, and other history survive archiving.
+
+Sanitized activity uses a strict datetime-or-failure parse result rather than comparing
+against the permissive display fallback. The valid earliest aware UTC instant is not
+a failure sentinel. Local conversion ValueError, OverflowError and OSError are contained;
+normal naive legacy interpretation remains platform dependent. Output serializes the
+parsed instant as timestamp-only text and indexed errors omit raw timestamp suffixes.
+Raw board/full-export values and event ordering stay unchanged; no actor authenticity
+or historical timestamp normalization is inferred.
 
 ## Relationships and hierarchy
 
