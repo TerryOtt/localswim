@@ -1616,16 +1616,17 @@ def readable_on_white(color: str) -> str:
 
 
 def user_css(board: board_state.Board | None = None) -> str:
-    """One color variable and four rules per configured user. **Card #0072.**
+    """Generate actor accents, readable name ink, and action-button text pairs.
 
     **The stylesheet named `terry` and `claude` in nine places until this card**, so a
     third person would have rendered with no color at all -- their name gray in the
     audit trail, their owner chip unstyled, their lane accent missing. None of that
     fails loudly; it just looks broken for one person.
 
-    **`--accent` is the browser user's color**, and it is what every brand-colored
-    control uses: the post button, the create button, the drop outline. Those were
-    `var(--accent)` and they mean *this deployment's primary*, not *Terry*.
+    **`--accent` is the browser user's exact color** for decorative borders and drop
+    outlines. Action buttons use a separate fill/ink pair: the same configured fill
+    and either white or black text selected against that fill at 4.5:1 or better.
+    Name ink is chosen against white independently; it cannot select button text.
 
     **Generated rather than templated, because the count is unknown.** Two users is
     today; the whole point of the card is that it stops being a fixed number.
@@ -1640,6 +1641,11 @@ def user_css(board: board_state.Board | None = None) -> str:
         # is not. See `readable_on_white`.
         lines.append(f"  --user-{u.id}-ink: {readable_on_white(u.color)};")
     lines.append(f"  --accent: var(--user-{browser_user});")
+    # Keep the exact accent for decoration; choose ink against the actual fill.
+    action_color = next(u.color for u in users if u.id == browser_user)
+    action_ink = "#FFFFFF" if on_white(action_color) >= TEXT_CONTRAST else "#000000"
+    lines.append(f"  --action-fill: {action_color};")
+    lines.append(f"  --action-ink: {action_ink};")
     out: list[str] = [":root {", *lines, "}"]
 
     for u in users:
@@ -1705,7 +1711,7 @@ def when(stamp: str) -> str:
 
 
 PAGE = """<!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>%TITLE%</title>
@@ -2158,8 +2164,8 @@ PAGE = """<!doctype html>
   #mk button { font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
                border-radius: 5px; padding: 7px 14px; border: 1px solid var(--line);
                background: #FFFFFF; color: var(--ink); }
-  #mk button.go { background: var(--accent); border-color: var(--accent);
-                  color: #FFFFFF; }
+  #mk button.go { background: var(--action-fill); border-color: var(--accent);
+                  color: var(--action-ink); }
   #mk button:disabled { opacity: .5; cursor: not-allowed; }
 
   /* The detail panel. A drawer rather than a modal, so the board stays visible and
@@ -2261,7 +2267,7 @@ PAGE = """<!doctype html>
                    border: 1px solid var(--line); border-radius: 5px; color: var(--ink); }
   .editrow { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
   .editrow .go { font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
-                 background: var(--accent); color: #FFFFFF; border: 0;
+                 background: var(--action-fill); color: var(--action-ink); border: 0;
                  border-radius: 5px; padding: 7px 12px; }
   .editrow .go:disabled { opacity: .5; cursor: wait; }
   /* **`pre-wrap` KEEPS THE BLANK LINES. Card #0086, and it was defeating a standing
@@ -2347,7 +2353,7 @@ PAGE = """<!doctype html>
   #say { width: 100%; min-height: 68px; font: inherit; font-size: 13px;
          padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
          resize: vertical; }
-  #post { margin-top: 8px; background: var(--accent); color: #FFFFFF; border: 0;
+  #post { margin-top: 8px; background: var(--action-fill); color: var(--action-ink); border: 0;
           border-radius: 5px; padding: 7px 14px; font: inherit; font-weight: 600;
           font-size: 13px; cursor: pointer; }
 
@@ -2381,7 +2387,7 @@ PAGE = """<!doctype html>
      `#stale` is `--p0` red and means automatic tab recovery failed. This one means
      "restart the process", which a reload cannot achieve. `--p1` orange is the next
      step down the hazard ramp this palette already uses. Card #0052. */
-  #restart { display: none; background: var(--p1); color: #000000; font-weight: 700;
+  #restart { display: none; background: var(--p1); color: #FFFFFF; font-weight: 700;
              padding: 2px 8px; border-radius: 4px; white-space: nowrap; }
   #restart.show { display: inline-block; }
   /* **THE BOARD IS NOT BACKED UP. That is a `--p0` matter, and it earns red.**
@@ -3921,22 +3927,39 @@ function laneEl(lane) {
   });
   el.addEventListener('drop', async ev => {
     ev.preventDefault();
-    el.classList.remove('over'); el.classList.remove('deny');
-    let payload;
-    try { payload = JSON.parse(ev.dataTransfer.getData('text/plain')); }
-    catch (e) { return; }
-    if (!allowed(payload.from, lane.state)) {
-      toast('Not yours to drop there: ' + payload.from + ' \\u2192 ' + lane.state, true);
-      return;
+    let attempted = false, res = null;
+    try {
+      let payload;
+      try { payload = JSON.parse(ev.dataTransfer.getData('text/plain')); }
+      catch (e) { return; }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || typeof payload.id !== 'string' || !payload.id
+          || typeof payload.from !== 'string' || !payload.from) return;
+      if (!allowed(payload.from, lane.state)) {
+        toast('Not yours to drop there: ' + payload.from + ' \\u2192 ' + lane.state, true);
+        return;
+      }
+      attempted = true;
+      res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(payload.id) + '/move',
+                          {to: lane.state});
+      const out = await res.json();
+      if (!out || typeof out !== 'object' || Array.isArray(out))
+        throw new Error('Invalid move response');
+      if (out.workspaceBoardChanged) return false;
+      acceptRevision(out);
+      if (!res.ok) { toast(out.error || 'Move refused', true); return; }
+      toast(out.result);
+    } catch (e) {
+      toast(res && !res.ok ? 'Move refused; refresh to inspect the board.'
+        : 'Move outcome unknown; inspect the refreshed board before trying again.', true);
+    } finally {
+      el.classList.remove('over'); el.classList.remove('deny');
+      if (attempted) {
+        seen = null;
+        try { await tick(); }
+        catch (e) { toast('Board refresh failed; refresh and inspect before trying again.', true); }
+      }
     }
-    const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(payload.id) + '/move',
-                              {to: lane.state});
-    const out = await res.json();
-    if (out.workspaceBoardChanged) return false;
-    acceptRevision(out);
-    if (!res.ok) { toast(out.error || 'Move refused', true); return; }
-    toast(out.result);
-    seen = null;
   });
   return el;
 }
@@ -4037,15 +4060,22 @@ function announce(c) {
   const asking = (c.needs_terry_action || 0) + (c.blocked || 0);
   document.title = asking > 0 ? '(' + asking + ') ' + boardTitle : boardTitle;
 
-  if (lastCta !== null && asking > lastCta && alertsOn()) {
-    const n = new Notification('FGA board needs you', {
+  const increased = lastCta !== null && asking > lastCta;
+  // Settle the count even when optional delivery fails; unchanged paints never retry.
+  lastCta = asking;
+  if (increased && alertsOn()) {
+    try {
+      const n = new Notification('FGA board needs you', {
       body: (c.needs_terry_action || 0) + ' waiting for Terry, '
           + (c.blocked || 0) + ' blocked',
       tag: 'fga-cta',          // Replaces its predecessor rather than stacking.
     });
-    n.onclick = () => { window.focus(); n.close(); };
+      n.onclick = () => { try { window.focus(); n.close(); } catch (e) {} };
+    } catch (e) {
+      alertsUnavailable = true;
+      syncAlerts();
+    }
   }
-  lastCta = asking;
 }
 
 // **THE BROWSER PERMISSION AND THIS PREFERENCE ARE TWO DIFFERENT THINGS**, and
@@ -4064,30 +4094,48 @@ function announce(c) {
 const ALERTS_KEY = 'fga-alerts';
 const alertsBox = document.getElementById('alerts');
 const alertsWrap = document.getElementById('alerts-wrap');
+let alertsPreference = false;
+let alertsPersistent = true;
+let alertsUnavailable = false;
+try { alertsPreference = localStorage.getItem(ALERTS_KEY) === '1'; }
+catch (e) { alertsPersistent = false; }
+
+function alertsPermission() {
+  try {
+    if (!('Notification' in window)) return 'unavailable';
+    const permission = Notification.permission;
+    return ['default', 'granted', 'denied'].includes(permission) ? permission : 'unavailable';
+  } catch (e) { return 'unavailable'; }
+}
+
+function saveAlertsPreference(value) {
+  alertsPreference = value;
+  try { localStorage.setItem(ALERTS_KEY, value ? '1' : '0'); }
+  catch (e) { alertsPersistent = false; }
+}
 
 function alertsOn() {
-  return ('Notification' in window)
-    && Notification.permission === 'granted'
-    && localStorage.getItem(ALERTS_KEY) === '1';
+  return !alertsUnavailable && alertsPermission() === 'granted' && alertsPreference;
 }
 
 function syncAlerts() {
-  if (!('Notification' in window)) {
-    alertsWrap.hidden = true;
-    return;
-  }
-  const denied = Notification.permission === 'denied';
-  alertsBox.disabled = denied;
-  alertsWrap.classList.toggle('blocked', denied);
-  alertsWrap.title = denied
+  const permission = alertsPermission();
+  const unavailable = alertsUnavailable || permission === 'unavailable';
+  const denied = permission === 'denied';
+  alertsWrap.hidden = false;
+  alertsBox.disabled = denied || unavailable;
+  alertsWrap.classList.toggle('blocked', denied || unavailable);
+  alertsWrap.title = unavailable ? 'Desktop notifications are unavailable in this browser.' : denied
     ? 'Your browser has blocked notifications for this site.'
     : 'Desktop notification when a card starts waiting on you.';
+  if (!alertsPersistent)
+    alertsWrap.title += ' Preference applies to this page only; storage is unavailable.';
   alertsBox.checked = alertsOn();
 }
 
 alertsBox.addEventListener('change', async () => {
   if (!alertsBox.checked) {
-    localStorage.setItem(ALERTS_KEY, '0');
+    saveAlertsPreference(false);
     syncAlerts();
     return;
   }
@@ -4095,13 +4143,14 @@ alertsBox.addEventListener('change', async () => {
   // `requestPermission` without one, and an auto-request on load is the pattern
   // people reflexively deny -- which would leave the page permanently unable to
   // ask again.
-  if (Notification.permission === 'default') {
-    await Notification.requestPermission();
+  try {
+    if (alertsPermission() === 'default') await Notification.requestPermission();
+  } catch (e) {
+    alertsUnavailable = true;
   }
   // **Stored only if the browser actually said yes.** Otherwise the box unticks
   // itself, which is the honest answer to "I asked and was refused".
-  localStorage.setItem(ALERTS_KEY,
-    Notification.permission === 'granted' ? '1' : '0');
+  saveAlertsPreference(!alertsUnavailable && alertsPermission() === 'granted');
   syncAlerts();
 });
 

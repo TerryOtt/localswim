@@ -446,6 +446,11 @@ be decoded as a JSON object has an unknown outcome and requires inspection befor
 retry. The client does not replay the mutation automatically; read-only response
 diagnostics remain separate.
 
+CLI response reads contain documented HTTP framing exceptions. An unreadable
+HTTP-error body retains the known refusal status. A successful mutation or
+shutdown POST with no usable string result remains uncertain and requires
+inspection before retry, without automatically repeating the command.
+
 Item history, relationship history, parent history, and comments are separate. All
 three histories are machine-written and append-only; comments are human/bot prose.
 Item history has three event shapes:
@@ -944,6 +949,17 @@ Important UI mechanics:
   text/background pair exceeds the WCAG enhanced text-contrast requirement of 7:1.
 - Derive draggable edges, creatable lanes, labels, priorities, actors, and colors from
   server data rather than duplicating policy in JavaScript.
+- Validate the actual drop callback's payload before submitting a move. Contain
+  request/read errors, distinguish refusal from unknown outcome, always clear drag
+  decoration, and contain the final authoritative refresh. Never replay the POST.
+- Treat browser alerts as optional: storage, permission and delivery failures cannot
+  stop setup, paint or title updates. Preserve gesture-based permission requests,
+  honest unavailable/page-only state and count-baseline progression after failure.
+- PAGE declares English chrome language. Restart warnings and Add card, Save
+  description and Comment action pairs meet 4.5:1 text contrast using their actual
+  fills; configured decorative accents stay exact. Arithmetic, production-handler
+  tests and bounded real-browser computed styles have distinct roles. Synthetic
+  capability checks do not verify OS delivery or whole-site accessibility.
 
 The build ID is the short Git commit. A dirty checkout appends a fingerprint of the
 loaded source files and `-dirty`; consequently, uncommitted source edits produce

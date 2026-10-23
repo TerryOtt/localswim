@@ -418,6 +418,37 @@ def _badge_color(value: str, variables: dict[str, str]) -> str:
     return color
 
 
+@pytest.mark.parametrize(
+    "accent", ["#2266aa", "#E2A100", "#FFFFFF", "#FFFFCC", "#101820", "#777777"]
+)
+def test_action_and_restart_text_use_actual_readable_pairs(
+    monkeypatch: pytest.MonkeyPatch, accent: str
+) -> None:
+    monkeypatch.setattr(
+        board_state, "USERS", (board_state.User("reader", "Reader", board_state.HUMAN, accent),)
+    )
+    monkeypatch.setattr(board_state, "BROWSER_USER", "reader")
+    page = api_endpoint.PAGE.replace("%USERCSS%", api_endpoint.user_css())
+    variables = dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9A-Fa-f]{6})", page))
+    for selector in ("#restart", "#mk button.go", ".editrow .go", "#post"):
+        rule = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", page)
+        assert rule is not None
+        properties = dict(re.findall(r"([a-z-]+):\s*([^;]+)", rule[1]))
+        pair = [_badge_color(properties[key], variables) for key in ("color", "background")]
+        low, high = sorted(_contrast_luminance(color) for color in pair)
+        assert (high + 0.05) / (low + 0.05) >= 4.5, (selector, pair)
+    assert variables["user-reader"] == accent
+    assert "--accent: var(--user-reader);" in page
+    assert '.lane[data-css="reader"] { border-top-color: var(--user-reader); }' in page
+
+
+def test_contrast_failure_controls_and_english_root_language() -> None:
+    for foreground, background in (("#000000", "#A2221B"), ("#FFFFFF", "#E2A100")):
+        low, high = sorted(_contrast_luminance(color) for color in (foreground, background))
+        assert (high + 0.05) / (low + 0.05) < 4.5
+    assert re.findall(r"<html\b[^>]*>", api_endpoint.PAGE) == ['<html lang="en">']
+
+
 def test_priority_badges_have_enhanced_text_contrast(api: RunningApi) -> None:
     """Check the actual served palette rather than a separate expected-color table."""
     with urllib.request.urlopen(api.base + "/", timeout=5) as response:

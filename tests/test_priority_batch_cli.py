@@ -1,8 +1,10 @@
 """Atomic priority selection through the public CLI boundary."""
 
+import http.client
 import json
 import urllib.error
 import urllib.request
+from email.message import Message
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -214,7 +216,20 @@ def test_cli_batch_missing_service_is_a_clear_error(tmp_path: pathlib.Path) -> N
 @pytest.mark.parametrize("structured", [False, True], ids=["text", "json"])
 @pytest.mark.parametrize(
     "reply",
-    [b"[]", b"[1]", b"null", b'"reply"', b"23", b"1.5", b"true", b"false", b"{", None],
+    [
+        b"[]",
+        b"[1]",
+        b"null",
+        b'"reply"',
+        b"23",
+        b"1.5",
+        b"true",
+        b"false",
+        b"{",
+        None,
+        http.client.IncompleteRead(b"private partial body", 100),
+        http.client.BadStatusLine("private framing detail"),
+    ],
     ids=[
         "empty-array",
         "array",
@@ -226,12 +241,14 @@ def test_cli_batch_missing_service_is_a_clear_error(tmp_path: pathlib.Path) -> N
         "false",
         "malformed",
         "timeout",
+        "incomplete-read",
+        "bad-status-line",
     ],
 )
 def test_cli_batch_transport_uncertain_reply_never_replays(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
-    reply: bytes | None,
+    reply: bytes | Exception | None,
     *,
     structured: bool,
 ) -> None:
@@ -243,6 +260,8 @@ def test_cli_batch_transport_uncertain_reply_never_replays(
     assert "inspect before retrying" in result.stderr
     assert "nothing changed" not in result.stderr
     assert "Traceback" not in result.stderr
+    assert "private" not in result.stderr
+    assert len(result.stderr) < 250
 
 
 @pytest.mark.parametrize("structured", [False, True], ids=["text", "json"])
@@ -271,7 +290,7 @@ def test_cli_batch_transport_valid_object_reports_success(
 def invoke_batch_transport(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
-    reply: bytes | None,
+    reply: bytes | Exception | None,
     *,
     structured: bool,
 ) -> tuple[Result, list[urllib.request.Request]]:
@@ -326,12 +345,21 @@ def invoke_batch_transport(
         def close() -> None:
             closed.append(True)
 
+    class FailedRead(BytesIO):
+        def read(self, _size: int | None = -1, /) -> bytes:
+            assert isinstance(reply, Exception)
+            raise reply
+
     def respond(request: urllib.request.Request, *, timeout: float) -> BytesIO:
         requests.append(request)
         assert timeout > 0
         assert request.get_method() == "POST"
         if reply is None:
             raise urllib.error.URLError(TimeoutError("synthetic timeout"))
+        if isinstance(reply, urllib.error.HTTPError):
+            raise reply
+        if isinstance(reply, Exception):
+            return FailedRead()
         return BytesIO(reply)
 
     monkeypatch.setattr(urllib.request, "urlopen", respond)
@@ -373,3 +401,72 @@ def test_service_json_nonobject_get_preserves_error(
         board_state._service_json(  # noqa: SLF001 -- preserve the shared GET response boundary
             "http://127.0.0.1:12345/api/v001/board", "synthetic"
         )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        http.client.IncompleteRead(b"private partial body", 100),
+        http.client.BadStatusLine("private framing detail"),
+    ],
+)
+def test_service_json_get_read_failure_is_controlled(
+    monkeypatch: pytest.MonkeyPatch, failure: http.client.HTTPException
+) -> None:
+    requests: list[str] = []
+
+    class FailedRead(BytesIO):
+        def read(self, _size: int | None = -1, /) -> bytes:
+            raise failure
+
+    def respond(request: urllib.request.Request, *, timeout: float) -> BytesIO:
+        assert timeout > 0
+        requests.append(request.get_method())
+        return FailedRead()
+
+    monkeypatch.setattr(urllib.request, "urlopen", respond)
+    with pytest.raises(board_state.BoardError) as caught:
+        board_state._service_json(  # noqa: SLF001 -- shared read-only transport boundary
+            "http://127.0.0.1:12345/api/v001/board", "synthetic"
+        )
+    assert str(caught.value) == "could not read board service response; nothing changed"
+    assert requests == ["GET"]
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize("status", [403, 412])
+@pytest.mark.parametrize("body_kind", ["incomplete", "framing", "timeout", "json", "valid"])
+def test_cli_batch_known_refusal_survives_unreadable_body(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    body_kind: str,
+    *,
+    structured: bool,
+) -> None:
+    class RefusalBody(BytesIO):
+        def read(self, size: int | None = -1, /) -> bytes:
+            if body_kind == "incomplete":
+                raise http.client.IncompleteRead(b"private partial body", 100)
+            if body_kind == "framing":
+                raise http.client.BadStatusLine("private framing detail")
+            if body_kind == "timeout":
+                raise TimeoutError("private timeout detail")
+            return super().read(size)
+
+    payload = b'{"error":"known refusal"}' if body_kind == "valid" else b"{"
+    response = RefusalBody(payload)
+    refusal = urllib.error.HTTPError(
+        "http://127.0.0.1:12345/api/v001/cards/priorities", status, "refused", Message(), response
+    )
+    result, requests = invoke_batch_transport(tmp_path, monkeypatch, refusal, structured=structured)
+    assert_batch_post(requests)
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "board service refused the command" in result.stderr
+    assert ("known refusal" if body_kind == "valid" else f"HTTP {status}") in result.stderr
+    assert "unknown" not in result.stderr
+    assert "private" not in result.stderr
+    assert "Traceback" not in result.stderr
+    assert len(result.stderr) < 150
+    assert response.closed

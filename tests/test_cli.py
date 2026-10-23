@@ -8,12 +8,15 @@ import socket
 import subprocess
 import sys
 import threading
+import urllib.request
 from dataclasses import replace
+from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from localswim import api_endpoint, attachments, board_state, cli
 from tests.support import USERS
@@ -377,6 +380,33 @@ def test_shutdown_command_stops_live_service(served_board: pathlib.Path) -> None
     assert result.returncode == 0, result.stderr
     assert "shutdown scheduled" in result.stdout
     assert not board_state.service_descriptor_path(served_board).exists()
+
+
+@pytest.mark.parametrize("operation", ["mutation", "shutdown"])
+@pytest.mark.parametrize("reply", [b"{}", b'{"result":null}', b'{"result":23}'])
+def test_cli_missing_string_result_requires_inspection_without_replay(
+    served_board: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    reply: bytes,
+) -> None:
+    requests: list[str] = []
+
+    def respond(request: urllib.request.Request, *, timeout: float) -> BytesIO:
+        assert timeout > 0
+        requests.append(request.get_method())
+        return BytesIO(b'{"revision":0}' if request.get_method() == "GET" else reply)
+
+    monkeypatch.setattr(urllib.request, "urlopen", respond)
+    arguments = ["board", "shutdown"] if operation == "shutdown" else ["card", "comment", "1", "x"]
+    result = CliRunner().invoke(cli.cli, [str(served_board), *arguments])
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "mutation outcome is unknown; inspect before retrying" in result.stderr
+    assert "nothing changed" not in result.stderr
+    assert "Traceback" not in result.stderr
+    assert len(result.stderr) < 200
+    assert requests == (["POST"] if operation == "shutdown" else ["GET", "POST"])
 
 
 @pytest.mark.parametrize("operation", ["mutation", "batch", "shutdown"])

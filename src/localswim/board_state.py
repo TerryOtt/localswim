@@ -4436,11 +4436,18 @@ def _service_json(
         try:
             error_raw = cast("JsonValue", json.loads(exc.read()))
             error = error_raw.get("error", str(exc)) if isinstance(error_raw, dict) else str(exc)
-        except ValueError:
-            error = str(exc)
+        except OSError, ValueError, http.client.HTTPException:
+            error = f"HTTP {exc.code}"
         finally:
             exc.close()
         raise BoardError(f"board service refused the command: {error}") from exc
+    except http.client.HTTPException as exc:
+        outcome = (
+            "mutation outcome is unknown; inspect before retrying"
+            if body is not None
+            else "nothing changed"
+        )
+        raise BoardError(f"could not read board service response; {outcome}") from exc
     except (OSError, urllib.error.URLError, ValueError) as exc:
         outcome = (
             "mutation outcome is unknown; inspect before retrying"
@@ -4471,7 +4478,10 @@ def shutdown_service(path: pathlib.Path) -> str:
     )
     result = response.get("result")
     if not isinstance(result, str):
-        raise BoardError("board service returned no shutdown result")
+        raise BoardError(
+            "board service returned no shutdown result; "
+            "mutation outcome is unknown; inspect before retrying"
+        )
     deadline = time.monotonic() + 10
     while service_path.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -4500,7 +4510,9 @@ def apply_remote_mutation(
     response = _service_json(base + route, token, body=body, revision=revision)
     result = response.get("result")
     if not isinstance(result, str):
-        raise BoardError("board service returned no result")
+        raise BoardError(
+            "board service returned no result; mutation outcome is unknown; inspect before retrying"
+        )
     return result
 
 

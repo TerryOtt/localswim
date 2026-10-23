@@ -187,6 +187,10 @@ native board monitoring is an optional extra.
   Never replay a POST after an uncertain outcome or rotation; a preflight identity
   check is not atomic with service replacement. Do not cap full board or attachment
   payloads as metadata or expose capability values in diagnostics.
+  Contain documented HTTP response read/framing failures in CLI diagnostics.
+  Preserve known refusal status if its body is unreadable; unusable successful
+  mutation and shutdown results require unknown-outcome inspection before retry.
+  Never replay a POST to obtain a readable result.
   Serialize endpoint recovery per canonical board. Keep child/launch-ID bookkeeping
   brief; never wait for board acquisition, network, process startup or cleanup under
   that shared lock. Explicit close freezes new acquisitions and retains each exact
@@ -207,6 +211,17 @@ native board monitoring is an optional extra.
   Support cold deep links and Back/Forward. Switch boards through SPA navigation without
   document reload, with explicit errors for missing or malformed boards. Keep drafts,
   filters, selected cards, lane scrolling, and sidebar state independent per window.
+  Validate drag payload shape before any move request. Clear drag decoration in
+  finally, contain authoritative refresh failures, and distinguish known refusal
+  from an unknown mutation outcome without replay.
+  Optional alert preferences, permission checks and notification delivery must not
+  interrupt core setup, paint or title updates. Keep opt-in gesture-bound, expose
+  unavailable/page-only preference state honestly, and settle each count baseline
+  even after failed delivery rather than retrying every unchanged repaint.
+  Declare the actual English chrome language on PAGE. Keep restart warning and
+  Add card/Save description/Comment text contrast at least 4.5:1; derive action ink
+  separately from the exact configured decorative accent. Do not infer content
+  language or claim whole-site accessibility from these checks.
 - The Attention sidebar's Blocked, Needs Terry, and Ready for Review counts MUST use
   three fixed columns across all project rows. Zero counts leave blank reserved slots;
   they never shift another circle into the empty column. Preserve category labels and

@@ -127,6 +127,17 @@ Direct bookmarks, browser Back/Forward, and opening a link in another window wor
 Each window keeps its own per-board search, selected card, lane scrolling, and unsent
 comment, editor, and new-card drafts in session storage.
 
+Alerts are optional. Unavailable notification support, denied permission, storage
+failures, and delivery errors do not interrupt board setup, rendering, or title
+updates. If a preference cannot be saved, the page reports that it applies only
+to the current page. Permission requests remain tied to your opt-in gesture.
+A failed delivery is not attempted again on every unchanged repaint.
+
+The English application chrome declares its language. Restart warnings and the
+Add card, Save description, and Comment buttons use text/background pairs with
+at least 4.5:1 contrast, while configured accent colors remain unchanged for
+decorative borders. This does not declare the language of user-authored content.
+
 Unavailable or malformed boards display an error; an unknown bookmark never silently
 opens another board. Reads time out after 20 seconds, with one poll in flight for each
 board selection. If the workspace or board service stops, the page shows a recovery
@@ -805,6 +816,16 @@ A service can restart or rotate credentials between identity verification and a
 write. Such a race may refuse the request; the identity check is not an atomic
 session guarantee. An uncertain POST is never automatically repeated: inspect the
 board before retrying deliberately.
+
+HTTP read and framing failures produce controlled diagnostics. A known refusal
+stays a refusal even when its response body cannot be read. An unusable successful
+mutation or shutdown response has an unknown outcome: inspect the board before
+retrying. The CLI never automatically repeats that POST.
+
+The browser validates drag data before requesting a card move. It clears drag
+decoration and refreshes authoritative state after a submitted move, containing
+request, response-read, and refresh failures. An uncertain move is not replayed;
+inspect the refreshed board before trying again.
 
 ## Live code updates
 
