@@ -344,6 +344,26 @@ copies, including nested metadata. Their mutation cannot change later serializat
 or the compiled permission grants. Immutable policy copies may safely share compiled
 state; parsing and serialization retain the existing document shape and metadata.
 
+Standalone/default and legacy external policy reads bind parsed rules to stable
+metadata observed around the read, with finite retries. An unstable read retains
+the previously accepted grants and stays retryable; it must not consume a newer
+file stamp for older parsed rules. Stable invalid edits retain the existing
+refusal behavior. Embedded board admission remains a separate boundary. Metadata
+equality is not byte authentication: edits preserving the observed metadata may
+go undetected, and polling does not hash every file on every pass.
+Ordinary loaded policies compare device, inode, size, `st_mtime_ns` and
+`st_ctime_ns` in both the fast path and stable read. A manually constructed legacy
+policy without a stored signature retains its mtime-only fast path until it
+observes a stable read, whether the candidate is accepted or refused. Metadata ABA
+changes remain outside the guarantee.
+
+The HTTP command adapter validates its enumerated scalar fields before domain
+dispatch. Optional-create null defaults, parent/cover clearing and relationship
+replacement precedence remain explicit per-field contracts. Required omissions
+produce 400; supplied wrong scalar types produce sanitized 409 without saving or
+advancing revision. Decoder recursion is contained only at `_read_json`, before
+command execution; body-size and permission duplicate-key checks remain intact.
+
 ## Cards, identity, and audit
 
 Every card has two permanent handles:

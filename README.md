@@ -560,6 +560,11 @@ and MUST contain no other fields. Unknown lanes, self-loops, duplicate actor edg
 duplicate JSON keys are rejected. Initialization inputs may use display names, but the
 persisted policy and every runtime request use stable IDs.
 
+Legacy/default external policy reads retry a finite number of times if file
+metadata changes during the read. An unstable reload keeps the accepted permissions
+and remains retryable. This is a metadata stability check, not byte authentication;
+edits preserving the observed metadata are outside its detection guarantee.
+
 ## Data safety and Git
 
 `localswim.api_endpoint` is the sole writer while a board is live. Every mutation
@@ -664,6 +669,20 @@ Creation rejects empty required IDs or subjects before allocating a ticket. An
 omitted HTTP creation priority uses the current locked policy default. Generated
 IDs try the free title slug, then the actual next-ticket suffix, then unused
 ordinal suffixes starting at `-0002`; explicit duplicate IDs still refuse.
+
+Card and project commands require strings for their documented text/reference
+fields; Boolean, numeric and container values are refused instead of coerced.
+Creation's optional `id`, `priority`, `detail` and `owner` keep their existing
+defaults for omission, null or an empty string. Parent omission, null or an empty
+string clears the parent; cover omission or null clears the cover. Other required
+string fields do not acquire a null default. A supplied relationship `remove`
+must be a Boolean; omission means false, and a valid `replaces` retains precedence.
+Attachment removal still selects only `remove: true`.
+
+Missing required fields, malformed JSON and JSON whose nesting the decoder
+cannot handle return 400. Wrong command field types return a field-specific 409
+without echoing the supplied value. Refused commands do not save a snapshot or
+advance its revision.
 
 The board permission route accepts exactly this body, using stable actor and lane IDs:
 

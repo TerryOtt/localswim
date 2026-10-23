@@ -546,3 +546,51 @@ def test_upload_retains_orphan_on_pre_replace_uncertainty(
     [orphan] = (tmp_path / "attachments" / "0001").iterdir()
     assert orphan.read_bytes() == PNG
     assert store.snapshot().revision == 1
+
+
+@pytest.mark.parametrize("remove", [None, False, 0, 1, "true", "false", [], {}])
+def test_attachment_selector_requires_exact_true(api: RunningApi, remove: object) -> None:
+    create_card(api)
+    code, response = request_json(
+        api.base + API + "/cards/card/attachment",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=1,
+        body={
+            "remove": remove,
+            "attachmentId": None,
+            "name": "file.txt",
+            "data": base64.b64encode(b"synthetic file").decode("ascii"),
+        },
+    )
+    assert code == 200
+    assert response["revision"] == 2
+    saved = board_state.load(api.path)
+    assert saved.find("card").attachments[0].id == response["attachment"]["id"]
+    assert [event.action for event in saved.find("card").attachment_history] == ["attached"]
+
+
+@pytest.mark.parametrize("body", [{}, {"attachmentId": None}])
+def test_cover_omitted_or_null_clears_existing_cover(
+    api: RunningApi, body: dict[str, object]
+) -> None:
+    create_card(api)
+    aid = upload(api, 1)
+    code, _ = request_json(
+        api.base + API + "/cards/card/cover",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=2,
+        body={"attachmentId": aid},
+    )
+    assert code == 200
+    code, response = request_json(
+        api.base + API + "/cards/card/cover",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=3,
+        body=body,
+    )
+    assert code == 200
+    assert response["revision"] == 4
+    item = board_state.load(api.path).find("card")
+    assert item.cover_attachment is None
+    assert item.attachments[0].id == aid
+    assert item.attachment_history[-1].action == "cover_cleared"

@@ -315,6 +315,16 @@ fresh per-turn owner approval before any Astra use remain unchanged.
   without inventing owner permissions. Ticket/revision/allocator values reject bool;
   generic client revisions must be nonnegative genuine integers before POST.
   Preserve missing numeric defaults and existing valid legacy histories.
+- Validate the command adapter's enumerated string/Boolean fields before domain
+  dispatch; never coerce malformed scalar values or infer null defaults across
+  fields. Preserve optional-create defaults, explicit parent/cover clearing,
+  relationship replacement precedence and exact-true attachment removal selection.
+  Keep missing-field 400 and field-type 409 distinct. Contain JSON decoder recursion
+  at the read boundary without hiding command failures or weakening size/duplicate checks.
+- Bind external policy parses to stable observed read metadata with finite retries.
+  Instability retains accepted grants and remains retryable; never cache a newer
+  stamp for older parsed permissions. Preserve stable-invalid refusal behavior,
+  embedded admission and documented timestamp-preserving-edit limits.
 - Creation rejects empty required ID/subject strings before allocation or mutation.
   HTTP creation takes its omitted priority from the locked candidate policy. Generated
   IDs try the free base, actual next-ticket suffix, then unused ordinal suffixes

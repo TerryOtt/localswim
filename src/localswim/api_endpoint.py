@@ -4899,6 +4899,22 @@ def attachment_url(card_id: str, attachment_id: str) -> str:
     return f"{API_PREFIX}/cards/{urllib.parse.quote(card_id, safe='')}/attachments/{attachment_id}"
 
 
+def _command_string(body: board_state.JsonObject, field: str) -> str:
+    """Validate a required scalar without coercing private command content."""
+    value = body[field]
+    if not isinstance(value, str):
+        raise board_state.BoardError(f"{field} must be a string")
+    return value
+
+
+def _optional_command_string(body: board_state.JsonObject, field: str) -> str | None:
+    """Retain the explicit null/default contracts of optional create and parent fields."""
+    value = body.get(field)
+    if value is not None and not isinstance(value, str):
+        raise board_state.BoardError(f"{field} must be a string or null")
+    return value
+
+
 def apply_link_command(
     board: board_state.Board,
     ref: str,
@@ -4906,13 +4922,16 @@ def apply_link_command(
     actor: board_state.Actor,
 ) -> str:
     """Apply one add, remove, or atomic type replacement for a card relationship."""
-    kind, other = str(body["kind"]).lower(), str(body["other"])
+    kind, other = _command_string(body, "kind").lower(), _command_string(body, "other")
+    remove = body.get("remove", False)
+    if not isinstance(remove, bool):
+        raise board_state.BoardError("remove must be a Boolean")
     replaces = body.get("replaces")
     if replaces is not None:
         if not isinstance(replaces, str) or not replaces:
             raise board_state.BoardError("replaces must be a non-empty relationship kind")
         return board.replace_link(ref, replaces.lower(), kind, other, actor)
-    if body.get("remove"):
+    if remove:
         return board.unlink(ref, kind, other, actor)
     return board.link(ref, kind, other, actor)
 
@@ -4922,7 +4941,7 @@ def apply_attachment_command(
 ) -> str:
     """Validate card attachment removal or a cover choice."""
     if action == "attachment":
-        return board.remove_attachment(ref, str(body["attachmentId"]), actor)
+        return board.remove_attachment(ref, _command_string(body, "attachmentId"), actor)
     cover = body.get("attachmentId")
     if cover is not None and not isinstance(cover, str):
         raise board_state.BoardError("attachmentId must be a string or null")
@@ -4944,20 +4963,23 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
 ) -> str:
     """Translate one validated REST route into one domain mutation."""
     if command_parts == ["cards"]:
-        state = str(body["state"])
-        subject = str(body["subject"]).strip()
+        state = _command_string(body, "state")
+        subject = _command_string(body, "subject").strip()
         if not subject:
             raise board_state.BoardError("a card needs a title")
-        item_id = str(body.get("id") or slug_for(board, subject))
+        item_id = _optional_command_string(body, "id") or slug_for(board, subject)
+        priority = _optional_command_string(body, "priority") or board.policy.default_priority
+        detail = _optional_command_string(body, "detail") or ""
+        owner = _optional_command_string(body, "owner") or board.default_owner
         relationships = create_relationship_specs(body)
         result = board.create(
             item_id,
             subject,
             state,
             actor,
-            priority=str(body.get("priority") or board.policy.default_priority),
-            detail=str(body.get("detail") or ""),
-            owner=board_state.as_actor(str(body.get("owner") or board.default_owner), board.users),
+            priority=priority,
+            detail=detail,
+            owner=board_state.as_actor(owner, board.users),
         )
         for kind, other in relationships:
             board.link(item_id, kind, other, actor)
@@ -4965,7 +4987,7 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
 
     if command_parts == ["board", "project"]:
         was = board.project
-        name = str(body["project"]).strip()
+        name = _command_string(body, "project").strip()
         if not name:
             raise board_state.BoardError("a project needs a name")
         board.project = name
@@ -4975,20 +4997,24 @@ def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per RE
     if action in {"archive", "unarchive"}:
         return board.set_archived(ref, archived=action == "archive", by=actor)
     if action == "move":
-        return board.move(ref, str(body["to"]), actor)
+        return board.move(ref, _command_string(body, "to"), actor)
     if action == "comment":
-        return board.comment(ref, str(body["text"]), actor)
+        return board.comment(ref, _command_string(body, "text"), actor)
     if action == "assign":
-        return board.assign(ref, board_state.as_actor(str(body["owner"]), board.users), actor)
+        return board.assign(
+            ref, board_state.as_actor(_command_string(body, "owner"), board.users), actor
+        )
     if action == "priority":
-        return board.set_priority(ref, _single_priority_id(board, str(body["priority"])), actor)
+        return board.set_priority(
+            ref, _single_priority_id(board, _command_string(body, "priority")), actor
+        )
     if action == "subject":
-        return board.set_subject(ref, str(body["subject"]), actor)
+        return board.set_subject(ref, _command_string(body, "subject"), actor)
     if action == "detail":
-        return board.set_detail(ref, str(body["detail"]), actor)
+        return board.set_detail(ref, _command_string(body, "detail"), actor)
     if action == "parent":
-        parent = body.get("parent")
-        return board.set_parent(ref, str(parent) if parent else None, actor)
+        parent = _optional_command_string(body, "parent")
+        return board.set_parent(ref, parent or None, actor)
     if action == "link":
         return apply_link_command(board, ref, body, actor)
     raise board_state.BoardError(f"unknown card command {action!r}")
@@ -5178,12 +5204,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if len(raw) != length:
                 return None
             raw = raw or b"{}"
-            body = cast(
-                "board_state.JsonValue",
-                json.loads(raw, object_pairs_hook=_unique_request_fields)
-                if unique_fields
-                else json.loads(raw),
-            )
+            try:
+                body = cast(
+                    "board_state.JsonValue",
+                    json.loads(raw, object_pairs_hook=_unique_request_fields)
+                    if unique_fields
+                    else json.loads(raw),
+                )
+            except RecursionError:
+                self._json({"error": "bad request body"}, 400)
+                return None
             if isinstance(body, dict):
                 return body
         except ValueError, TypeError:

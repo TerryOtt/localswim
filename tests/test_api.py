@@ -1726,3 +1726,292 @@ def test_connected_body_can_finish_within_restart_drain(
         assert response.status == 200
         assert json.loads(response.read())["revision"] == 1
     assert board_state.load(api.path).find("finishing").subject == "finishing"
+
+
+# Frozen #0177 adapter contracts: omitted, null, empty, whitespace, ordinary.
+SCALAR_ROWS = [
+    ("cards", "state", "backlog", (400, 409, 409, 409, 200)),
+    ("cards", "subject", "Ordinary title", (400, 409, 409, 409, 200)),
+    ("board/project", "project", "Ordinary project", (400, 409, 409, 409, 200)),
+    ("cards/alpha/move", "to", "ready_for_work", (400, 409, 409, 409, 200)),
+    ("cards/alpha/comment", "text", "Ordinary comment", (400, 409, 409, 409, 200)),
+    ("cards/alpha/assign", "owner", "terry", (400, 409, 409, 409, 200)),
+    ("cards/alpha/priority", "priority", "P1", (400, 409, 409, 409, 200)),
+    ("cards/alpha/subject", "subject", "Ordinary title", (400, 409, 409, 409, 200)),
+    ("cards/alpha/detail", "detail", "Ordinary detail", (400, 409, 409, 409, 200)),
+    ("cards/alpha/link", "kind", "relates_to", (400, 409, 409, 409, 200)),
+    ("cards/alpha/link", "other", "target", (400, 409, 409, 409, 200)),
+    ("cards/alpha/attachment", "attachmentId", "uploaded", (400, 409, 409, 409, 200)),
+    ("cards", "id", "exact-id", (200, 200, 200, 200, 200)),
+    ("cards", "priority", "P1", (200, 200, 200, 409, 200)),
+    ("cards", "detail", "Ordinary detail", (200, 200, 200, 200, 200)),
+    ("cards", "owner", "terry", (200, 200, 200, 409, 200)),
+    ("cards/alpha/parent", "parent", "target", (200, 200, 200, 409, 200)),
+    ("cards/alpha/link", "remove", True, (200, 409, 409, 409, 200)),
+]
+SCALAR_MUTATORS = (
+    "create",
+    "move",
+    "comment",
+    "assign",
+    "set_priority",
+    "set_subject",
+    "set_detail",
+    "set_parent",
+    "link",
+    "unlink",
+    "replace_link",
+    "remove_attachment",
+)
+
+
+def assert_scalar_result(
+    saved: board_state.Board, route: str, field: str, value: object, attachment_id: str
+) -> None:
+    """Assert the actual saved branch, including each distinct default/clear contract."""
+    item = saved.find("alpha")
+    if route == "cards":
+        created = saved.find("4")
+        assert created.id == ((value or "ordinary-title") if field == "id" else "ordinary-title")
+        assert created.subject == (
+            value.strip() if field == "subject" and isinstance(value, str) else "Ordinary title"
+        )
+        assert created.state == (value if field == "state" else "backlog")
+        assert created.priority == ((value or "P3") if field == "priority" else "P3")
+        assert created.detail == ((value or "") if field == "detail" else "")
+        assert created.owner == ((value or "bot") if field == "owner" else "bot")
+    elif route == "board/project":
+        assert saved.project == "Ordinary project"
+    elif field == "to":
+        assert item.state == value
+    elif field == "text":
+        assert item.comments[-1].text == value
+    elif field == "owner":
+        assert item.owner == value
+    elif field == "priority":
+        assert item.priority == value
+    elif field == "subject":
+        assert item.subject == value
+    elif field == "detail":
+        assert item.detail == value
+    elif field == "parent":
+        assert item.parent == (value or None)
+    elif field == "attachmentId":
+        assert item.attachments == []
+        assert item.attachment_history[-1].attachment_id == attachment_id
+    elif field == "remove":
+        assert (saved.find_link("alpha", "blocks", "target") is None) is (value is True)
+    else:
+        assert saved.find_link("alpha", "relates_to", "target") is not None
+
+
+@pytest.mark.parametrize(("route", "field", "ordinary", "codes"), SCALAR_ROWS)
+def test_http_scalar_contract_matrix(  # noqa: PLR0912, PLR0913, PLR0917 -- explicit frozen matrix
+    api: RunningApi,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    field: str,
+    ordinary: object,
+    codes: tuple[int, ...],
+) -> None:
+    board = board_state.load(api.path, install_context=False)
+    for ref in ("alpha", "target", "oldparent"):
+        board.create(ref, ref.title(), "backlog", "bot")
+    board.set_parent("alpha", "oldparent", "bot")
+    board.link("alpha", "blocks", "target", "bot")
+    board_state.save(board, api.path)
+    attachment_id = ""
+    if route.endswith("/attachment"):
+        store = api_endpoint.BoardStore(api.path)
+        _, _, uploaded = store.upload(
+            0, "alpha", "file.txt", base64.b64encode(b"file").decode(), "bot"
+        )
+        attachment_id = uploaded.id
+        board = board_state.load(api.path, install_context=False)
+        ordinary = attachment_id
+    baseline_revision = board.revision
+    cases: list[tuple[str, object, int, bool]] = [
+        ("omitted", None, codes[0], False),
+        ("null", None, codes[1], codes[1] == 409),
+        ("empty", "", codes[2], field == "remove"),
+        ("whitespace", " \t ", codes[3], field == "remove"),
+        ("ordinary", ordinary, codes[4], False),
+    ]
+    cases.extend(
+        ("wrong-type", wrong, 409, True)
+        for wrong in (True, False, 0, 1, 1.5, [], ["private-scalar"], {}, {"private-scalar": 1})
+        if field != "remove" or not isinstance(wrong, bool)
+    )
+    if field == "remove":
+        cases.append(("false", False, 200, False))
+        cases.append(("string-false", "false", 409, True))
+    for mode, value, expected, no_dispatch in cases:
+        board_state.save(board, api.path)
+        api_endpoint.STORE = api_endpoint.BoardStore(api.path)
+        before = api.path.read_bytes()
+        body: dict[str, object] = (
+            {"subject": "Ordinary title", "state": "backlog"} if route == "cards" else {}
+        )
+        if route.endswith("/link"):
+            body.update(kind="blocks" if field == "remove" else "relates_to", other="target")
+        if route.endswith("/attachment"):
+            body["remove"] = True
+        body.pop(field, None)
+        if mode != "omitted":
+            body[field] = value
+
+        def refused_dispatch(*_args: object, **_kwargs: object) -> str:
+            pytest.fail(f"{route}/{field} reached a domain mutator")
+
+        with monkeypatch.context() as guarded:
+            if no_dispatch:
+                for method in SCALAR_MUTATORS:
+                    guarded.setattr(board_state.Board, method, refused_dispatch)
+            code, response = request_json(
+                api.base + API + "/" + route,
+                token=api_endpoint.CLI_TOKEN,
+                revision=baseline_revision,
+                body=body,
+            )
+        assert code == expected, (route, field, mode, response)
+        if expected != 200:
+            assert api.path.read_bytes() == before
+            assert board_state.load(api.path).revision == baseline_revision
+            if mode == "omitted":
+                assert "missing field" in response["error"]
+            if no_dispatch:
+                assert field in response["error"]
+                assert "private-scalar" not in response["error"]
+        else:
+            assert response["revision"] == baseline_revision + 1
+            saved = board_state.load(api.path)
+            assert saved.verify() == []
+            assert_scalar_result(saved, route, field, value, attachment_id)
+
+
+@pytest.mark.parametrize("remove", [False, True])
+def test_link_replacement_keeps_precedence_and_checks_remove(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch, *, remove: bool
+) -> None:
+    board = board_state.load(api.path, install_context=False)
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create("target", "Target", "backlog", "bot")
+    board.link("alpha", "blocks", "target", "bot")
+    board_state.save(board, api.path)
+    before = api.path.read_bytes()
+    body: dict[str, object] = {
+        "kind": "relates_to",
+        "other": "target",
+        "replaces": "blocks",
+        "remove": "false",
+    }
+
+    def no_replace(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("invalid remove reached replacement")
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(board_state.Board, "replace_link", no_replace)
+        code, result = request_json(
+            api.base + API + "/cards/alpha/link",
+            token=api_endpoint.CLI_TOKEN,
+            revision=0,
+            body=body,
+        )
+    assert code == 409
+    assert result["error"] == "remove must be a Boolean"
+    assert api.path.read_bytes() == before
+    body["remove"] = remove
+    code, _ = request_json(
+        api.base + API + "/cards/alpha/link", token=api_endpoint.CLI_TOKEN, revision=0, body=body
+    )
+    assert code == 200
+    saved = board_state.load(api.path)
+    assert saved.links_for("alpha") == [("relates_to", "target")]
+
+
+@pytest.mark.parametrize("shape", ["array", "object"])
+@pytest.mark.parametrize("permissions", [False, True])
+def test_over_nested_json_is_sanitized_before_dispatch(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch, shape: str, *, permissions: bool
+) -> None:
+    prefix, suffix = ("[", "]") if shape == "array" else ('{"nested":', "}")
+    raw = ('{"private-depth":' + prefix * 10000 + "0" + suffix * 10000 + "}").encode()
+    assert len(raw) < attachments.MAX_REQUEST_BYTES
+    before = api.path.read_bytes()
+
+    def no_command(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("decoder refusal dispatched a command")
+
+    original_loads = json.loads
+
+    def depth_limited_decoder(
+        value: str | bytes | bytearray,
+        **kwargs: Any,  # noqa: ANN401 -- json.loads keyword forwarding
+    ) -> Any:  # noqa: ANN401 -- preserve json.loads result typing
+        # CPython 3.15's iterative decoder can accept this depth. Inject its documented
+        # failure at the decoder boundary instead of imposing a new product depth limit.
+        if value == raw:
+            raise RecursionError("private-depth decoder sentinel")
+        return original_loads(value, **kwargs)
+
+    monkeypatch.setattr(json, "loads", depth_limited_decoder)
+    monkeypatch.setattr(api_endpoint, "_http_command_response", no_command)
+    monkeypatch.setattr(api_endpoint.BoardStore, "grant_permissions", no_command)
+    route = "/board/permissions" if permissions else "/cards"
+    bodies = [raw, b'{"private-shallow":']
+    if permissions:
+        bodies.append(b'{"actors":[],"actors":[],"create":[],"moves":[]}')
+    for body in bodies:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", api.server.server_address[1], timeout=5
+        )
+        try:
+            connection.request(
+                "POST",
+                API + route,
+                body=body,
+                headers={
+                    "Authorization": f"Bearer {api_endpoint.CLI_TOKEN}",
+                    "If-Match": '"revision-0"',
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            assert response.status == 400
+            assert json.loads(response.read()) == {"error": "bad request body"}
+        finally:
+            connection.close()
+        assert api.path.read_bytes() == before
+        assert board_state.load(api.path).revision == 0
+
+
+@pytest.mark.parametrize("permissions", [False, True])
+def test_json_decoder_valid_and_ordinary_duplicate_key_controls(
+    api: RunningApi, *, permissions: bool
+) -> None:
+    raw = (
+        b'{"actors":["bot"],"create":["backlog"],"moves":[]}'
+        if permissions
+        else b'{"subject":"First title","subject":"Second title","state":"backlog"}'
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", api.server.server_address[1], timeout=5)
+    try:
+        connection.request(
+            "POST",
+            API + ("/board/permissions" if permissions else "/cards"),
+            body=raw,
+            headers={
+                "Authorization": f"Bearer {api_endpoint.CLI_TOKEN}",
+                "If-Match": '"revision-0"',
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())["revision"] == 1
+    finally:
+        connection.close()
+    saved = board_state.load(api.path)
+    assert saved.verify() == []
+    if not permissions:
+        assert saved.find("second-title").subject == "Second title"

@@ -1,5 +1,8 @@
 """TransitionPolicy ownership, isolation, and live reload behavior."""
 
+# Controlled parser and global-wrapper seams are intentional for generation-race tests.
+# ruff: noqa: SLF001
+
 import copy
 import json
 import os
@@ -418,3 +421,209 @@ def test_invalid_json_reload_reports_location_and_keeps_valid_policy(
     assert message is not None
     assert "invalid JSON at line 3, column 12: Expecting value" in message
     assert store.policy.rules == accepted
+
+
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_direct_load_retries_changed_candidate(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, invalid_first: bool
+) -> None:
+    path = policy_file(tmp_path, "rules.json")
+    original_load = board_state._load_rules
+    calls = 0
+    if invalid_first:
+        path.write_text('{"schema": -1}', encoding="utf-8")
+
+    def changed_load(candidate: pathlib.Path) -> board_state.Rules:
+        nonlocal calls
+        calls += 1
+        try:
+            return original_load(candidate)
+        finally:
+            if calls == 1:
+                candidate.write_text(
+                    board_state.RULES_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                remove_claude_backlog_promotion(candidate)
+
+    monkeypatch.setattr(board_state, "_load_rules", changed_load)
+    policy = board_state.TransitionPolicy.load(path)
+
+    assert calls == 2
+    assert not policy.may_move("bot", "backlog", "ready_for_work")
+    assert policy.observed_mtime_ns == path.stat().st_mtime_ns
+    assert policy.observed_signature == board_state._policy_signature(path)
+
+
+def test_direct_load_refuses_finite_instability_and_recovers(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = policy_file(tmp_path, "rules.json")
+    original_load = board_state._load_rules
+    calls = 0
+
+    def unstable_load(candidate: pathlib.Path) -> board_state.Rules:
+        nonlocal calls
+        calls += 1
+        parsed = original_load(candidate)
+        remove_claude_backlog_promotion(candidate)
+        return parsed
+
+    monkeypatch.setattr(board_state, "_load_rules", unstable_load)
+    with pytest.raises(board_state.BoardError, match="unstable policy read after 3 attempts"):
+        board_state.TransitionPolicy.load(path)
+    assert calls == 3
+
+    monkeypatch.setattr(board_state, "_load_rules", original_load)
+    recovered = board_state.TransitionPolicy.load(path)
+    assert not recovered.may_move("bot", "backlog", "ready_for_work")
+    assert recovered.observed_signature == board_state._policy_signature(path)
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_direct_load_bounds_failed_final_stat(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, persistent: bool
+) -> None:
+    path = policy_file(tmp_path, "rules.json")
+    original_signature = board_state._policy_signature
+    calls = 0
+
+    def failed_final_stat(candidate: pathlib.Path) -> board_state._PolicySignature:
+        nonlocal calls
+        calls += 1
+        if calls % 2 == 0 and (persistent or calls == 2):
+            raise OSError("controlled final-stat failure")
+        return original_signature(candidate)
+
+    monkeypatch.setattr(board_state, "_policy_signature", failed_final_stat)
+    if persistent:
+        with pytest.raises(board_state.BoardError, match="unstable policy read after 3 attempts"):
+            board_state.TransitionPolicy.load(path)
+        assert calls == 6
+    else:
+        policy = board_state.TransitionPolicy.load(path)
+        assert calls == 4
+        assert policy.observed_signature == original_signature(path)
+
+
+@pytest.fixture
+def external_global_policy(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    """Install an external policy while restoring every wrapper-derived global."""
+    path = policy_file(tmp_path, "rules.json")
+    names = (
+        "_POLICY",
+        "_RULES",
+        "LANES",
+        "RULES",
+        "PRIORITIES",
+        "PRIORITY_LABEL",
+        "DEFAULT_PRIORITY",
+        "STATES",
+        "LANE_LABEL",
+        "BROWSER_EDGES",
+        "_rules_mtime",
+    )
+    for name in names:
+        monkeypatch.setattr(board_state, name, getattr(board_state, name))
+    monkeypatch.setattr(board_state, "_POLICY", board_state.TransitionPolicy.load(path))
+    return path
+
+
+def test_reload_wrapper_retries_generation_changed_after_parse(
+    external_global_policy: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = external_global_policy
+    write_policy(path, policy_doc(path), advance=True)
+    original_load = board_state._load_rules
+    calls = 0
+
+    def changed_load(candidate: pathlib.Path) -> board_state.Rules:
+        nonlocal calls
+        calls += 1
+        parsed = original_load(candidate)
+        if calls == 1:
+            remove_claude_backlog_promotion(candidate)
+        return parsed
+
+    monkeypatch.setattr(board_state, "_load_rules", changed_load)
+    message = board_state.reload_rules_if_changed()
+
+    assert message is not None
+    assert message.startswith("rules.json reloaded")
+    assert calls == 2
+    assert not board_state._POLICY.may_move("bot", "backlog", "ready_for_work")
+    assert board_state._POLICY.observed_signature == board_state._policy_signature(path)
+    assert board_state.reload_rules_if_changed() is None
+
+
+def test_reload_wrapper_instability_retains_grants_and_retries_same_final_generation(
+    external_global_policy: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = external_global_policy
+    accepted = board_state._POLICY
+    write_policy(path, policy_doc(path), advance=True)
+    original_load = board_state._load_rules
+    calls = 0
+
+    def unstable_load(candidate: pathlib.Path) -> board_state.Rules:
+        nonlocal calls
+        calls += 1
+        parsed = original_load(candidate)
+        remove_claude_backlog_promotion(candidate)
+        return parsed
+
+    monkeypatch.setattr(board_state, "_load_rules", unstable_load)
+    message = board_state.reload_rules_if_changed()
+    assert message is not None
+    assert "unstable policy read after 3 attempts" in message
+    assert calls == 3
+    assert board_state._POLICY is accepted
+    assert accepted.may_move("bot", "backlog", "ready_for_work")
+
+    # Recover without another write: the unstable candidate's stamp was not consumed.
+    monkeypatch.setattr(board_state, "_load_rules", original_load)
+    message = board_state.reload_rules_if_changed()
+    assert message is not None
+    assert message.startswith("rules.json reloaded")
+    assert not board_state._POLICY.may_move("bot", "backlog", "ready_for_work")
+
+
+def test_reload_wrapper_checks_metadata_beyond_mtime(external_global_policy: pathlib.Path) -> None:
+    path = external_global_policy
+    old_stamp = path.stat().st_mtime_ns
+    remove_claude_backlog_promotion(path)
+    os.utime(path, ns=(old_stamp, old_stamp))
+
+    message = board_state.reload_rules_if_changed()
+
+    assert message is not None
+    assert message.startswith("rules.json reloaded")
+    assert not board_state._POLICY.may_move("bot", "backlog", "ready_for_work")
+
+
+@pytest.mark.parametrize("invalid", ["schema", "actors"])
+def test_reload_wrapper_stable_invalid_is_reported_once_then_recovers(
+    external_global_policy: pathlib.Path, *, invalid: str
+) -> None:
+    path = external_global_policy
+    accepted_grants = policy_grants(board_state._POLICY)
+    doc = policy_doc(path)
+    if invalid == "schema":
+        doc["schema"] = -1
+    else:
+        doc["edges"]["other"] = doc["edges"].pop("terry")
+    write_policy(path, doc, advance=True)
+
+    message = board_state.reload_rules_if_changed()
+    assert message is not None
+    assert "changed and was REFUSED" in message
+    if invalid == "actors":
+        assert "does not list as users" in message
+    assert policy_grants(board_state._POLICY) == accepted_grants
+    assert board_state.reload_rules_if_changed() is None
+
+    path.write_text(board_state.RULES_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    remove_claude_backlog_promotion(path)
+    message = board_state.reload_rules_if_changed()
+    assert message is not None
+    assert message.startswith("rules.json reloaded")
+    assert not board_state._POLICY.may_move("bot", "backlog", "ready_for_work")

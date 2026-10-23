@@ -877,6 +877,25 @@ def _load_rules(path: pathlib.Path) -> Rules:
     return _parse_rules(raw_doc, path)
 
 
+_POLICY_READ_ATTEMPTS = 3
+_PolicySignature = tuple[int, int, int, int, int]
+
+
+def _policy_signature(path: pathlib.Path) -> _PolicySignature:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+class _UnstablePolicyReadError(BoardError):
+    """A candidate was not observed unchanged around parsing and validation."""
+
+
+class _RefusedPolicyReadError(BoardError):
+    def __init__(self, error: Exception, signature: _PolicySignature) -> None:
+        super().__init__(str(error))
+        self.signature = signature
+
+
 @dataclass(frozen=True)
 class TransitionPolicy:
     """Immutable, reloadable grants with detached document and serializer exposure."""
@@ -884,6 +903,7 @@ class TransitionPolicy:
     rules: Rules
     path: pathlib.Path
     observed_mtime_ns: int
+    observed_signature: _PolicySignature | None = None
 
     def __post_init__(self) -> None:
         table = MappingProxyType(
@@ -909,15 +929,31 @@ class TransitionPolicy:
     @classmethod
     def load(cls, path: pathlib.Path = RULES_PATH) -> Self:
         path = pathlib.Path(path)
-        rules = _load_rules(path)
-        try:
-            stamp = path.stat().st_mtime_ns
-        except OSError:
-            stamp = 0
-        policy = cls(rules, path, stamp)
-        if problems := policy.check_edges():
-            raise BoardError("; ".join(problems))
-        return policy
+        # Metadata equality is an observation, not a content hash or writer lock.
+        # Bind parsed candidates, including invalid edits, to both observations.
+        for _ in range(_POLICY_READ_ATTEMPTS):
+            before = _policy_signature(path)
+            error: Exception | None = None
+            policy: Self | None = None
+            try:
+                policy = cls(_load_rules(path), path, before[3], before)
+                if problems := policy.check_edges():
+                    error = BoardError("; ".join(problems))
+            except (BoardError, OSError, ValueError) as exc:
+                error = exc
+            try:
+                after = _policy_signature(path)
+            except OSError:
+                continue
+            if before != after:
+                continue
+            if error is not None:
+                raise _RefusedPolicyReadError(error, after) from error
+            if policy is not None:
+                return policy
+        raise _UnstablePolicyReadError(
+            f"{path}: unstable policy read after {_POLICY_READ_ATTEMPTS} attempts"
+        )
 
     @classmethod
     def from_json(cls, document: JsonObject, where: str) -> Self:
@@ -1068,17 +1104,28 @@ class TransitionPolicy:
     ) -> tuple[Self, str | None]:
         """Return a fresh policy after a complete valid edit, otherwise keep this one."""
         try:
-            stamp = self.path.stat().st_mtime_ns
+            signature = _policy_signature(self.path)
         except OSError:
             return self, None
-        if stamp == self.observed_mtime_ns:
+        if signature == self.observed_signature or (
+            self.observed_signature is None and signature[3] == self.observed_mtime_ns
+        ):
             return self, None
         try:
             fresh = type(self).load(self.path)
+        except _RefusedPolicyReadError as exc:
+            seen = type(self)(self.rules, self.path, exc.signature[3], exc.signature)
+            return seen, (f"rules.json changed and was REFUSED: {exc}. Keeping the loaded table.")
+        except (BoardError, OSError, ValueError) as exc:
+            # No stable candidate was observed: leave the marker retryable.
+            return self, (f"rules.json changed and was REFUSED: {exc}. Keeping the loaded table.")
+        try:
             if actors is not None:
                 fresh.validate_actors(actors, str(self.path), configured_edge_actors)
-        except (BoardError, OSError, ValueError) as exc:
-            seen = type(self)(self.rules, self.path, stamp)
+        except BoardError as exc:
+            seen = type(self)(
+                self.rules, self.path, fresh.observed_mtime_ns, fresh.observed_signature
+            )
             return seen, (f"rules.json changed and was REFUSED: {exc}. Keeping the loaded table.")
         return fresh, f"rules.json reloaded: {len(fresh.states)} lanes"
 
@@ -1352,9 +1399,10 @@ def reload_rules_if_changed() -> str | None:
     built and validated COMPLETELY before anything is rebound; on any failure this
     returns a message and changes nothing.
 
-    **`_rules_mtime` advances even on a rejected file.** Otherwise a broken save
+    **`_rules_mtime` advances on a stable rejected file.** Otherwise a broken save
     would be re-read, re-parsed and re-rejected on every single poll -- twice a
     second, forever -- and the log would be the only thing that noticed.
+    An unstable read retains the accepted marker so the next poll can retry.
     """
     # **Nine globals rebound, and `global` is correct here rather than a smell.** The
     # rest of this module reads these names directly, and every caller reaches them as
