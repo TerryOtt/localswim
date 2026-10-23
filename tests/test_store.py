@@ -16,7 +16,7 @@ lazy from collections.abc import Generator
 
 import pytest
 
-from localswim import api_endpoint, attachments, board_state
+from localswim import api_endpoint, attachments, board_state, write_protocol
 from tests.support import USERS
 
 
@@ -73,6 +73,57 @@ def make_store(path: pathlib.Path) -> api_endpoint.BoardStore:
 def create_alpha(board: board_state.Board) -> str:
     """Representative store command."""
     return board.create("alpha", "Alpha", "backlog", "bot")
+
+
+def prepared_store(path: pathlib.Path) -> api_endpoint.BoardStore:
+    """Create private schema-5 test data without enabling any public entrypoint."""
+    normal = make_store(path)
+    snapshot = write_protocol._prepare_initial_schema5(  # noqa: SLF001
+        normal.snapshot().to_json(),
+        "test",
+        allocate_generation=lambda: "11111111-1111-4111-8111-111111111111",
+    )
+    path.write_text(json.dumps(write_protocol._serialize_schema5(snapshot)), encoding="utf-8")  # noqa: SLF001
+    return api_endpoint._protocol2_store(path)  # noqa: SLF001
+
+
+def test_prepared_store_complete_token_persists_and_public_constructor_refuses(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    store = prepared_store(path)
+    metadata = store.write_metadata()
+    token = write_protocol.WriteToken.parse(metadata["writeToken"])
+    with pytest.raises(board_state.BoardError):
+        api_endpoint.BoardStore(path)
+    with pytest.raises(write_protocol.InvalidWriteToken):
+        store.execute(token.revision, create_alpha)
+    with pytest.raises(write_protocol.StaleWriteToken):
+        store.execute(
+            write_protocol.WriteToken("22222222-2222-4222-8222-222222222222", token.revision),
+            create_alpha,
+        )
+    assert not store.snapshot().items
+    _, revision = store.execute(token, create_alpha)
+    restarted = api_endpoint._protocol2_store(path)  # noqa: SLF001
+    assert restarted.write_metadata() == store.mutation_metadata(token, revision)
+    assert restarted.snapshot().find("alpha").subject == "Alpha"
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == 5
+
+
+def test_prepared_stale_upload_never_writes_blob(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = prepared_store(tmp_path / "board.json")
+    token = write_protocol.WriteToken.parse(store.write_metadata()["writeToken"])
+    store.execute(token, create_alpha)
+
+    def unexpected(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("stale upload reached blob persistence")
+
+    monkeypatch.setattr(attachments, "write_blob", unexpected)
+    with pytest.raises(write_protocol.StaleWriteToken):
+        store.upload(token, "alpha", "a.txt", "YQ==", "bot")
 
 
 def corrupt_admission_audit(board: board_state.Board, defect: str) -> None:
@@ -988,3 +1039,148 @@ def test_reused_execute_outcome_resets_before_early_failure(
     assert outcome.state == "uncommitted"
     assert path.read_bytes() == before
     assert store.snapshot().revision == 1
+
+
+def test_prepared_store_checks_disk_generation_with_equal_revision(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    store = prepared_store(path)
+    token = write_protocol.WriteToken.parse(store.write_metadata()["writeToken"])
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["generation"] = "22222222-2222-4222-8222-222222222222"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(write_protocol.StaleWriteToken):
+        store.execute(token, create_alpha)
+    assert path.read_bytes() == before
+    assert store.write_metadata()["generation"] == token.generation
+    assert store.snapshot().items == []
+    assert store.write_metadata()["generation"] == raw["generation"]
+
+
+@pytest.mark.parametrize("after_replace", [False, True])
+def test_prepared_upload_retains_bytes_for_unknown_or_committed_outcome(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, after_replace: bool
+) -> None:
+    path = tmp_path / "board.json"
+    store = prepared_store(path)
+    initial = write_protocol.WriteToken.parse(store.write_metadata()["writeToken"])
+    _, revision = store.execute(initial, create_alpha)
+    token = write_protocol.WriteToken(initial.generation, revision)
+    original = board_state._replace_with_retry  # noqa: SLF001
+
+    def fail(
+        source: pathlib.Path,
+        target: pathlib.Path,
+        *,
+        outcome: board_state.SaveOutcome | None = None,
+    ) -> None:
+        assert outcome is not None
+        assert outcome.state == "unknown"
+        if after_replace:
+            original(source, target, outcome=outcome)
+        raise OSError("uncertain save response")
+
+    monkeypatch.setattr(board_state, "_replace_with_retry", fail)
+    with pytest.raises(OSError, match="uncertain save response"):
+        store.upload(token, "alpha", "a.txt", "YQ==", "bot")
+    blobs = list((path.parent / "attachments").rglob("*.txt"))
+    assert len(blobs) == 1
+    saved = write_protocol._parse_schema5(json.loads(path.read_text(encoding="utf-8")), "test")  # noqa: SLF001
+    assert len(saved.board.find("alpha").attachments) == int(after_replace)
+
+
+def test_prepared_reconciliation_rechecks_complete_disk_token(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "board.json"
+    store = prepared_store(path)
+    candidate = store.snapshot()
+    candidate.create("alpha", "Alpha", "backlog", "bot", priority="P0")
+    candidate.create("urgent", "Urgent", "backlog", "bot", priority="P5")
+    candidate.links.append(board_state.Link("alpha", "blocks", "urgent"))
+    raw = candidate.to_json()
+    raw.update(schema=5, generation=store.write_metadata()["generation"])
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    original_locked = board_state.locked
+    injected = False
+    replacement_generation = "22222222-2222-4222-8222-222222222222"
+
+    @contextlib.contextmanager
+    def race(locked_path: pathlib.Path) -> Generator[None]:
+        nonlocal injected
+        if not injected:
+            injected = True
+            replacement = json.loads(path.read_text(encoding="utf-8"))
+            replacement["generation"] = replacement_generation
+            path.write_text(json.dumps(replacement), encoding="utf-8")
+        with original_locked(locked_path):
+            yield
+
+    monkeypatch.setattr(board_state, "locked", race)
+    accepted = store.snapshot()
+    assert injected
+    assert accepted.revision == 1
+    assert accepted.find("urgent").priority == "P0"
+    assert store.write_metadata()["generation"] == replacement_generation
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["generation"] == replacement_generation
+    assert saved["revision"] == 1
+
+
+def test_prepared_rejected_audit_and_floor_retains_accepted_policy_without_write(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "board.json"
+    store = prepared_store(path)
+    accepted = store.snapshot()
+    metadata = store.write_metadata()
+    rejected = store.snapshot()
+    policy = store.policy
+    rejected.create("alpha", "Alpha", "backlog", "bot", priority="P0")
+    rejected.create("urgent", "Urgent", "backlog", "bot", priority="P5")
+    rejected.links.append(board_state.Link("alpha", "blocks", "urgent"))
+    rejected.find("alpha").archived = True
+    raw = rejected.to_json()
+    raw.update(schema=5, generation=metadata["generation"])
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(board_state.BoardError, match="disk snapshot rejected"):
+        store.snapshot()
+    assert path.read_bytes() == before
+    assert store.policy is policy
+    assert store.write_metadata() == metadata
+    assert store._board.to_json() == accepted.to_json()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "dot_segments"])
+def test_prepared_store_pins_canonical_snapshot_for_read_lock_and_replace(
+    tmp_path: pathlib.Path, alias_kind: str
+) -> None:
+    target = tmp_path / "canonical.json"
+    prepared_store(target)
+    if alias_kind == "symlink":
+        alias = tmp_path / "alias.json"
+        try:
+            alias.symlink_to(target)
+        except OSError as exc:
+            if os.name == "nt" and exc.winerror == 1314:
+                pytest.skip("Windows account lacks symbolic-link privilege")
+            raise
+    else:
+        directory = tmp_path / "existing"
+        directory.mkdir()
+        alias = directory / ".." / target.name
+    store = api_endpoint._protocol2_store(alias)  # noqa: SLF001
+    token = write_protocol.WriteToken.parse(store.write_metadata()["writeToken"])
+    assert store.path == target.resolve()
+    _, revision = store.execute(token, create_alpha)
+    assert revision == token.revision + 1
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    assert raw["revision"] == revision
+    assert raw["generation"] == token.generation
+    assert json.loads(alias.read_text(encoding="utf-8")) == raw
+    if alias_kind == "symlink":
+        assert alias.is_symlink()
+    restarted = api_endpoint._protocol2_store(alias)  # noqa: SLF001
+    assert restarted.snapshot().find("alpha").subject == "Alpha"
+    assert restarted.write_metadata() == store.mutation_metadata(token, revision)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import pathlib
@@ -24,6 +25,7 @@ class CliContext:
     """One board selected at the root of a CLI command tree."""
 
     board: pathlib.Path
+    complete_token: bool = False
 
 
 def _configure_streams() -> None:
@@ -53,9 +55,15 @@ def _quote(value: str) -> str:
 
 def _mutate(context: CliContext, route: str, body: dict[str, object]) -> None:
     """Apply one mutation through the live service and print its result."""
-    result = _board_call(
-        lambda: board_state.apply_remote_mutation(context.board.resolve(), route, body)
-    )
+
+    def apply() -> str:
+        if context.complete_token:
+            return board_state.apply_remote_mutation(
+                context.board.resolve(), route, body, _complete_token=True
+            )
+        return board_state.apply_remote_mutation(context.board.resolve(), route, body)
+
+    result = _board_call(apply)
     click.echo(f"  {result}")
 
 
@@ -599,13 +607,14 @@ def card_set_priority(context: CliContext, reference: str, priority: str) -> Non
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the complete service result as JSON.")
 @click.pass_obj
-def card_set_priorities(
+def card_set_priorities(  # noqa: PLR0913 -- private paired precondition is independent of output
     context: CliContext,
     priority: str,
     references: tuple[str, ...],
     expected_revision: int | None,
     *,
     as_json: bool,
+    expected_generation: str | None = None,
 ) -> None:
     """Set PRIORITY for 1–1000 unfinished REFERENCES in one atomic transaction.
 
@@ -622,14 +631,25 @@ def card_set_priorities(
             f"provide at most {board_state.MAX_PRIORITY_BATCH} references",
             param_hint="REFERENCES",
         )
-    result = _board_call(
-        lambda: board_state.apply_remote_priority_batch(
+
+    def apply() -> board_state.JsonObject:
+        if context.complete_token:
+            return board_state.apply_remote_priority_batch(
+                context.board.resolve(),
+                references,
+                priority,
+                expected_revision=expected_revision,
+                _expected_generation=expected_generation,
+                _complete_token=True,
+            )
+        return board_state.apply_remote_priority_batch(
             context.board.resolve(),
             references,
             priority,
             expected_revision=expected_revision,
         )
-    )
+
+    result = _board_call(apply)
     if as_json:
         click.echo(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -642,6 +662,32 @@ def card_set_priorities(
     for reference, effective in priorities.items():
         if effective != priority:
             click.echo(f"  Clamped {reference}: requested {priority}, effective {effective}.")
+
+
+def _prepared_cli() -> click.Group:  # pyright: ignore[reportUnusedFunction]
+    """Construct the inert complete-token command tree without changing bootstrap."""
+    root = copy.copy(cli)
+    root.commands = dict(cli.commands)
+
+    @click.pass_context
+    def prepare(context: click.Context, board: pathlib.Path) -> None:
+        context.obj = CliContext(board, complete_token=True)
+
+    root.callback = prepare
+    cards = copy.copy(card_commands)
+    cards.commands = dict(card_commands.commands)
+    batch = copy.copy(card_set_priorities)
+    batch.params = [
+        *card_set_priorities.params,
+        click.Option(
+            ["--expected-generation"],
+            default=None,
+            help="Require this generation together with --expected-revision.",
+        ),
+    ]
+    cards.commands["set-priorities"] = batch
+    root.commands["card"] = cards
+    return root
 
 
 @card_commands.command("set-detail")

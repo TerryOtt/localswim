@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from localswim import api_endpoint, attachments, board_state
+from localswim import api_endpoint, attachments, board_state, write_protocol
 from tests.support import USERS
 
 if TYPE_CHECKING:
@@ -2183,3 +2183,114 @@ def test_json_decoder_valid_and_ordinary_duplicate_key_controls(
     assert saved.verify() == []
     if not permissions:
         assert saved.find("second-title").subject == "Second title"
+
+
+def prepare_api_store(api: RunningApi) -> write_protocol.WriteToken:
+    snapshot = write_protocol._prepare_initial_schema5(
+        board_state.load(api.path).to_json(),
+        "test",
+        allocate_generation=lambda: "11111111-1111-4111-8111-111111111111",
+    )
+    api.path.write_text(json.dumps(write_protocol._serialize_schema5(snapshot)), encoding="utf-8")
+    api_endpoint.STORE = api_endpoint._protocol2_store(api.path)
+    return snapshot.write_token
+
+
+def prepared_request(
+    api: RunningApi, route: str, raw: str | None, body: dict[str, object]
+) -> tuple[int, dict[str, Any]]:
+    headers = {
+        "Authorization": f"Bearer {api_endpoint.CLI_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    if raw is not None:
+        headers["If-Match"] = raw
+    request = urllib.request.Request(api.base + API + route, json.dumps(body).encode(), headers)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return exc.code, json.loads(exc.read())
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/cards",
+        "/board/project",
+        "/board/permissions",
+        "/cards/priorities",
+        "/cards/alpha/approve",
+        "/cards/alpha/attachment",
+        "/cards/alpha/cover",
+        "/cards/alpha/move",
+        "/cards/alpha/comment",
+    ],
+)
+def test_prepared_api_rejects_foreign_generation_before_every_mutation(
+    api: RunningApi, route: str
+) -> None:
+    token = prepare_api_store(api)
+    before = api.path.read_bytes()
+    stale = write_protocol.WriteToken("22222222-2222-4222-8222-222222222222", token.revision)
+    code, response = prepared_request(api, route, stale.format(), {"name": "a.txt", "data": "YQ=="})
+    assert code == 412
+    assert response["code"] == "state_changed"
+    assert api.path.read_bytes() == before
+    assert not list(api.path.parent.glob("attachments/**/*"))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "0",
+        '"revision-0"',
+        "*",
+        'W/"revision-0"',
+        '"generation-11111111-1111-4111-8111-111111111111-revision-00"',
+    ],
+)
+def test_prepared_api_strict_token_refusal(api: RunningApi, raw: str | None) -> None:
+    prepare_api_store(api)
+    code, response = prepared_request(api, "/board/project", raw, {"project": "Updated"})
+    assert code == 428
+    assert response["code"] == "precondition_required"
+
+
+def test_prepared_api_metadata_matches_committed_state(api: RunningApi) -> None:
+    token = prepare_api_store(api)
+    for route in ("/board", "/browser-session"):
+        code, response = request_json(api.base + API + route)
+        assert code == 200
+        assert {
+            key: response[key] for key in ("writeProtocol", "generation", "revision", "writeToken")
+        } == {
+            "writeProtocol": 2,
+            "generation": token.generation,
+            "revision": token.revision,
+            "writeToken": token.format(),
+        }
+    code, response = prepared_request(api, "/board/project", token.format(), {"project": "Updated"})
+    assert code == 200
+    committed = write_protocol.WriteToken(token.generation, token.revision + 1)
+    assert response["writeToken"] == committed.format()
+    assert response["revision"] == committed.revision
+    assert response["writeProtocol"] == 2
+    assert response["generation"] == committed.generation
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_permission_grant_preserves_legacy_error_precedence(
+    api: RunningApi, *, prepared: bool
+) -> None:
+    if prepared:
+        token = prepare_api_store(api)
+        raw = write_protocol.WriteToken(token.generation, token.revision + 1).format()
+    else:
+        raw = '"revision-1"'
+    code, response = prepared_request(api, "/board/permissions", raw, {"malformed": True})
+    assert code == (412 if prepared else 409)
+    if prepared:
+        assert response["code"] == "state_changed"

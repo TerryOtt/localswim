@@ -70,7 +70,7 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, Self, cast
+from typing import TYPE_CHECKING, Literal, Protocol, Self, TypedDict, cast
 
 from . import attachments as card_attachments
 from . import transaction_lock
@@ -92,6 +92,7 @@ EMBEDDED_POLICY_PREVIOUS_SCHEMA = 3
 DESCRIPTION_SCHEMA = 1
 PERMISSIONS_SCHEMA = 1
 API_PREFIX = "/api/v001"
+_PREPARED_WRITE_PROTOCOL = 2
 
 # **A SECOND, INDEPENDENT NUMBER, and splitting it was the first thing card #0064 had to
 # do.** One `SCHEMA` used to gate both `board.json` and `rules.json`, so flattening the
@@ -3718,7 +3719,15 @@ def edit(
             save(board, path, outcome=outcome)
 
 
-def save(board: Board, path: pathlib.Path, *, outcome: SaveOutcome | None = None) -> None:
+class _SnapshotDocument(Protocol):
+    """Private serialization seam; all snapshots share atomic replacement semantics."""
+
+    def to_json(self) -> JsonObject: ...
+
+
+def save(
+    board: _SnapshotDocument, path: pathlib.Path, *, outcome: SaveOutcome | None = None
+) -> None:
     """Write the board ATOMICALLY. The reader sees the old file or the new one.
 
     **`indent=2` and a trailing newline are not cosmetic.** A single-line JSON file
@@ -4374,15 +4383,25 @@ def _service_json(
     *,
     body: dict[str, object] | None = None,
     revision: int | None = None,
+    _write_token: str | None = None,
+    _sanitize_errors: bool = False,
     timeout: float = 5,
 ) -> JsonObject:
     """Make one authenticated service request and turn refusals into BoardError."""
     headers = {"Authorization": f"Bearer {token}"}
+    if _write_token is not None:
+        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
+
+        WriteToken.parse(_write_token)
+        if revision is not None:
+            raise BoardError("complete token and numeric revision cannot be combined")
     data: bytes | None = None
     if body is not None:
         headers["Content-Type"] = "application/json"
         if revision is not None:
             headers["If-Match"] = f'"revision-{revision}"'
+        elif _write_token is not None:
+            headers["If-Match"] = _write_token
         data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310 -- URL comes from validated loopback data
         url, data=data, headers=headers, method="POST" if body is not None else "GET"
@@ -4393,6 +4412,12 @@ def _service_json(
         ) as response:
             raw = cast("JsonValue", json.loads(response.read()))
     except urllib.error.HTTPError as exc:
+        if _write_token is not None or _sanitize_errors:
+            code = exc.code
+            exc.close()
+            raise BoardError(
+                f"board service refused the command (HTTP {code}); inspect before retrying"
+            ) from exc
         try:
             error_raw = cast("JsonValue", json.loads(exc.read()))
             error = error_raw.get("error", str(exc)) if isinstance(error_raw, dict) else str(exc)
@@ -4414,7 +4439,8 @@ def _service_json(
             if body is not None
             else "nothing changed"
         )
-        raise BoardError(f"could not reach board service; {outcome}: {exc}") from exc
+        detail = "" if _write_token is not None or _sanitize_errors else f": {exc}"
+        raise BoardError(f"could not reach board service; {outcome}{detail}") from exc
     if not isinstance(raw, dict):
         outcome = (
             "; mutation outcome is unknown; inspect before retrying" if body is not None else ""
@@ -4454,6 +4480,8 @@ def apply_remote_mutation(
     path: pathlib.Path,
     route: str,
     body: dict[str, object],
+    *,
+    _complete_token: bool = False,
 ) -> str:
     """Apply one CLI mutation through the same REST boundary the browser uses."""
     if not route.startswith(API_PREFIX + "/"):
@@ -4462,18 +4490,50 @@ def apply_remote_mutation(
     descriptor = _service_descriptor(path)
     base = f"http://{descriptor['host']}:{descriptor['port']}"
     token = str(descriptor["token"])
-    snapshot = _service_json(base + API_PREFIX + "/board", token)
-    revision = snapshot.get("revision")
-    if type(revision) is not int or revision < 0:
-        raise BoardError("board service response has no valid revision")
-
-    response = _service_json(base + route, token, body=body, revision=revision)
+    snapshot = _service_snapshot(base, token, complete=_complete_token)
+    response = _service_json(
+        base + route, token, body=body, **_snapshot_precondition(snapshot, complete=_complete_token)
+    )
     result = response.get("result")
     if not isinstance(result, str):
         raise BoardError(
             "board service returned no result; mutation outcome is unknown; inspect before retrying"
         )
     return result
+
+
+class _ServicePrecondition(TypedDict, total=False):
+    revision: int
+    _write_token: str
+
+
+def _service_snapshot(base: str, token: str, *, complete: bool) -> JsonObject:
+    """Read state once; keep private prepared transport diagnostics credential-free."""
+    if complete:
+        return _service_json(base + API_PREFIX + "/board", token, _sanitize_errors=True)
+    return _service_json(base + API_PREFIX + "/board", token)
+
+
+def _snapshot_precondition(snapshot: JsonObject, *, complete: bool) -> _ServicePrecondition:
+    """Retain one accepted read's exact precondition, never session metadata."""
+    if complete:
+        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
+
+        raw = snapshot.get("writeToken")
+        parsed = WriteToken.parse(raw)
+        if (
+            type(snapshot.get("writeProtocol")) is not int
+            or snapshot["writeProtocol"] != _PREPARED_WRITE_PROTOCOL
+            or snapshot.get("generation") != parsed.generation
+            or type(snapshot.get("revision")) is not int
+            or snapshot["revision"] != parsed.revision
+        ):
+            raise BoardError("board service response has inconsistent write metadata")
+        return {"_write_token": cast("str", raw)}
+    revision = snapshot.get("revision")
+    if type(revision) is not int or revision < 0:
+        raise BoardError("board service response has no valid revision")
+    return {"revision": revision}
 
 
 def _priority_batch_response(response: JsonObject, count: int) -> JsonObject:
@@ -4521,8 +4581,23 @@ def apply_remote_priority_batch(
     priority: str,
     *,
     expected_revision: int | None = None,
+    _expected_generation: str | None = None,
+    _complete_token: bool = False,
 ) -> JsonObject:
     """Send one bounded batch, using an explicit revision without a snapshot GET."""
+    if _complete_token and (expected_revision is None) != (_expected_generation is None):
+        raise BoardError("expected generation and revision must be supplied together")
+    if _expected_generation is not None and not _complete_token:
+        raise BoardError("generation requires the prepared complete-token adapter")
+    precondition: _ServicePrecondition = {}
+    if _complete_token and _expected_generation is not None:
+        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
+
+        precondition = {
+            "_write_token": WriteToken(
+                _expected_generation, cast("int", expected_revision)
+            ).format()
+        }
     if expected_revision is not None and (
         type(expected_revision) is not int or expected_revision < 0
     ):
@@ -4539,22 +4614,23 @@ def apply_remote_priority_batch(
     descriptor = _service_descriptor(path)
     base = f"http://{descriptor['host']}:{descriptor['port']}"
     token = str(descriptor["token"])
-    revision = expected_revision
-    if revision is None:
-        snapshot = _service_json(base + API_PREFIX + "/board", token)
-        revision = snapshot.get("revision")
-        if type(revision) is not int or revision < 0:
-            raise BoardError("board service response has no valid revision")
+    if expected_revision is None:
+        snapshot = _service_snapshot(base, token, complete=_complete_token)
+        precondition = _snapshot_precondition(snapshot, complete=_complete_token)
+    elif not _complete_token:
+        precondition = {"revision": expected_revision}
     response = _service_json(
         base + API_PREFIX + "/cards/priorities",
         token,
         body={"cards": list(references), "priority": priority},
-        revision=revision,
+        **precondition,
     )
     return _priority_batch_response(response, len(references))
 
 
-def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:
+def _remote_apply(  # noqa: PLR0912 -- legacy command mapping plus inert dispatch seam
+    path: pathlib.Path, args: argparse.Namespace, *, _complete_token: bool = False
+) -> str:
     """Translate one legacy flat CLI mutation into a live-service command."""
 
     route: str
@@ -4618,6 +4694,8 @@ def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:
     else:
         raise BoardError("no mutation requested")
 
+    if _complete_token:
+        return apply_remote_mutation(path, route, body, _complete_token=True)
     return apply_remote_mutation(path, route, body)
 
 

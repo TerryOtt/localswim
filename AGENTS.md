@@ -44,7 +44,7 @@ native board monitoring is an optional extra.
 
 ## Safety and product invariants
 
-- This branch is a NONWATCHED transaction-ownership qualification candidate. Do
+- This branch is a NONWATCHED ownership and inert write-protocol candidate. Do
   not copy, merge or install it into active shared source, or restart live services,
   without concrete all-consumer quiescence/rollback preflight and explicit rollout
   approval. Review acceptance is not operational rollout approval.
@@ -57,6 +57,18 @@ native board monitoring is an optional extra.
   Keep lifecycle/startup ownership before transaction ownership; never enter
   lifecycle or publisher locking from the transaction primitive. Do not migrate
   other OS lock consumers or expand filesystem/durability support.
+
+- Keep protocol-2 service and transport preparations private and inert. Normal
+  service, CLI and gateway construction stays schema 4 / protocol 1 until the
+  coordinated activation child. No operator/configuration/environment selector
+  may expose the incomplete protocol. Prepared mutations compare the complete
+  captured generation/revision token under transaction ownership before commands,
+  blob writes or reconciliation. Missing/malformed tokens refuse with 428; valid
+  mismatches refuse with 412 and `state_changed`. Credential refresh changes
+  authentication only, never the originating state token. Gateway preference CAS
+  remains separate. Never replay a POST after refusal or uncertain completion.
+  Preserve the atomic save/outcome boundary and accepted policy/memory on failure;
+  use narrow private adapters, not a duplicate Board model, store or HTTP client.
 
 - Keep the service bound to loopback. Do not add remote exposure, external runtime
   services, or browser network dependencies without an explicit product decision.

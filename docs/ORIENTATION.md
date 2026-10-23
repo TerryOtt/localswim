@@ -1221,3 +1221,51 @@ Later adapter integration checklist:
   once; apply validates the same sealed bytes and performs no new allocation.
 - Coordinate consumer rollout separately; this preparation authorizes no live
   migration, installation, restart, restore or backup configuration change.
+
+## Private service and transport preparation
+
+The service and transport preparation builds on `write_protocol.WriteToken` and
+the private schema-5 envelope. It is reachable only through private construction
+for synthetic tests. Production service, CLI and workspace entrypoints continue
+to use schema 4 / protocol 1. No command-line option, environment variable or
+persisted preference activates a partial protocol upgrade.
+
+The prepared store uses the existing command/admission and ownership boundaries.
+It compares both generation and revision under the store mutex and snapshot
+transaction before invoking a command, writing an attachment or persisting
+reconciliation. Missing or malformed complete tokens map to 428; a valid but
+different token maps to 412 with `state_changed`. Prepared board, session and
+successful mutation metadata carry `writeProtocol`, `generation`, `revision` and
+`writeToken`. Ordinary writes and private restart preserve the stored generation.
+Private store construction fixes one canonical path for locking, reading and
+saving; writing through an alias must preserve the alias and update its target.
+
+Private persistence retains the shared atomic save and `SaveOutcome` boundary.
+Rejected candidates do not replace accepted policy or memory, and committed or
+uncertain attachment outcomes retain their bytes. The preparation adds no restore
+operation or generation allocation during an ordinary mutation.
+
+The store's private structural schema-5 decoder does not grant admission. The
+store still performs supported priority adoption and complete audit verification
+before publication or reconciliation writes. The foundation's strict parser
+retains its full verification contract; a structurally decoded candidate must
+never be installed as accepted state by itself.
+
+The prepared CLI retains the complete token from its accepted board read and
+sends one mutation POST. Explicit priority-batch mode requires generation and
+revision together and does not fetch a newer state to replace that intent. The
+workspace forwards the exact originating header; refreshing an upstream browser
+capability changes authentication only. Per-board generation is independent of
+gateway preference revision, and browser and CLI authority remain distinct.
+Refusal, timeout, credential rotation and unusable successful responses never
+authorize automatic POST replay.
+
+Workspace discovery still uses the shipped schema-4 contract. Combined synthetic
+tests bind a known private schema-5 service through an endpoint resolver, then use
+the actual descriptor/session validation and proxy. This does not claim public
+schema-5 catalog support; coordinated activation remains responsible for it.
+
+These are isolated preparation contracts, not a migration or deployment guide.
+Browser preparation and coordinated isolated activation still follow separately.
+Live adoption requires a concrete all-consumer quiescence/rollback preflight and
+explicit operational approval; accepting a code handoff does not grant it.

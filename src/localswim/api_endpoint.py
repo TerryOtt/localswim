@@ -81,7 +81,10 @@ import urllib.parse
 import uuid
 from typing import TYPE_CHECKING, cast
 
-from . import attachments, board_state, service_ownership
+from . import attachments, board_state, service_ownership, write_protocol
+
+# Preparation intentionally consumes the private, nonproduction schema codec.
+# Types below deliberately name the private snapshot envelope.
 
 if TYPE_CHECKING:
     import socketserver
@@ -1174,6 +1177,27 @@ class RevisionConflict(board_state.BoardError):
     """A command was based on a board snapshot that is no longer current."""
 
 
+type WritePrecondition = int | write_protocol.WriteToken
+_PREPARED_WRITE_PROTOCOL = 2
+
+
+class _SnapshotWriter:
+    """Adapt only private serialization to the shared atomic save implementation."""
+
+    def __init__(self, snapshot: write_protocol._Schema5Snapshot) -> None:  # pyright: ignore[reportPrivateUsage]
+        self.snapshot = snapshot
+
+    def to_json(self) -> board_state.JsonObject:
+        return write_protocol._serialize_schema5(self.snapshot)  # noqa: SLF001
+
+
+def _protocol2_store(path: pathlib.Path) -> BoardStore:  # pyright: ignore[reportUnusedFunction]
+    """Preparation-only factory; no public constructor or startup selects this path."""
+    store = BoardStore.__new__(BoardStore)
+    store._initialize(path, None, protocol2=True)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    return store
+
+
 class BoardStore:
     """Serialize commands and publish only completely admitted disk snapshots."""
 
@@ -1182,13 +1206,122 @@ class BoardStore:
         path: pathlib.Path,
         policy: board_state.TransitionPolicy | None = None,
     ) -> None:
-        self.path = path
+        self._initialize(path, policy, protocol2=False)
+
+    def _initialize(
+        self,
+        path: pathlib.Path,
+        policy: board_state.TransitionPolicy | None,
+        *,
+        protocol2: bool,
+    ) -> None:
+        # Pin prepared reads, transaction ownership and replacement to one file.
+        # Saving through an unresolved symlink would replace the alias itself.
+        self.path = path.resolve() if protocol2 else path
+        self._protocol2 = protocol2
         self._external_policy = policy is not None
         self._mutex = threading.RLock()
         self.admission_error: str | None = None
         self._board = self._admit(policy)
         self.policy = self._board.policy
         self._policy_observation = self.policy
+
+    def _load(self, policy: board_state.TransitionPolicy | None) -> board_state.Board:
+        if not self._protocol2:
+            return board_state.load(self.path, policy, install_context=False)
+        snapshot = write_protocol._decode_schema5(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            board_state._read_json(self.path),  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            str(self.path),
+        )
+        snapshot.board.__dict__["_write_token"] = snapshot.write_token
+        snapshot.board.__dict__["_restore_receipt"] = snapshot.restore_receipt
+        return snapshot.board
+
+    def _precondition(self, board: board_state.Board) -> WritePrecondition:
+        if self._protocol2:
+            return cast("write_protocol.WriteToken", board.__dict__["_write_token"])
+        return board.revision
+
+    def _require_match(self, board: board_state.Board, expected: WritePrecondition) -> None:
+        current = self._precondition(board)
+        if self._protocol2:
+            if not isinstance(expected, write_protocol.WriteToken):
+                raise write_protocol.InvalidWriteToken("complete write token required")
+            if current != expected:
+                raise write_protocol.StaleWriteToken("state_changed")
+        elif current != expected:
+            raise RevisionConflict(
+                f"board revision is {board.revision}, not {expected}; refresh and try again"
+            )
+
+    @contextlib.contextmanager
+    def _edit(
+        self,
+        policy: board_state.TransitionPolicy | None,
+        *,
+        outcome: board_state.SaveOutcome | None = None,
+    ) -> Generator[board_state.Board]:
+        if not self._protocol2:
+            transaction = (
+                board_state.edit(self.path, policy, install_context=False)
+                if outcome is None
+                else board_state.edit(self.path, policy, install_context=False, outcome=outcome)
+            )
+            with transaction as board:
+                yield board
+            return
+        with board_state.locked(self.path):
+            board = self._load(policy)
+            yield board
+            token = cast("write_protocol.WriteToken", self._precondition(board))
+            snapshot = write_protocol._Schema5Snapshot(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                board,
+                token.generation,
+                cast("write_protocol._RestoreReceipt | None", board.__dict__["_restore_receipt"]),  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            )
+            # Save's adapter carries no command behavior; shared replacement and
+            # outcome handling remain authoritative, including post-replace failures.
+            if outcome is not None:
+                outcome.state = "unknown"
+                board_state.save(_SnapshotWriter(snapshot), self.path, outcome=outcome)
+            else:
+                board_state.save(_SnapshotWriter(snapshot), self.path)
+
+    def write_metadata(self, board: board_state.Board | None = None) -> board_state.JsonObject:
+        """Describe one accepted snapshot without a second disk admission."""
+        with self._mutex:
+            accepted = self._board if board is None else board
+            if not self._protocol2:
+                return {}
+            token = cast("write_protocol.WriteToken", self._precondition(accepted))
+            token = write_protocol.WriteToken(token.generation, accepted.revision)
+            return {
+                "writeProtocol": 2,
+                "generation": token.generation,
+                "revision": token.revision,
+                "writeToken": token.format(),
+            }
+
+    def mutation_metadata(
+        self, expected: WritePrecondition, revision: int
+    ) -> board_state.JsonObject:
+        """Bind response state to this commit, even if a later command has run."""
+        if not self._protocol2:
+            return {}
+        if not isinstance(expected, write_protocol.WriteToken):
+            raise write_protocol.InvalidWriteToken("complete write token required")
+        token = write_protocol.WriteToken(expected.generation, revision)
+        return {
+            "writeProtocol": 2,
+            "generation": token.generation,
+            "revision": revision,
+            "writeToken": token.format(),
+        }
+
+    @property
+    def write_protocol(self) -> int:
+        """Read-only protocol identity; construction alone selects the private path."""
+        return 2 if self._protocol2 else 1
 
     @staticmethod
     def _verify_candidate(candidate: board_state.Board) -> bool:
@@ -1203,12 +1336,11 @@ class BoardStore:
         return bool(promoted)
 
     def _reconcile_candidate(
-        self, policy: board_state.TransitionPolicy | None, expected_revision: int
+        self, policy: board_state.TransitionPolicy | None, expected_revision: WritePrecondition
     ) -> board_state.Board:
         """Re-read policy and audits inside the revision-checked writer transaction."""
-        with board_state.edit(self.path, policy, install_context=False) as current:
-            if current.revision != expected_revision:
-                raise RevisionConflict("disk snapshot changed during admission")
+        with self._edit(policy) as current:
+            self._require_match(current, expected_revision)
             if not self._verify_candidate(current):
                 raise RevisionConflict("disk snapshot no longer needs reconciliation")
             current.revision += 1
@@ -1217,12 +1349,12 @@ class BoardStore:
     def _read_admitted(self, policy: board_state.TransitionPolicy | None) -> board_state.Board:
         """Retry boundedly when reconciliation meets a concurrent revision change."""
         for _attempt in range(3):
-            candidate = board_state.load(self.path, policy, install_context=False)
+            candidate = self._load(policy)
             if not self._verify_candidate(candidate):
                 return candidate
             try:
-                return self._reconcile_candidate(policy, candidate.revision)
-            except RevisionConflict:
+                return self._reconcile_candidate(policy, self._precondition(candidate))
+            except RevisionConflict, write_protocol.StaleWriteToken:
                 continue
         raise board_state.BoardError("disk snapshot kept changing during admission; retry")
 
@@ -1257,7 +1389,7 @@ class BoardStore:
 
     def execute(
         self,
-        expected_revision: int,
+        expected_revision: WritePrecondition,
         command: Callable[[board_state.Board], str],
         *,
         outcome: board_state.SaveOutcome | None = None,
@@ -1267,14 +1399,8 @@ class BoardStore:
             outcome.state = "uncommitted"
         with self._mutex:
             active = self.policy if self._external_policy else None
-            with board_state.edit(
-                self.path, active, install_context=False, outcome=outcome
-            ) as candidate:
-                if candidate.revision != expected_revision:
-                    raise RevisionConflict(
-                        f"board revision is {candidate.revision}, not "
-                        f"{expected_revision}; refresh and try again"
-                    )
+            with self._edit(active, outcome=outcome) as candidate:
+                self._require_match(candidate, expected_revision)
                 result = command(candidate)
                 promoted = candidate.enforce_dependency_priorities(candidate.cli_user)
                 if promoted:
@@ -1296,18 +1422,30 @@ class BoardStore:
         self.policy = committed.policy
 
     def grant_permissions(
-        self, expected: int, body: board_state.JsonObject, actor: str
+        self, expected: WritePrecondition, body: board_state.JsonObject, actor: str
     ) -> tuple[str, int]:
         """Grant only embedded permissions through the normal locked transaction."""
         if self._external_policy:
             raise board_state.BoardError("permission grants require an embedded board policy")
-        actors, create, moves = permission_grant_specs(body)
-        return self.execute(
-            expected, lambda board: board.grant_permissions(actors, create, moves, actor)
-        )
+        if not self._protocol2:
+            actors, create, moves = permission_grant_specs(body)
+            return self.execute(
+                expected, lambda board: board.grant_permissions(actors, create, moves, actor)
+            )
+
+        def grant(board: board_state.Board) -> str:
+            actors, create, moves = permission_grant_specs(body)
+            return board.grant_permissions(actors, create, moves, actor)
+
+        return self.execute(expected, grant)
 
     def upload(
-        self, expected_revision: int, ref: str, name: object, encoded: object, actor: str
+        self,
+        expected_revision: WritePrecondition,
+        ref: str,
+        name: object,
+        encoded: object,
+        actor: str,
     ) -> tuple[str, int, attachments.Attachment]:
         """Remove new bytes only after a definitely uncommitted snapshot failure."""
         try:
@@ -4847,6 +4985,7 @@ def payload() -> bytes:
     return json.dumps(
         {
             "revision": board.revision,
+            **(STORE.write_metadata(board) if STORE is not None else {}),
             "attachmentMaxBytes": attachments.MAX_BYTES,
             "project": board.project,
             "order": ["blockingDepthDesc", "priority", "ticket"],
@@ -5211,7 +5350,7 @@ def _unique_request_fields(
 
 
 def execute_priority_batch(
-    store: BoardStore, expected: int, body: board_state.JsonObject, actor: str
+    store: BoardStore, expected: WritePrecondition, body: board_state.JsonObject, actor: str
 ) -> board_state.JsonObject:
     """Capture selected effective priorities and all changes in the locked candidate."""
     response: board_state.JsonObject = {}
@@ -5250,7 +5389,11 @@ def execute_priority_batch(
 
 
 def execute_http_command(
-    store: BoardStore, expected: int, parts: list[str], body: board_state.JsonObject, actor: str
+    store: BoardStore,
+    expected: WritePrecondition,
+    parts: list[str],
+    body: board_state.JsonObject,
+    actor: str,
 ) -> tuple[str, int, str | None, attachments.Attachment | None]:
     """Run one atomic command and capture its committed response fields."""
     is_card = len(parts) == CARD_COMMAND_PARTS and parts[0] == "cards"
@@ -5281,7 +5424,11 @@ def execute_http_command(
 
 
 def _http_command_response(
-    store: BoardStore, expected: int, parts: list[str], body: board_state.JsonObject, actor: str
+    store: BoardStore,
+    expected: WritePrecondition,
+    parts: list[str],
+    body: board_state.JsonObject,
+    actor: str,
 ) -> board_state.JsonObject:
     """Keep the ordinary command response envelope stable."""
     result, revision, effective_priority, uploaded = execute_http_command(
@@ -5382,7 +5529,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return STORE.credential_actor(browser=False) if STORE is not None else None
         return None
 
-    def _expected_revision(self) -> int | None:
+    def _expected_revision(self) -> WritePrecondition | None:
+        if STORE is not None and STORE.write_protocol == _PREPARED_WRITE_PROTOCOL:
+            values = self.headers.get_all("If-Match", [])
+            try:
+                return write_protocol.WriteToken.parse(values[0] if len(values) == 1 else None)
+            except write_protocol.InvalidWriteToken:
+                return None
         raw = self.headers.get("If-Match", "").strip().strip('"')
         if raw.startswith("revision-"):
             raw = raw.removeprefix("revision-")
@@ -5497,6 +5650,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(
                 {
                     "token": BROWSER_TOKEN,
+                    **(STORE.write_metadata(board) if STORE is not None else {}),
                     "userCSS": user_css(board),
                     "boardIdentity": hashlib.sha256(
                         str(BOARD_PATH.resolve()).casefold().encode("utf-8")
@@ -5576,7 +5730,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._json({"result": "board service shutdown scheduled", "push": detail})
 
-    def do_POST(self) -> None:  # noqa: PLR0911, PLR0912 -- explicit REST dispatch
+    def do_POST(self) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- explicit REST dispatch
         """Execute one authenticated, revision-checked domain command."""
         route = self.path.partition("?")[0]
         if route == API_PREFIX + "/shutdown":
@@ -5602,7 +5756,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         expected = self._expected_revision()
         if expected is None:
-            self._json({"error": "If-Match must name the expected board revision"}, 428)
+            self._json(
+                {
+                    "error": "If-Match must name the expected board revision",
+                    **(
+                        {"code": "precondition_required"}
+                        if STORE is not None and STORE.write_protocol == _PREPARED_WRITE_PROTOCOL
+                        else {}
+                    ),
+                },
+                428,
+            )
             return
         body = self._read_json(unique_fields=is_permissions)
         if body is None:
@@ -5622,13 +5786,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 if is_permissions:
                     result, revision = store.grant_permissions(expected, body, actor)
-                    response = {"result": result, "revision": revision}
+                    response: board_state.JsonObject = {"result": result, "revision": revision}
                 elif is_priority_batch:
                     response = execute_priority_batch(store, expected, body, actor)
                 else:
                     response = _http_command_response(store, expected, command_parts, body, actor)
+                response.update(
+                    store.mutation_metadata(expected, cast("int", response["revision"]))
+                )
             except KeyError as exc:
                 self._json({"error": f"missing field {exc}"}, 400)
+                return
+            except write_protocol.InvalidWriteToken as exc:
+                self._json({"error": str(exc), "code": "precondition_required"}, 428)
+                return
+            except write_protocol.StaleWriteToken:
+                self._json({"error": "state_changed", "code": "state_changed"}, 412)
                 return
             except RevisionConflict as exc:
                 self._json({"error": str(exc)}, 412)

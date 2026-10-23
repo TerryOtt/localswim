@@ -1,8 +1,13 @@
 # localswim
 
-> This branch is a nonwatched transaction-ownership qualification candidate.
+> This branch is a nonwatched ownership and inert write-protocol candidate.
 > It is not installed in the active shared package. Adoption and rollback require
 > separate approval and coordinated quiescence of every consumer of a board.
+
+The generation-aware service and transport preparations are private test paths.
+Normal service, CLI and gateway startup remain schema 4 / write protocol 1; no
+option, environment variable or saved setting enables a partial protocol upgrade.
+See [the contributor preparation contract](docs/ORIENTATION.md#private-service-and-transport-preparation).
 
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among

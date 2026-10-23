@@ -103,6 +103,20 @@ class Endpoint:
     port: int
     token: str
     user_css: str
+    generation: str | None = None
+    write_protocol: int | None = None
+
+    def browser_session(self, path: pathlib.Path, gateway_token: str) -> board_state.JsonObject:
+        """Expose board generation separately from gateway preferences CAS."""
+        metadata: board_state.JsonObject = {
+            "token": gateway_token,
+            "userCSS": self.user_css,
+            "boardIdentity": path_identity(path),
+        }
+        if self.write_protocol is not None:
+            metadata["writeProtocol"] = self.write_protocol
+            metadata["generation"] = self.generation
+        return metadata
 
 
 @dataclass
@@ -352,9 +366,15 @@ class Workspace:
                 or not isinstance(css, str)
             ):
                 return None
-            return Endpoint(port, token, css)
+            return self._session_endpoint(port, token, css, session)
         finally:
             connection.close()
+
+    def _session_endpoint(
+        self, port: int, token: str, css: str, _session: board_state.JsonObject
+    ) -> Endpoint:
+        """Keep public sessions on the shipped protocol until coordinated activation."""
+        return Endpoint(port, token, css)
 
     @staticmethod
     def _request_existing_upgrade(port: int) -> None:
@@ -599,6 +619,35 @@ class Workspace:
         raise TimeoutError(msg)
 
 
+class _CompleteTokenWorkspace(Workspace):
+    """Private session-validation seam; reuse all discovery and proxy behavior."""
+
+    def _session_endpoint(
+        self, port: int, token: str, css: str, _session: board_state.JsonObject
+    ) -> Endpoint:
+        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
+
+        session = _session
+        protocol = 2
+        parsed = WriteToken.parse(session.get("writeToken"))
+        if (
+            type(session.get("writeProtocol")) is not int
+            or session["writeProtocol"] != protocol
+            or session.get("generation") != parsed.generation
+            or type(session.get("revision")) is not int
+            or session["revision"] != parsed.revision
+        ):
+            raise ValueError("board service session has inconsistent write metadata")
+        return Endpoint(port, token, css, parsed.generation, protocol)
+
+
+def _prepared_workspace(  # pyright: ignore[reportUnusedFunction]
+    root: pathlib.Path, *, autopush: bool = False
+) -> Workspace:
+    """Build the private prepared gateway; no public selector activates it."""
+    return _CompleteTokenWorkspace(root, autopush=autopush)
+
+
 class WorkspaceServer(http.server.ThreadingHTTPServer):
     """Drain in-flight requests before source re-execution."""
 
@@ -838,13 +887,7 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
         try:
             path, endpoint = self.workspace.resolve_endpoint(urllib.parse.unquote(encoded_key))
             if tail == "browser-session":
-                self._json(
-                    {
-                        "token": self.workspace.token,
-                        "userCSS": endpoint.user_css,
-                        "boardIdentity": path_identity(path),
-                    }
-                )
+                self._json(endpoint.browser_session(path, self.workspace.token))
                 return
             connection = http.client.HTTPConnection(
                 api_endpoint.HOST, endpoint.port, timeout=REQUEST_TIMEOUT

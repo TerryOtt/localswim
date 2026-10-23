@@ -168,6 +168,18 @@ def _admitted_board(
 
 
 def _parse_schema5(raw: board_state.JsonValue, where: str) -> _Schema5Snapshot:
+    snapshot = _decode_schema5(raw, where)
+    if problems := snapshot.board.verify():
+        raise board_state.BoardError(f"{where}: snapshot rejected: " + "; ".join(problems))
+    return snapshot
+
+
+def _decode_schema5(raw: board_state.JsonValue, where: str) -> _Schema5Snapshot:
+    """Structural codec only; callers must fully admit before publication or saving.
+
+    BoardStore uses its existing reconciliation-before-verification admission
+    boundary. The ordinary private parser above retains full audit verification.
+    """
     if not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw["schema"] != _SCHEMA5:
         raise board_state.BoardError(f"{where}: expected private schema 5")
     generation = _generation(raw.get("generation"))
@@ -177,7 +189,8 @@ def _parse_schema5(raw: board_state.JsonValue, where: str) -> _Schema5Snapshot:
     body["schema"] = board_state.SCHEMA
     body.pop("generation")
     body.pop("restoreReceipt", None)
-    return _Schema5Snapshot(_admitted_board(body, where, reconcile=False), generation, receipt)
+    board = board_state.Board.from_json(body, where, install_context=False)
+    return _Schema5Snapshot(board, generation, receipt)
 
 
 def _serialize_schema5(snapshot: _Schema5Snapshot) -> board_state.JsonObject:
