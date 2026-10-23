@@ -686,6 +686,15 @@ filename, byte count (1 through 10 MiB), detected media type, SHA-256, timestamp
 actor. Audit replay checks attachment membership and cover choice against current
 state; activity emits action/GUID attribution without filenames or bytes.
 
+Replay retains a canonical suffix descriptor for every attachment ID, including
+inactive IDs. All later events must use that suffix. Active metadata's upload actor,
+timestamp and suffix match the latest applicable attached event, so legitimate
+remove/re-attach sequences can change upload attribution without rewriting history.
+Supported legacy omissions remain compatible. Audit verification and live admission
+refuse conflicts with card/event/field context. Publisher inventory still uses its
+existing structural load, active-file checks and exact audited path enumeration;
+it is not a separate full-audit verification boundary.
+
 `BoardStore.upload()` decodes a bounded body, checks the expected revision under the
 existing writer lock, allocates a GUID, and flushes bytes before saving metadata.
 A definitely pre-replacement failure removes the new unreferenced file. Committed
@@ -804,6 +813,13 @@ Useful refusal statuses are:
 | 409 | Domain, policy, validation, or storage refusal. |
 | 412 | Revision is stale. Refresh and retry deliberately. |
 | 428 | Missing or malformed `If-Match`. |
+
+Ticket lookup checks exact stable IDs before decimal conversion; numeric slugs retain
+their identity. Lookup and search contain interpreter conversion limits and nondecimal
+digit-like inputs with concise BoardError refusals. If-Match conversion failures use
+the existing structured 428 branch before dispatch, preserving accepted header forms,
+zero and CAS. No global digit-limit setting or arbitrary Unicode HTTP header transport
+support is introduced.
 
 Only `/v1/status` and `/mtime` remain as no-cache redirects so an old tab can discover
 the current build. Earlier board and mutation routes intentionally return 404.

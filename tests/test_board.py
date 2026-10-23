@@ -118,10 +118,48 @@ def test_create_assigns_ticket_history_and_owner(board: board_state.Board) -> No
     assert board.next_ticket == 2
 
 
-@pytest.mark.parametrize("reference", ["alpha", "1", "#1", "0001"])
+@pytest.mark.parametrize("reference", ["alpha", "1", "#1", "0001", "١", "#٠٠١"])
 def test_find_accepts_slug_and_ticket_spellings(board: board_state.Board, reference: str) -> None:
     board.create("alpha", "Alpha", "backlog", "bot")
     assert board.find(reference).id == "alpha"
+
+
+@pytest.mark.parametrize("slug", ["1", "²", "9" * 5000])
+def test_find_exact_slug_precedes_numeric_conversion(board: board_state.Board, slug: str) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    board.create(slug, "Exact slug", "backlog", "bot")
+    assert board.find(slug).id == slug
+    assert board.find(slug).ticket == 2
+
+
+@pytest.mark.parametrize("reference", ["²", "#²", "9" * 5000, "#" + "9" * 5000])
+def test_find_refuses_unsupported_numeric_conversion(
+    board: board_state.Board, reference: str
+) -> None:
+    before = copy.deepcopy(board.to_json())
+    with pytest.raises(board_state.BoardError) as caught:
+        board.find(reference)
+    assert str(caught.value) == "ticket reference requires a supported decimal number"
+    assert board.to_json() == before
+
+
+@pytest.mark.parametrize("query", ["1", "#0001", "١", "#٠٠١"])
+def test_search_accepts_decimal_ticket_spellings(board: board_state.Board, query: str) -> None:
+    board.create("alpha", "Alpha", "backlog", "bot")
+    assert [item.item.item_id for item in board_state.inspect_search_items(board, query)] == [
+        "alpha"
+    ]
+
+
+@pytest.mark.parametrize("query", ["²", "#²", "9" * 5000, "#" + "9" * 5000])
+def test_search_refuses_unsupported_numeric_conversion(
+    board: board_state.Board, query: str
+) -> None:
+    before = copy.deepcopy(board.to_json())
+    with pytest.raises(board_state.BoardError) as caught:
+        board_state.inspect_search_items(board, query)
+    assert str(caught.value) == "card search ticket requires a supported decimal number"
+    assert board.to_json() == before
 
 
 def test_create_refuses_duplicate_id(board: board_state.Board) -> None:

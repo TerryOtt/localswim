@@ -9,6 +9,7 @@ from localswim import api_endpoint, board_state
 from localswim.write_protocol import _prepare_migration_schema5 as prepare_schema5
 from localswim.write_protocol import _serialize_schema5 as serialize_schema5
 from tests.support import USERS
+from tests.test_attachments import reattached_image
 
 if TYPE_CHECKING:
     import pathlib
@@ -756,6 +757,45 @@ def test_invalid_history_admission_preserves_memory_and_disk(
     assert store._board.to_json() == accepted.to_json()  # noqa: SLF001 -- admission memory invariant
     assert store.policy is policy
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("defect", ["by", "at", "name", 0, 1, 2, 3, 4])
+def test_attachment_descriptor_admission_refusal_preserves_accepted_state(
+    tmp_path: pathlib.Path, defect: str | int
+) -> None:
+    path = tmp_path / "board.json"
+    accepted = saved_board(path)
+    reattached_image(accepted)
+    board_state.save(accepted, path)
+    store = api_endpoint.BoardStore(path)
+    policy = store.policy
+    raw = editable_json(accepted)
+    item = raw["items"][1]
+    if isinstance(defect, int):
+        item["attachmentHistory"][defect]["extension"] = ".jpg"
+        diagnostic = r"card: attachmentHistory\[\d\]\.extension conflicts"
+    else:
+        item["attachments"][0][defect] = {
+            "by": "bot",
+            "at": "2026-10-20T12:00:00Z",
+            "name": "image.jpg",
+        }[defect]
+        diagnostic = r"card: attachments\[0\]\." + ("name suffix" if defect == "name" else defect)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    # Ordinary parsing remains structural; admission supplies the audit boundary.
+    assert board_state.load(path).verify()
+    with pytest.raises(board_state.BoardError, match=diagnostic):
+        store.snapshot()
+    assert store._board.to_json() == accepted.to_json()  # noqa: SLF001 -- publication boundary
+    assert store.policy is policy
+    assert path.read_bytes() == before
+    with pytest.raises(board_state.BoardError, match=diagnostic):
+        api_endpoint.BoardStore(path)
+    assert path.read_bytes() == before
+    board_state.save(accepted, path)
+    assert store.snapshot().to_json() == accepted.to_json()
+    assert store.admission_error is None
 
 
 @pytest.mark.parametrize("field", ["history", "comments"])

@@ -136,6 +136,11 @@ native board monitoring is an optional extra.
   Browser and bot CLI uploads/removals use the sole live writer and revision checks.
   Bound publisher status arguments and use literal NUL-delimited pathspec files for
   add/commit so growing audit inventories never become one oversized command line.
+  Retain one canonical suffix per attachment ID throughout replay. Compare active
+  metadata attribution and suffix against its latest applicable attached event,
+  preserving valid remove/re-attach behavior and supported legacy omissions.
+  Refuse audit conflicts with card/event/field context; never repair history or
+  change exact publisher path enumeration into a directory glob.
   Refuse any failed status batch and clean temporary pathspec files on every outcome.
   Card attachment counts use a right-aligned paperclip and tabular numeric field with
   two digits of reserved width, exact larger totals, and accessible count labels.
@@ -336,6 +341,10 @@ fresh per-turn owner approval before any Astra use remain unchanged.
   without inventing owner permissions. Ticket/revision/allocator values reject bool;
   generic client revisions must be nonnegative genuine integers before POST.
   Preserve missing numeric defaults and existing valid legacy histories.
+  Contain numeric conversion ValueError locally in exact-ID-first lookup,
+  ticket search and If-Match parsing. Preserve supported decimal references,
+  revision-zero/header forms and CAS; refuse nondecimal digit-like or over-limit
+  values concisely without echoing giant inputs or changing global digit limits.
 - Validate the command adapter's enumerated string/Boolean fields before domain
   dispatch; never coerce malformed scalar values or infer null defaults across
   fields. Preserve optional-create defaults, explicit parent/cover clearing,

@@ -2724,7 +2724,12 @@ class Board:
 
         digits = ref.lstrip("#").lstrip("0") or "0"
         if digits.isdigit():
-            wanted = int(digits)
+            if not digits.isdecimal():
+                raise BoardError("ticket reference requires a supported decimal number")
+            try:
+                wanted = int(digits)
+            except ValueError:
+                raise BoardError("ticket reference requires a supported decimal number") from None
             for item in self.items:
                 if item.ticket == wanted:
                     return item
@@ -5403,7 +5408,14 @@ def inspect_search_items(
 
     needle = normalized_query.casefold()
     ticket_text = needle.removeprefix("#")
-    ticket_query = int(ticket_text) if ticket_text.isdecimal() else None
+    ticket_query = None
+    if ticket_text.isdigit():
+        if not ticket_text.isdecimal():
+            raise BoardError("card search ticket requires a supported decimal number")
+        try:
+            ticket_query = int(ticket_text)
+        except ValueError:
+            raise BoardError("card search ticket requires a supported decimal number") from None
     depths = blocking_order(board).depths
     selected = frozenset(selected_lanes)
     items = sorted(

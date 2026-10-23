@@ -8,6 +8,7 @@ import json
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 lazy from collections.abc import Generator
 
@@ -345,6 +346,105 @@ def test_legacy_cards_omit_attachment_fields_and_audit_mismatch_is_reported(
     board.add_attachment("card", file)
     board.find("card").attachment_history.clear()
     assert any("attachment history does not match" in problem for problem in board.verify())
+
+
+def reattached_image(board: board_state.Board) -> attachments.Attachment:
+    """Build a repeated-ID lifecycle with different current upload attribution."""
+    board.create("card", "Card", "backlog", "bot")
+    first = attachments.Attachment(
+        str(uuid.uuid4()),
+        "image.PNG",
+        len(PNG),
+        "image/png",
+        hashlib.sha256(PNG).hexdigest(),
+        "2026-10-20T12:00:00Z",
+        "bot",
+    )
+    board.add_attachment("card", first)
+    board.set_cover("card", first.id, "terry")
+    board.remove_attachment("card", first.id, "terry")
+    current = replace(first, at="2026-10-21T13:00:00Z", by="terry", name="renamed.png")
+    board.add_attachment("card", current)
+    return current
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "diagnostic"),
+    [
+        ("by", "bot", "by"),
+        ("at", "2026-10-20T12:00:00Z", "at"),
+        ("name", "image.jpg", "name suffix"),
+    ],
+)
+def test_attachment_metadata_matches_current_upload_event(
+    board: board_state.Board, field: str, value: str, diagnostic: str
+) -> None:
+    current = reattached_image(board)
+    assert board.verify() == []
+    board.find("card").attachments[0] = replace(current, **{field: value})
+    assert board.verify() == [
+        f"card: attachments[0].{diagnostic} does not match attachmentHistory[4] attached event"
+    ]
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_every_repeated_id_event_keeps_one_blob_suffix(
+    board: board_state.Board, index: int
+) -> None:
+    reattached_image(board)
+    item = board.find("card")
+    assert [event.action for event in item.attachment_history] == [
+        "attached",
+        "cover_set",
+        "cover_cleared",
+        "attachment_removed",
+        "attached",
+    ]
+    item.attachment_history[index] = replace(item.attachment_history[index], extension=".jpg")
+    problems = board.verify()
+    assert any(
+        "attachmentHistory[" in problem and ".extension conflicts" in problem
+        for problem in problems
+    )
+    assert all(problem.startswith("card:") for problem in problems)
+
+
+def test_distinct_attachment_ids_keep_independent_suffixes(board: board_state.Board) -> None:
+    current = reattached_image(board)
+    other = replace(current, id=str(uuid.uuid4()), name="other.jpg")
+    board.add_attachment("card", other)
+    board.set_cover("card", other.id, "bot")
+    assert board.verify() == []
+    board.remove_attachment("card", other.id, "terry")
+    assert board.verify() == []
+    assert board.find("card").attachments == [current]
+
+
+def test_reattached_upload_roundtrip_and_publisher_inventory(
+    board: board_state.Board, tmp_path: pathlib.Path
+) -> None:
+    file = reattached_image(board)
+    board.set_cover("card", file.id, "bot")
+    path = tmp_path / "board.json"
+    assert attachments.write_blob(path, 1, file, PNG)
+    orphan = path.parent / "attachments" / "0001" / "unrelated.txt"
+    orphan.write_bytes(b"unrelated synthetic bytes")
+    board_state.save(board, path)
+    restored = board_state.load(path)
+    assert restored.verify() == []
+    assert restored.to_json() == board.to_json()
+    assert api_endpoint._snapshot_paths(path) == [  # noqa: SLF001 -- audited publisher inventory
+        str(path),
+        str(attachments.blob_path(path, 1, file.id, ".png")),
+    ]
+    restored.remove_attachment("card", file.id, "bot")
+    board_state.save(restored, path)
+    assert board_state.load(path).verify() == []
+    assert api_endpoint._snapshot_paths(path) == [  # noqa: SLF001 -- retained audited blob
+        str(path),
+        str(attachments.blob_path(path, 1, file.id, ".png")),
+    ]
+    assert orphan.read_bytes() == b"unrelated synthetic bytes"
 
 
 @pytest.mark.parametrize("bad_id", ["../secret", "", "0" * 64])

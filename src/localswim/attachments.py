@@ -217,7 +217,7 @@ def parse_card(
 def audit_problems(
     files: list[Attachment], history: list[AttachmentEvent], cover: str | None, actors: set[str]
 ) -> list[str]:
-    """Replay attachment membership and cover choice without opening file contents."""
+    """Replay membership, blob suffixes, upload attribution, and cover choice."""
     active: set[str] = set()
     chosen: str | None = None
     problems: list[str] = []
@@ -245,6 +245,40 @@ def audit_problems(
         problems.append("attachment history does not match card attachments or cover")
     if any(file.by not in actors for file in files):
         problems.append("attachment metadata names an unknown actor")
+    problems.extend(_descriptor_problems(files, history))
+    return problems
+
+
+def _descriptor_problems(files: list[Attachment], history: list[AttachmentEvent]) -> list[str]:
+    """Keep one blob suffix per ID and compare metadata with its current upload."""
+    problems: list[str] = []
+    suffixes: dict[str, tuple[int, str]] = {}
+    uploads: dict[str, tuple[int, AttachmentEvent]] = {}
+    for index, event in enumerate(history):
+        aid = event.attachment_id
+        first_index, suffix = suffixes.setdefault(aid, (index, event.extension))
+        if event.extension != suffix:
+            problems.append(
+                f"attachmentHistory[{index}].extension conflicts with "
+                f"attachmentHistory[{first_index}].extension for attachment {aid}"
+            )
+        if event.action == "attached":
+            uploads[aid] = (index, event)
+    for index, file in enumerate(files):
+        upload = uploads.get(file.id)
+        if upload is None:
+            continue  # Membership replay already reports a missing upload.
+        event_index, event = upload
+        for field, actual, expected in (
+            ("by", file.by, event.by),
+            ("at", file.at, event.at),
+            ("name suffix", extension(file.name), event.extension),
+        ):
+            if actual != expected:
+                problems.append(
+                    f"attachments[{index}].{field} does not match "
+                    f"attachmentHistory[{event_index}] attached event"
+                )
     return problems
 
 

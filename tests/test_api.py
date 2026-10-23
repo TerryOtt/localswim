@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -1312,6 +1313,97 @@ def test_missing_revision_returns_428(api: RunningApi) -> None:
     )
     assert code == 428
     assert "If-Match" in response["error"]
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("0", 0),
+        ('"0"', 0),
+        ("revision-0", 0),
+        ('"revision-0"', 0),
+        ("١", 1),
+        ('"revision-٠"', 0),
+        ("²", None),
+        ("9" * 5000, None),
+        ("-1", None),
+    ],
+    ids=[
+        "bare-zero",
+        "quoted-zero",
+        "prefixed-zero",
+        "quoted-prefixed-zero",
+        "arabic-indic-one",
+        "quoted-prefixed-arabic-indic-zero",
+        "superscript",
+        "over-limit-decimal",
+        "negative",
+    ],
+)
+def test_expected_revision_decimal_conversion(header: str, expected: int | None) -> None:
+    """Unicode decimal parsing does not imply HTTP header transport support."""
+    handler = object.__new__(api_endpoint.Handler)
+    handler.headers = http.client.HTTPMessage()
+    handler.headers["If-Match"] = header
+    assert handler._expected_revision() == expected
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["²", '"revision-²"', "9" * 5000, '"revision-' + "9" * 5000 + '"'],
+    ids=["superscript", "quoted-prefixed-superscript", "over-limit", "quoted-prefixed-over-limit"],
+)
+def test_invalid_numeric_revision_returns_428_without_dispatch(
+    api: RunningApi, header: str
+) -> None:
+    """5,000 digits exceed Python's default conversion limit, below HTTP's line limit."""
+    before = api.path.read_bytes()
+    body = json.dumps({"id": "alpha", "subject": "Alpha", "state": "backlog"}).encode()
+    connection = http.client.HTTPConnection(api_endpoint.HOST, api.server.server_port, timeout=5)
+    with (
+        contextlib.closing(connection),
+        patch.object(api_endpoint.Handler, "_read_json") as read_body,
+        patch.object(api_endpoint, "_http_command_response") as dispatch,
+    ):
+        connection.putrequest("POST", API + "/cards")
+        connection.putheader("Authorization", f"Bearer {api_endpoint.CLI_TOKEN}")
+        connection.putheader("If-Match", header)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(len(body)))
+        # Refusal precedes body input. Defer the payload so closing the socket
+        # does not leave unread request bytes that may trigger a Windows reset.
+        connection.endheaders()
+        with connection.getresponse() as response:
+            assert response.status == 428
+            assert json.loads(response.read()) == {
+                "error": "If-Match must name the expected board revision"
+            }
+    read_body.assert_not_called()
+    dispatch.assert_not_called()
+    assert api.path.read_bytes() == before
+    assert api_endpoint.STORE is not None
+    assert api_endpoint.STORE.snapshot().revision == 0
+
+
+@pytest.mark.parametrize("header", ["0", '"0"', "revision-0", '"revision-0"'])
+def test_revision_header_forms_preserve_zero_and_cas(api: RunningApi, header: str) -> None:
+    request = urllib.request.Request(
+        api.base + API + "/cards",
+        data=json.dumps({"id": "alpha", "subject": "Alpha", "state": "backlog"}).encode(),
+        headers={
+            "Authorization": f"Bearer {api_endpoint.CLI_TOKEN}",
+            "If-Match": header,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+        assert json.loads(response.read())["revision"] == 1
+    before = api.path.read_bytes()
+    assert_http_error(request, 412)
+    assert api.path.read_bytes() == before
+    assert board_state.load(api.path).revision == 1
 
 
 def test_stale_revision_returns_412_without_write(api: RunningApi) -> None:

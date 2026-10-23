@@ -5300,7 +5300,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         raw = self.headers.get("If-Match", "").strip().strip('"')
         if raw.startswith("revision-"):
             raw = raw.removeprefix("revision-")
-        return int(raw) if raw.isdigit() else None
+        if not raw.isdecimal():
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
 
     def _attachment_get(self, route: str) -> None:
         """Serve only an active card attachment, forcing generic files to download."""

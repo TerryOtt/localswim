@@ -786,6 +786,21 @@ def test_next_rejects_invalid_arguments(
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize("query", ["²", "#²", "9" * 5000, "#" + "9" * 5000])
+def test_search_cli_refuses_unsupported_numeric_conversion(
+    tmp_path: pathlib.Path, query: str
+) -> None:
+    path = tmp_path / "board.json"
+    inspection_board(path)
+    before = path.read_bytes()
+    result = run_cli(path, "card", "search", query)
+    assert result.returncode != 0
+    assert "card search ticket requires a supported decimal number" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert len(result.stderr) < 200
+    assert path.read_bytes() == before
+
+
 def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
     tmp_path: pathlib.Path,
 ) -> None:

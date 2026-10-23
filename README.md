@@ -301,6 +301,12 @@ repeatable `--lane` option filters them. Default matching and output exclude det
 `--include-comments` explicitly adds both to the search surface and the results. Matches
 use the same embedded-policy blocking-depth, priority, and ticket ordering as `card next`.
 
+Card lookup checks exact stable IDs before ticket conversion, including IDs made entirely
+of digits. Search retains its numeric ticket-query behavior. Numeric references retain
+supported decimal digits; digit-like characters
+that are not decimal digits and numbers beyond the interpreter's conversion limit
+receive concise refusals. The command does not echo an oversized numeric input.
+
 Catch up on the newest board comments without choosing a time boundary:
 
 ~~~console
@@ -477,6 +483,11 @@ and atomic. A failure known to occur before snapshot replacement removes the new
 upload. Once replacement may have happened, bytes are retained even if lock cleanup,
 in-memory publication or the response fails. Inspect the card's attachments before
 retrying an unsuccessful upload: its metadata may already be committed.
+
+Attachment audit verification checks a consistent stored suffix for each GUID across
+its history. Active metadata must match the latest applicable upload's actor, timestamp
+and suffix. A valid removal and re-attachment can record a new upload attribution;
+supported legacy omissions remain accepted. Conflicts are refused rather than repaired.
 
 An uncertain or interrupted replacement may leave an unreferenced file, including
 when the operating system refuses the replacement. These conservative orphan files
@@ -772,6 +783,10 @@ Mutations require the per-process bearer credential and an
 If-Match: "revision-N" header. Credentials are published in a user-local temporary
 service descriptor; they are not stored in the board. The shutdown route accepts only
 the CLI credential and does not change the board revision.
+
+Missing, malformed or unconvertible `If-Match` values receive the existing HTTP 428
+response before command dispatch. Supported bare, quoted and `revision-` forms retain
+nonnegative revisions, including zero, and the existing stale-revision checks.
 
 CLI writes and shutdown verify that both the local descriptor and the live
 browser-session identity name the requested canonical board before sending a POST.
