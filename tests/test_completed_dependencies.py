@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from localswim import api_endpoint, board_state
+from tests.support import token as fixture_token
 
 if TYPE_CHECKING:
     import pathlib
@@ -226,7 +227,7 @@ def test_reopening_resumes_audited_inheritance_in_one_transaction(
     board_state.save(board, path)
     store = api_endpoint.BoardStore(path)
     _, revision = store.execute(
-        0, lambda candidate: candidate.move("done", "ready_for_work", "terry")
+        fixture_token(0), lambda candidate: candidate.move("done", "ready_for_work", "terry")
     )
     saved = store.snapshot()
     assert revision == saved.revision == 1
@@ -263,7 +264,9 @@ def test_reopening_and_cascade_roll_back_when_snapshot_save_fails(
 
     monkeypatch.setattr(board_state, "save", refuse_save)
     with pytest.raises(OSError, match="injected save failure"):
-        store.execute(0, lambda candidate: candidate.move("done", "ready_for_work", "terry"))
+        store.execute(
+            fixture_token(0), lambda candidate: candidate.move("done", "ready_for_work", "terry")
+        )
     assert path.read_bytes() == before
     assert store.snapshot().to_json() == board.to_json()
 

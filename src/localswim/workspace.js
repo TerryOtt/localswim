@@ -503,9 +503,12 @@
     } catch (err) { document.getElementById('ws-status').textContent = String(err); if (!initialized || retryNow) error('Could not reach the workspace. Restart localswim, then Retry.'); }
     finally { refreshing = false; if (retryRequested) refresh(); }
   }
-  function reconcile(prefix, path, body) {
+  function reconcile(prefix, path, body, generation) {
     const key = decodeURIComponent(prefix.split('/').pop());
     const saved = state.records[key]; if (!saved) return;
+    // A confirmed old navigation must not clear text captured in another generation.
+    if (!saved.browserIntent || saved.browserIntent.generation !== generation) return;
+    if (current === key && data.generation !== generation) return;
     const tail = path.slice(prefix.length).split('/').filter(Boolean);
     const id = tail[1] && decodeURIComponent(tail[1]), action = tail[2];
     if (action === 'comment' && saved.drafts && typeof saved.drafts[id] === 'string' && saved.drafts[id].trim() === body.text) {

@@ -15,6 +15,7 @@ lazy from collections.abc import Generator
 import pytest
 
 from localswim import api_endpoint, attachments, board_state
+from tests.support import token as fixture_token
 from tests.test_api import api, request_json
 from tests.test_cli import assert_cli, run_cli, served_board
 from tests.test_store import initialize_autopush_repository, make_store, run_git
@@ -197,7 +198,7 @@ def test_size_boundary_and_oversized_http_refusal(api: RunningApi) -> None:
         method="POST",
         headers={
             "Authorization": f"Bearer {api_endpoint.BROWSER_TOKEN}",
-            "If-Match": '"revision-1"',
+            "If-Match": '"generation-11111111-1111-4111-8111-111111111111-revision-1"',
             "Content-Length": str(attachments.MAX_REQUEST_BYTES + 1),
         },
     )
@@ -231,7 +232,7 @@ def test_snapshot_failure_rolls_back_uploaded_bytes(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.execute(fixture_token(0), lambda board: board.create("card", "Card", "backlog", "bot"))
     before = path.read_bytes()
 
     fsync = board_state.os.fsync
@@ -246,7 +247,9 @@ def test_snapshot_failure_rolls_back_uploaded_bytes(
 
     monkeypatch.setattr(board_state.os, "fsync", fail_fsync)
     with pytest.raises(OSError, match="injected"):
-        store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+        store.upload(
+            fixture_token(1), "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot"
+        )
     assert path.read_bytes() == before
     assert list((tmp_path / "attachments" / "0001").iterdir()) == []
     assert store.snapshot().find("card").attachments == []
@@ -279,9 +282,9 @@ def test_attachment_git_snapshot_excludes_unrelated_files(tmp_path: pathlib.Path
     path = repo / "localswim" / "board.json"
     path.parent.mkdir()
     store = make_store(path)
-    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.execute(fixture_token(0), lambda board: board.create("card", "Card", "backlog", "bot"))
     _, _, file = store.upload(
-        1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot"
+        fixture_token(1), "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot"
     )
     unrelated = path.parent / "attachments" / "0001" / "unrelated.txt"
     unrelated.write_text("do not commit", encoding="utf-8")
@@ -295,7 +298,7 @@ def test_attachment_git_snapshot_excludes_unrelated_files(tmp_path: pathlib.Path
         "localswim/board.json",
     ]
     assert run_git(repo, "diff", "--cached", "--name-only").stdout.strip().endswith("unrelated.txt")
-    store.execute(2, lambda board: board.remove_attachment("card", file.id, "bot"))
+    store.execute(fixture_token(2), lambda board: board.remove_attachment("card", file.id, "bot"))
     assert api_endpoint.push_board(path)[0]
     assert (
         run_git(repo, "rev-parse", "HEAD").stdout
@@ -496,7 +499,7 @@ def test_upload_retains_bytes_when_snapshot_committed_or_unknown(  # noqa: PLR09
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.execute(fixture_token(0), lambda board: board.create("card", "Card", "backlog", "bot"))
     accepted = store._board  # noqa: SLF001 -- inspect publication boundary
     locked = board_state.locked
     replace = board_state.pathlib.Path.replace
@@ -543,7 +546,13 @@ def test_upload_retains_bytes_when_snapshot_committed_or_unknown(  # noqa: PLR09
             fault.setattr(board_state.pathlib.Path, "replace", interrupt_replace)
             expected = OSError if boundary == "primitive_response" else KeyboardInterrupt
         with pytest.raises(expected) as caught:
-            store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+            store.upload(
+                fixture_token(1),
+                "card",
+                "picture.png",
+                base64.b64encode(PNG).decode("ascii"),
+                "bot",
+            )
         if boundary == "interruption":
             assert caught.value is failure
     assert store._board is accepted  # noqa: SLF001 -- failure did not acknowledge publication
@@ -565,8 +574,10 @@ def test_upload_failed_replace_preserves_snapshot_and_retains_unknown_bytes(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
-    store.upload(1, "card", "prior.png", base64.b64encode(PNG).decode("ascii"), "bot")
+    store.execute(fixture_token(0), lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.upload(
+        fixture_token(1), "card", "prior.png", base64.b64encode(PNG).decode("ascii"), "bot"
+    )
     before = path.read_bytes()
     prior = list((tmp_path / "attachments" / "0001").iterdir())
 
@@ -579,7 +590,9 @@ def test_upload_failed_replace_preserves_snapshot_and_retains_unknown_bytes(
 
     monkeypatch.setattr(board_state.pathlib.Path, "replace", fail_replace)
     with pytest.raises(OSError, match="snapshot replacement refused"):
-        store.upload(2, "card", "next.png", base64.b64encode(PNG).decode("ascii"), "bot")
+        store.upload(
+            fixture_token(2), "card", "next.png", base64.b64encode(PNG).decode("ascii"), "bot"
+        )
     assert path.read_bytes() == before
     retained = list((tmp_path / "attachments" / "0001").iterdir())
     assert len(retained) == 2
@@ -593,7 +606,7 @@ def test_upload_compensation_failure_preserves_original_exception(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.execute(fixture_token(0), lambda board: board.create("card", "Card", "backlog", "bot"))
     unlink = board_state.pathlib.Path.unlink
     primary = OSError("snapshot replacement refused")
 
@@ -615,7 +628,9 @@ def test_upload_compensation_failure_preserves_original_exception(
     monkeypatch.setattr(board_state.os, "fsync", fail_fsync)
     monkeypatch.setattr(board_state.pathlib.Path, "unlink", fail_compensation)
     with pytest.raises(OSError, match="snapshot replacement refused") as caught:
-        store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+        store.upload(
+            fixture_token(1), "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot"
+        )
     assert caught.value is primary
     assert any("blob cleanup refused" in note for note in caught.value.__notes__)
     assert board_state.load(path).revision == 1
@@ -626,7 +641,7 @@ def test_upload_retains_orphan_on_pre_replace_uncertainty(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.execute(fixture_token(0), lambda board: board.create("card", "Card", "backlog", "bot"))
     before = path.read_bytes()
 
     def interrupt_helper(
@@ -641,7 +656,9 @@ def test_upload_retains_orphan_on_pre_replace_uncertainty(
 
     monkeypatch.setattr(board_state, "_replace_with_retry", interrupt_helper)
     with pytest.raises(KeyboardInterrupt, match="replacement call interrupted"):
-        store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+        store.upload(
+            fixture_token(1), "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot"
+        )
     assert path.read_bytes() == before
     [orphan] = (tmp_path / "attachments" / "0001").iterdir()
     assert orphan.read_bytes() == PNG

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from localswim import api_endpoint, board_state
+from localswim import api_endpoint, board_state, write_protocol
+from tests.support import token as fixture_token
 from tests.test_api import API, RunningApi, request_json
 from tests.test_api import api as api_fixture
 from tests.test_completed_dependencies import complete
@@ -233,7 +234,15 @@ def test_api_reports_canonical_selection_and_every_cascade_in_ticket_order(
     code, response = batch(api, {"cards": ["#0002", "root"], "priority": "P1"})
 
     assert code == 200
-    assert set(response) == {"result", "revision", "priorities", "changes"}
+    assert set(response) == {
+        "result",
+        "revision",
+        "priorities",
+        "changes",
+        "generation",
+        "writeProtocol",
+        "writeToken",
+    }
     assert response["revision"] == 1
     assert response["priorities"] == {"root": "P1", "middle": "P1"}
     assert response["changes"] == [
@@ -303,7 +312,7 @@ def test_api_stale_revision_cannot_change_concurrently_completed_selection(
         complete(candidate, "a")
         return "completed"
 
-    api_endpoint.STORE.execute(0, finish)
+    api_endpoint.STORE.execute(fixture_token(0), finish)
     before = api.path.read_bytes()
     code, _ = batch(api, {"cards": ["a"], "priority": "P3"})
     assert code == 412
@@ -334,14 +343,19 @@ def test_store_failure_does_not_publish_candidate(
         error = board_state.BoardError
     else:
 
-        def fail_save(_board: board_state.Board, _path: pathlib.Path) -> None:
+        def fail_save(
+            _board: board_state.Board,
+            _path: pathlib.Path,
+            *,
+            outcome: board_state.SaveOutcome | None = None,  # noqa: ARG001 -- save call shape
+        ) -> None:
             raise OSError("injected save failure")
 
         monkeypatch.setattr(board_state, "save", fail_save)
         error = OSError
     with pytest.raises(error, match="injected"):
         api_endpoint.execute_priority_batch(
-            store, 0, {"cards": ["a", "b"], "priority": "P3"}, "bot"
+            store, fixture_token(0), {"cards": ["a", "b"], "priority": "P3"}, "bot"
         )
     assert path.read_bytes() == before
     monkeypatch.undo()
@@ -361,16 +375,20 @@ def test_response_captured_before_another_writer_commit(
 
     def execute_then_interleave(
         current: api_endpoint.BoardStore,
-        expected: int,
+        expected: write_protocol.WriteToken,
         command: Callable[[board_state.Board], str],
     ) -> tuple[str, int]:
         result = original(current, expected, command)
-        original(current, result[1], lambda candidate: candidate.set_priority("a", "P0", "terry"))
+        original(
+            current,
+            fixture_token(result[1]),
+            lambda candidate: candidate.set_priority("a", "P0", "terry"),
+        )
         return result
 
     monkeypatch.setattr(api_endpoint.BoardStore, "execute", execute_then_interleave)
     response = api_endpoint.execute_priority_batch(
-        store, 0, {"cards": ["a"], "priority": "P3"}, "bot"
+        store, fixture_token(0), {"cards": ["a"], "priority": "P3"}, "bot"
     )
     assert response["revision"] == 1
     assert response["priorities"] == {"a": "P3"}
@@ -417,18 +435,28 @@ def test_remote_batch_makes_exactly_one_post_and_only_fetches_omitted_revision(
     expected: int | None,
 ) -> None:
     mock_descriptor(monkeypatch)
-    calls: list[tuple[str, dict[str, object] | None, int | None]] = []
+    calls: list[tuple[str, dict[str, object] | None, str | None]] = []
 
     def request(
         url: str,
         token: str,
         *,
         body: dict[str, object] | None = None,
-        revision: int | None = None,
+        write_token: str | None = None,
+        _sanitize_errors: bool = False,
     ) -> board_state.JsonObject:
         assert token == SYNTHETIC_BEARER
-        calls.append((url, body, revision))
-        return {"revision": 7} if body is None else batch_reply()
+        calls.append((url, body, write_token))
+        return (
+            {
+                "writeProtocol": 2,
+                "generation": fixture_token(7).generation,
+                "revision": 7,
+                "writeToken": fixture_token(7).format(),
+            }
+            if body is None
+            else batch_reply()
+        )
 
     monkeypatch.setattr(board_state, "_service_json", request)
     response = board_state.apply_remote_priority_batch(
@@ -436,12 +464,13 @@ def test_remote_batch_makes_exactly_one_post_and_only_fetches_omitted_revision(
         ["#1"],
         "normalCase",
         expected_revision=expected,
+        expected_generation=None if expected is None else fixture_token(0).generation,
     )
     assert response == batch_reply()
     post = (
         "http://127.0.0.1:8792" + API + "/cards/priorities",
         {"cards": ["#1"], "priority": "normalCase"},
-        7 if expected is None else expected,
+        fixture_token(7 if expected is None else expected).format(),
     )
     assert calls == (
         [("http://127.0.0.1:8792" + API + "/board", None, None), post]
@@ -466,6 +495,7 @@ def test_invalid_explicit_revision_rejected_before_service_access(
             ["a"],
             "P3",
             expected_revision=revision,
+            expected_generation=fixture_token(0).generation,
         )
 
 
@@ -503,12 +533,12 @@ def test_client_rejects_malformed_structured_reply_without_retry(
         _token: str,
         *,
         body: dict[str, object],
-        revision: int,
+        write_token: str,
     ) -> board_state.JsonObject:
         nonlocal calls
         calls += 1
         assert body == {"cards": ["a"], "priority": "normalCase"}
-        assert revision == 7
+        assert write_token == fixture_token(7).format()
         return bad_reply if not bad_reply else batch_reply() | bad_reply
 
     monkeypatch.setattr(board_state, "_service_json", request)
@@ -518,6 +548,7 @@ def test_client_rejects_malformed_structured_reply_without_retry(
             ["a"],
             "normalCase",
             expected_revision=7,
+            expected_generation=fixture_token(0).generation,
         )
     assert calls == 1
 
@@ -534,11 +565,11 @@ def test_explicit_revision_refusal_is_not_refreshed_or_retried(
         _token: str,
         *,
         body: dict[str, object],
-        revision: int,
+        write_token: str,
     ) -> board_state.JsonObject:
         nonlocal calls
         calls += 1
-        assert revision == 0
+        assert write_token == fixture_token(0).format()
         assert body["cards"] == ["a"]
         raise board_state.BoardError("board revision is 1, not 0")
 
@@ -549,6 +580,7 @@ def test_explicit_revision_refusal_is_not_refreshed_or_retried(
             ["a"],
             "P3",
             expected_revision=0,
+            expected_generation=fixture_token(0).generation,
         )
     assert calls == 1
 
@@ -566,7 +598,7 @@ def test_mutation_timeout_reports_unknown_outcome_without_retry(
         assert timeout > 0
         assert request.method == "POST"
         assert request.get_header("Authorization") == f"Bearer {SYNTHETIC_BEARER}"
-        assert request.get_header("If-match") == '"revision-0"'
+        assert request.get_header("If-match") == fixture_token(0).format()
         assert isinstance(request.data, bytes)
         assert json.loads(request.data) == {"cards": ["a"], "priority": "P3"}
         raise urllib.error.URLError(TimeoutError("synthetic timeout"))
@@ -578,6 +610,7 @@ def test_mutation_timeout_reports_unknown_outcome_without_retry(
             ["a"],
             "P3",
             expected_revision=0,
+            expected_generation=fixture_token(0).generation,
         )
     assert "nothing changed" not in str(caught.value)
     assert calls == 1

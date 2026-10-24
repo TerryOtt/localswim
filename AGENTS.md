@@ -12,6 +12,8 @@ native board monitoring is an optional extra.
   bounded file validation, safe storage paths, and immutable file integrity.
 - `src/localswim/transaction_lock.py` owns the dependency-free persistent local
   transaction lock, canonical thread serialization and owned-descriptor cleanup.
+- `src/localswim/write_protocol.py` owns canonical generation, complete write-token
+  and maintenance-receipt validation for the public schema-5 contract.
 - `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
@@ -32,7 +34,7 @@ native board monitoring is an optional extra.
   configuration source; `uv.lock` is committed for reproducible development and CI.
 - `examples/board-description.example.json` and `examples/permissions.example.json`
   are generic human-readable initialization inputs. `examples/board.example.json` is
-  their checked, empty schema-4 output.
+  their checked, empty schema-5 output.
 - The parallel `examples/*.terry-workflow.json` files preserve Terry's preferred
   personal workflow, also used by FGA, without making it the generic product default.
 - `docs/ORIENTATION.md` is the contributor map for architecture, data flow, schemas,
@@ -44,7 +46,7 @@ native board monitoring is an optional extra.
 
 ## Safety and product invariants
 
-- This branch is a NONWATCHED ownership and inert write-protocol candidate. Do
+- This branch is a NONWATCHED schema-5 / write-protocol-2 candidate. Do
   not copy, merge or install it into active shared source, or restart live services,
   without concrete all-consumer quiescence/rollback preflight and explicit rollout
   approval. Review acceptance is not operational rollout approval.
@@ -58,10 +60,10 @@ native board monitoring is an optional extra.
   lifecycle or publisher locking from the transaction primitive. Do not migrate
   other OS lock consumers or expand filesystem/durability support.
 
-- Keep protocol-2 service and transport preparations private and inert. Normal
-  service, CLI and gateway construction stays schema 4 / protocol 1 until the
-  coordinated activation child. No operator/configuration/environment selector
-  may expose the incomplete protocol. Prepared mutations compare the complete
+- Keep the isolated release coherent: normal service, CLI, browser and gateway use
+  schema 5 / protocol 2 together, with preparation-only selectors removed. No
+  numeric fallback or partial compatibility mode may expose an incomplete protocol.
+  Board mutations compare the complete
   captured generation/revision token under transaction ownership before commands,
   blob writes or reconciliation. Missing/malformed tokens refuse with 428; valid
   mismatches refuse with 412 and `state_changed`. Credential refresh changes
@@ -70,14 +72,14 @@ native board monitoring is an optional extra.
   Preserve the atomic save/outcome boundary and accepted policy/memory on failure;
   use narrow private adapters, not a duplicate Board model, store or HTTP client.
 
-- Prepared browser edits retain their originating generation and board/window/
+- Browser edits retain their originating generation and board/window/
   navigation epoch. Polling may update revision only within that generation;
   credential refresh does not renew intent. Generation changes preserve useful
   draft text separately while disabling stale submission, drag and queued work.
   Require explicit fresh review/reattachment and never retarget a missing card.
   Old asynchronous responses must not publish into a newer generation, close its
-  drawer or clear its draft. Keep normal browser bootstrap inert regardless of
-  supplied metadata; only private test construction selects protocol 2. Verify
+  drawer or clear its draft. Normal browser bootstrap uses the complete protocol;
+  metadata must never revive a scalar fallback. Verify
   behavior through the executable Node VM/DOM harness, not string assertions alone.
 
 - Keep the service bound to loopback. Do not add remote exposure, external runtime
@@ -96,8 +98,9 @@ native board monitoring is an optional extra.
   resolve the board canonically and hold the shared launch gate, then writer claim,
   then snapshot transaction lock through save; release in reverse order on every exit.
   A held writer lease is authoritative without a listener or at a different port.
-  Keep the legacy configured-port listener refusal, initialization and ordinary live
-  mutation interfaces unchanged. Never replace a held claim with a check/use probe or
+  Keep the legacy configured-port listener refusal and ownership behavior while
+  applying the coordinated schema-5/protocol-2 initialization and mutation contract.
+  Never replace a held claim with a check/use probe or
   unlink persistent ownership locks.
   Bound incomplete HTTP input during drain with one absolute two-second budget,
   observed within a 100 ms read poll plus scheduling; trickling must not reset it.
@@ -110,7 +113,7 @@ native board monitoring is an optional extra.
 - Automatic board commits and pushes are opt-in. Do not enable `--autopush` or
   configure remotes unless the user explicitly asks. Source commits and pushes follow
   Terry's standing authorization in the branch and publishing policy below.
-- Treat each schema-4 board's embedded policy as executable permission data, not UI
+- Treat each schema-5 board's embedded policy as executable permission data, not UI
   decoration. Initialization resolves lane and actor display names once into stable
   IDs; runtime authorization uses only those persisted IDs.
   Live admission must verify a complete isolated candidate before publishing its board
@@ -398,11 +401,12 @@ fresh per-turn owner approval before any Astra use remain unchanged.
   Keep optional Change fields string-or-null and lane/owner/priority event shapes
   compatible, with indexed nested diagnostics. Verify owner/priority actor membership
   without inventing owner permissions. Ticket/revision/allocator values reject bool;
-  generic client revisions must be nonnegative genuine integers before POST.
-  Preserve missing numeric defaults and existing valid legacy histories.
+  complete client tokens must carry a canonical UUID and genuine nonnegative revision.
+  Preserve supported legacy numeric defaults only in their explicit migration paths,
+  and preserve valid legacy histories. Schema-5 state requires explicit revision.
   Contain numeric conversion ValueError locally in exact-ID-first lookup,
   ticket search and If-Match parsing. Preserve supported decimal references,
-  revision-zero/header forms and CAS; refuse nondecimal digit-like or over-limit
+  revision zero inside complete tokens and CAS; refuse nondecimal digit-like or over-limit
   values concisely without echoing giant inputs or changing global digit limits.
 - Validate the command adapter's enumerated string/Boolean fields before domain
   dispatch; never coerce malformed scalar values or infer null defaults across
@@ -431,8 +435,9 @@ fresh per-turn owner approval before any Astra use remain unchanged.
 - Description edits append sanitized `detailHistory` attribution (card ID, actor,
   timestamp only), enabling the shared board-write monitor to suppress proven
   bot-only description changes. Keep private old/new prose out of activity JSON;
-  Git remains the optional text-diff audit. Older schema-4 boards omit this field
-  until their first new edit. Unknown or unaudited writes still fail open to an alert.
+  Git remains the optional text-diff audit. Migrated boards that lack this optional
+  field begin recording it with their first new edit. Unknown or unaudited writes
+  still fail open to an alert.
 - Treat `README.md`, `docs/ORIENTATION.md`, `AGENTS.md`, `rules.json` descriptions,
   implementation docstrings, and tests as complementary documentation layers. Update
   every affected layer when a schema, route, invariant, or workflow changes.

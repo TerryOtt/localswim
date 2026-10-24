@@ -101,7 +101,8 @@ function section(start, end) {
 const button = {hidden: true, disabled: false, textContent: '', addEventListener() {}};
 const events = [], say = {value: 'unsent'};
 const elements = {'p-approve': button, say};
-const document = {body: {}, activeElement: null, getElementById: id => elements[id]};
+const document = {body: {}, activeElement: null, querySelectorAll:()=>[],
+  getElementById: id => elements[id] || {hidden:false,disabled:false,addEventListener(){}}};
 document.activeElement = document.body;
 for (const id of ['p-subject', 'p-subject-edit', 'p-detail', 'p-detail-editor', 'find']) {
   elements[id] = {hidden: false, focus() {document.activeElement = this;}};
@@ -115,7 +116,9 @@ const ctx = vm.createContext({input, button, events, say, JSON, Set, encodeURICo
 vm.runInContext(section('// BEGIN PRIVATE BROWSER INTENT', 'async function apiGet('), ctx);
 vm.runInContext(`
 let API_PREFIX = '/alpha', API_TOKEN = 'synthetic', openId = 'review', seen = 'fresh';
-let data = {revision: 4, browserUser: 'terry', actors: [{id:'terry', class:'human'}],
+let data = {writeProtocol:2,generation:'11111111-1111-4111-8111-111111111111',
+    writeToken:'"generation-11111111-1111-4111-8111-111111111111-revision-4"',
+    revision: 4, browserUser: 'terry', actors: [{id:'terry', class:'human'}],
   lanes: [{state:'ready_for_review'}, {state:'completed'}]};
 let card = {id:'review', state:'ready_for_review', archived:false};
 let permit = true, calls = [], toasts = [], reconciled = [], drafts = {review:'unsent'};
@@ -137,6 +140,8 @@ vm.runInContext(section('let editing = null;', 'function startSubjectEdit()') +
   section('function closeCard()',
   "document.getElementById('close').addEventListener"), ctx);
 vm.runInContext(`this.run = async () => {
+  browserIntent.observe(data); drawerIntent=browserIntent.capture('drawer');
+  drawerIntent.target=card.id; drawerIntent.ticket=card.ticket;
   renderApproval(card);
   const eligible = !button.hidden && !button.disabled && button.textContent;
   const first = approveReview();
@@ -152,7 +157,9 @@ vm.runInContext(`this.run = async () => {
   if (input.mode === 'board_error') {API_PREFIX='/beta'; window.workspaceEpoch++; data.revision=99;}
   if (input.mode.endsWith('error')) rejectFetch(Error('synthetic connection loss'));
   else resolveFetch({ok: input.mode !== 'refused', json: async () =>
-    ({revision:5, result:'accepted', error:'refused'})});
+    ({...data, revision:5,
+    writeToken:'"generation-11111111-1111-4111-8111-111111111111-revision-5"',
+    result:'accepted', error:'refused'})});
   await first;
   const result = {eligible, pendingDisabled, calls, toasts, reconciled,
     seen, revision:data.revision, drafts, pending:pendingApprovals.size,
@@ -192,15 +199,19 @@ def test_browser_approval_guards_pending_request_and_navigation(mode: str) -> No
         text=True,
         encoding="utf-8",
         timeout=10,
-        check=True,
+        check=False,
     )
+    assert result.returncode == 0, result.stderr
     observed = json.loads(result.stdout)
     assert observed["eligible"] == "Terry Reviewed & Approved"
     assert observed["pendingDisabled"] is True
     assert len(observed["calls"]) == 1
     request = observed["calls"][0]
     assert request["path"] == "/alpha/cards/review/approve"
-    assert request["options"]["headers"]["If-Match"] == '"revision-4"'
+    assert (
+        request["options"]["headers"]["If-Match"]
+        == '"generation-11111111-1111-4111-8111-111111111111-revision-4"'
+    )
     assert request["options"]["headers"]["Authorization"] == "Bearer synthetic"
     assert request["options"]["body"] == "{}"
     assert observed["closedBeforeResponse"] == 0

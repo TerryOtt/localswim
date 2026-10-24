@@ -577,6 +577,7 @@ def make_board(path: pathlib.Path, project: str, *, alternate: bool = False) -> 
         cast("board_state.JsonObject", lanes[0])["label"] = "Alternate backlog"
         policy = board_state.TransitionPolicy.from_json(document, str(path))
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project=project,
         users=users,
         browser_user="terry",
@@ -699,7 +700,13 @@ def test_gateway_entity_route_boundaries(  # noqa: PLR0913 -- explicit route/sta
     monkeypatch.setattr(http.client.HTTPConnection, "close", close)
 
     def existing(_path: pathlib.Path) -> workspace.Endpoint:
-        return workspace.Endpoint(server.server_address[1], "upstream-secret", "")
+        return workspace.Endpoint(
+            server.server_address[1],
+            "upstream-secret",
+            "",
+            generation="11111111-1111-4111-8111-111111111111",
+            write_protocol=2,
+        )
 
     monkeypatch.setattr(gateway.instance, "_existing", existing)
     try:
@@ -761,7 +768,13 @@ def test_gateway_committed_post_response_failure_is_uncertain(
     thread.start()
 
     def existing(_path: pathlib.Path) -> workspace.Endpoint:
-        return workspace.Endpoint(server.server_address[1], "upstream-secret", "")
+        return workspace.Endpoint(
+            server.server_address[1],
+            "upstream-secret",
+            "",
+            generation="11111111-1111-4111-8111-111111111111",
+            write_protocol=2,
+        )
 
     monkeypatch.setattr(gateway.instance, "_existing", existing)
     original_response = http.client.HTTPConnection.getresponse
@@ -785,7 +798,12 @@ def test_gateway_committed_post_response_failure_is_uncertain(
         assert code == 502
         assert result == {"error": workspace.POST_OUTCOME_UNKNOWN}
         assert persisted.read_text() == "1"
-        assert observed == [("Bearer upstream-secret", '"revision-7"')]
+        assert observed == [
+            (
+                "Bearer upstream-secret",
+                '"generation-11111111-1111-4111-8111-111111111111-revision-7"',
+            )
+        ]
         assert "sentinel" not in json.dumps(result)
         assert "upstream-secret" not in json.dumps(result)
     finally:
@@ -1178,7 +1196,7 @@ def test_discovery_refresh_rejects_invalid_replacement(
 
     monkeypatch.setattr(instance, "_paths", scan)
     monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
-    with pytest.raises(ValueError, match=r"unknown workspace board|policy"):
+    with pytest.raises(ValueError, match=r"unknown workspace board|policy|schema 4"):
         instance.resolve_endpoint("board")
 
 

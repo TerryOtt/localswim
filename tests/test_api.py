@@ -23,6 +23,7 @@ import pytest
 
 from localswim import api_endpoint, attachments, board_state, write_protocol
 from tests.support import USERS
+from tests.support import token as fixture_token
 
 if TYPE_CHECKING:
     import os
@@ -36,9 +37,7 @@ def test_private_browser_intent_executable(tmp_path: pathlib.Path) -> None:
     node = shutil.which("node")
     assert node, "Node.js is required for the executable browser intent safety tests"
     page = tmp_path / "browser.html"
-    page.write_text(
-        api_endpoint._private_protocol2_page().replace("%POLL%", "400"), encoding="utf-8"
-    )
+    page.write_text(api_endpoint.PAGE.replace("%POLL%", "400"), encoding="utf-8")
     result = subprocess.run(
         [
             node,
@@ -55,7 +54,7 @@ def test_private_browser_intent_executable(tmp_path: pathlib.Path) -> None:
     summary = json.loads(result.stdout)
     assert summary["passed"] is True
     assert summary["scenarioCount"] >= 40
-    assert "const PRIVATE_BROWSER_PROTOCOL2 = false;" in api_endpoint.PAGE
+    assert "const PRIVATE_BROWSER_PROTOCOL2 = false;" not in api_endpoint.PAGE
 
 
 @pytest.mark.parametrize(
@@ -90,7 +89,12 @@ def api(tmp_path: pathlib.Path) -> Iterator[RunningApi]:
     """Run the production handler against an isolated board."""
     path = tmp_path / "board.json"
     board = board_state.Board(
-        project="API", users=USERS, browser_user="terry", cli_user="bot", default_owner="bot"
+        generation="11111111-1111-4111-8111-111111111111",
+        project="API",
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
     )
     board_state.save(board, path)
     api_endpoint.BOARD_PATH = path
@@ -122,7 +126,11 @@ def request_json(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if revision is not None:
-        headers["If-Match"] = f'"revision-{revision}"'
+        headers["If-Match"] = write_protocol.WriteToken(
+            "11111111-1111-4111-8111-111111111111", revision
+        ).format()
+        if "/workspace/preferences" in url:
+            headers["If-Match"] = f'"revision-{revision}"'
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -1378,12 +1386,12 @@ def test_missing_revision_returns_428(api: RunningApi) -> None:
 @pytest.mark.parametrize(
     ("header", "expected"),
     [
-        ("0", 0),
-        ('"0"', 0),
-        ("revision-0", 0),
-        ('"revision-0"', 0),
-        ("١", 1),
-        ('"revision-٠"', 0),
+        ("0", None),
+        ('"0"', None),
+        ("revision-0", None),
+        ('"revision-0"', None),
+        ("١", None),
+        ('"revision-٠"', None),
         ("²", None),
         ("9" * 5000, None),
         ("-1", None),
@@ -1436,7 +1444,8 @@ def test_invalid_numeric_revision_returns_428_without_dispatch(
         with connection.getresponse() as response:
             assert response.status == 428
             assert json.loads(response.read()) == {
-                "error": "If-Match must name the expected board revision"
+                "error": "If-Match must contain a complete generation/revision write token",
+                "code": "precondition_required",
             }
     read_body.assert_not_called()
     dispatch.assert_not_called()
@@ -1457,13 +1466,10 @@ def test_revision_header_forms_preserve_zero_and_cas(api: RunningApi, header: st
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        assert response.status == 200
-        assert json.loads(response.read())["revision"] == 1
     before = api.path.read_bytes()
-    assert_http_error(request, 412)
+    assert_http_error(request, 428)
     assert api.path.read_bytes() == before
-    assert board_state.load(api.path).revision == 1
+    assert board_state.load(api.path).revision == 0
 
 
 def test_stale_revision_returns_412_without_write(api: RunningApi) -> None:
@@ -1481,7 +1487,7 @@ def test_stale_revision_returns_412_without_write(api: RunningApi) -> None:
     )
     saved = board_state.load(api.path)
     assert code == 412
-    assert "refresh" in response["error"]
+    assert response["code"] == "state_changed"
     assert saved.revision == 1
     assert saved.find("1").comments == []
 
@@ -1506,7 +1512,7 @@ def test_malformed_json_returns_400(api: RunningApi) -> None:
         headers={
             "Authorization": f"Bearer {api_endpoint.BROWSER_TOKEN}",
             "Content-Type": "application/json",
-            "If-Match": '"revision-0"',
+            "If-Match": '"generation-11111111-1111-4111-8111-111111111111-revision-0"',
         },
     )
     assert_http_error(request, 400)
@@ -1542,7 +1548,7 @@ def test_retired_mutation_route_returns_404(api: RunningApi) -> None:
         method="POST",
         headers={
             "Authorization": f"Bearer {api_endpoint.BROWSER_TOKEN}",
-            "If-Match": '"revision-0"',
+            "If-Match": '"generation-11111111-1111-4111-8111-111111111111-revision-0"',
         },
     )
     assert_http_error(request, 404)
@@ -1786,7 +1792,8 @@ def test_incomplete_transport_drain_joins_workers(
             client.sendall(
                 b"POST /api/v001/cards HTTP/1.0\r\n"
                 + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
-                + b'If-Match: "revision-0"\r\nContent-Length: 10000\r\n\r\n{'
+                + b'If-Match: "generation-11111111-1111-4111-8111-111111111111-revision-0"\r\n'
+                + b"Content-Length: 10000\r\n\r\n{"
             )
         started = time.monotonic()
         stopper: threading.Thread | None = None
@@ -1824,7 +1831,8 @@ def test_short_declared_body_never_admits_a_command(api: RunningApi) -> None:
         client.sendall(
             b"POST /api/v001/cards HTTP/1.0\r\n"
             + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
-            + f'If-Match: "revision-0"\r\nContent-Length: {len(body) + 1}\r\n\r\n'.encode()
+            + b'If-Match: "generation-11111111-1111-4111-8111-111111111111-revision-0"\r\n'
+            + f"Content-Length: {len(body) + 1}\r\n\r\n".encode()
             + body
         )
         client.shutdown(socket.SHUT_WR)
@@ -1847,7 +1855,9 @@ def test_progressing_maximum_attachment_and_browser_reads(api: RunningApi) -> No
     try:
         connection.putrequest("POST", API + "/cards/large/attachment")
         connection.putheader("Authorization", f"Bearer {api_endpoint.BROWSER_TOKEN}")
-        connection.putheader("If-Match", '"revision-1"')
+        connection.putheader(
+            "If-Match", '"generation-11111111-1111-4111-8111-111111111111-revision-1"'
+        )
         connection.putheader("Content-Length", str(len(body)))
         connection.endheaders()
         for offset in range(0, len(body), 65536):
@@ -1909,7 +1919,8 @@ def test_connected_body_can_finish_within_restart_drain(
         client.sendall(
             b"POST /api/v001/cards HTTP/1.0\r\n"
             + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
-            + f'If-Match: "revision-0"\r\nContent-Length: {len(body)}\r\n\r\n'.encode()
+            + b'If-Match: "generation-11111111-1111-4111-8111-111111111111-revision-0"\r\n'
+            + f"Content-Length: {len(body)}\r\n\r\n".encode()
             + body[:1]
         )
         deadline = time.monotonic() + 1
@@ -2021,7 +2032,7 @@ def test_http_scalar_contract_matrix(  # noqa: PLR0912, PLR0913, PLR0917 -- expl
     if route.endswith("/attachment"):
         store = api_endpoint.BoardStore(api.path)
         _, _, uploaded = store.upload(
-            0, "alpha", "file.txt", base64.b64encode(b"file").decode(), "bot"
+            fixture_token(0), "alpha", "file.txt", base64.b64encode(b"file").decode(), "bot"
         )
         attachment_id = uploaded.id
         board = board_state.load(api.path, install_context=False)
@@ -2169,7 +2180,7 @@ def test_over_nested_json_is_sanitized_before_dispatch(
                 body=body,
                 headers={
                     "Authorization": f"Bearer {api_endpoint.CLI_TOKEN}",
-                    "If-Match": '"revision-0"',
+                    "If-Match": '"generation-11111111-1111-4111-8111-111111111111-revision-0"',
                     "Content-Type": "application/json",
                 },
             )
@@ -2199,7 +2210,7 @@ def test_json_decoder_valid_and_ordinary_duplicate_key_controls(
             body=raw,
             headers={
                 "Authorization": f"Bearer {api_endpoint.CLI_TOKEN}",
-                "If-Match": '"revision-0"',
+                "If-Match": '"generation-11111111-1111-4111-8111-111111111111-revision-0"',
                 "Content-Type": "application/json",
             },
         )
@@ -2215,14 +2226,8 @@ def test_json_decoder_valid_and_ordinary_duplicate_key_controls(
 
 
 def prepare_api_store(api: RunningApi) -> write_protocol.WriteToken:
-    snapshot = write_protocol._prepare_initial_schema5(
-        board_state.load(api.path).to_json(),
-        "test",
-        allocate_generation=lambda: "11111111-1111-4111-8111-111111111111",
-    )
-    api.path.write_text(json.dumps(write_protocol._serialize_schema5(snapshot)), encoding="utf-8")
-    api_endpoint.STORE = api_endpoint._protocol2_store(api.path)
-    return snapshot.write_token
+    api_endpoint.STORE = api_endpoint.BoardStore(api.path)
+    return write_protocol.WriteToken.parse(api_endpoint.STORE.write_metadata()["writeToken"])
 
 
 def prepared_request(
@@ -2318,8 +2323,7 @@ def test_permission_grant_preserves_legacy_error_precedence(
         token = prepare_api_store(api)
         raw = write_protocol.WriteToken(token.generation, token.revision + 1).format()
     else:
-        raw = '"revision-1"'
+        raw = '"generation-11111111-1111-4111-8111-111111111111-revision-1"'
     code, response = prepared_request(api, "/board/permissions", raw, {"malformed": True})
-    assert code == (412 if prepared else 409)
-    if prepared:
-        assert response["code"] == "state_changed"
+    assert code == 412
+    assert response["code"] == "state_changed"

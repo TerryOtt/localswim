@@ -145,7 +145,8 @@ def _read_candidate(path: pathlib.Path) -> _Candidate | None:
         raw = cast("board_state.JsonValue", json.loads(blob.decode("utf-8")))
         if (
             isinstance(raw, dict)
-            and raw.get("schema") == board_state.SCHEMA
+            and type(raw.get("schema")) is int
+            and raw["schema"] in {board_state.GENERATION_PREVIOUS_SCHEMA, board_state.SCHEMA}
             and all(field in raw for field in ("project", "items", "policy"))
         ):
             return _Candidate(path, identity)
@@ -373,8 +374,20 @@ class Workspace:
     def _session_endpoint(
         self, port: int, token: str, css: str, _session: board_state.JsonObject
     ) -> Endpoint:
-        """Keep public sessions on the shipped protocol until coordinated activation."""
-        return Endpoint(port, token, css)
+        from .write_protocol import WriteToken  # noqa: PLC0415 -- keep codec dependency local
+
+        session = _session
+        protocol = 2
+        parsed = WriteToken.parse(session.get("writeToken"))
+        if (
+            type(session.get("writeProtocol")) is not int
+            or session["writeProtocol"] != protocol
+            or session.get("generation") != parsed.generation
+            or type(session.get("revision")) is not int
+            or session["revision"] != parsed.revision
+        ):
+            raise ValueError("board service session has inconsistent write metadata")
+        return Endpoint(port, token, css, parsed.generation, protocol)
 
     @staticmethod
     def _request_existing_upgrade(port: int) -> None:
@@ -617,35 +630,6 @@ class Workspace:
             time.sleep(START_POLL_SECONDS)
         msg = "owned board service did not release its descriptor"
         raise TimeoutError(msg)
-
-
-class _CompleteTokenWorkspace(Workspace):
-    """Private session-validation seam; reuse all discovery and proxy behavior."""
-
-    def _session_endpoint(
-        self, port: int, token: str, css: str, _session: board_state.JsonObject
-    ) -> Endpoint:
-        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
-
-        session = _session
-        protocol = 2
-        parsed = WriteToken.parse(session.get("writeToken"))
-        if (
-            type(session.get("writeProtocol")) is not int
-            or session["writeProtocol"] != protocol
-            or session.get("generation") != parsed.generation
-            or type(session.get("revision")) is not int
-            or session["revision"] != parsed.revision
-        ):
-            raise ValueError("board service session has inconsistent write metadata")
-        return Endpoint(port, token, css, parsed.generation, protocol)
-
-
-def _prepared_workspace(  # pyright: ignore[reportUnusedFunction]
-    root: pathlib.Path, *, autopush: bool = False
-) -> Workspace:
-    """Build the private prepared gateway; no public selector activates it."""
-    return _CompleteTokenWorkspace(root, autopush=autopush)
 
 
 class WorkspaceServer(http.server.ThreadingHTTPServer):

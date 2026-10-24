@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from localswim import api_endpoint, board_state
-from localswim.write_protocol import _prepare_migration_schema5 as prepare_schema5
-from localswim.write_protocol import _serialize_schema5 as serialize_schema5
 from tests.support import USERS
 from tests.test_attachments import reattached_image
 
@@ -18,6 +16,7 @@ if TYPE_CHECKING:
 def saved_board(path: pathlib.Path) -> board_state.Board:
     """Write one representative board and return it."""
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Round trip",
         revision=7,
         users=USERS,
@@ -345,8 +344,11 @@ def test_legacy_board_without_revision_loads_at_zero(tmp_path: pathlib.Path) -> 
     board = saved_board(path)
     raw = editable_json(board)
     del raw["revision"]
+    raw["schema"] = 4
+    raw.pop("generation", None)
     path.write_text(json.dumps(raw), encoding="utf-8")
-    assert board_state.load(path).revision == 0
+    board_state.migrate_generation(path)
+    assert board_state.load(path).revision == 1
 
 
 @pytest.mark.parametrize("revision", [True, False, -1, "1", 1.5, None])
@@ -721,13 +723,15 @@ def test_boolean_ticket_fields_refuse_without_rewriting(
 def test_legacy_numeric_defaults_zero_and_allocator_high_water(tmp_path: pathlib.Path) -> None:
     raw = editable_json(saved_board(tmp_path / "board.json"))
     del raw["revision"]
+    raw["schema"] = 4
+    raw.pop("generation", None)
     del raw["nextTicket"]
     del raw["items"][0]["ticket"]
     raw["items"][0]["history"] = []
-    loaded = board_state.Board.from_json(raw, "legacy")
+    loaded = board_state._generation_candidate(raw, "legacy")  # noqa: SLF001
     assert (loaded.revision, loaded.next_ticket, loaded.items[0].ticket) == (0, 1, 0)
     raw["items"][0]["ticket"] = 1000
-    loaded = board_state.Board.from_json(raw, "high water")
+    loaded = board_state._generation_candidate(raw, "high water")  # noqa: SLF001
     loaded.create("beta", "Beta", "backlog", "bot")
     assert (loaded.find("beta").ticket, loaded.next_ticket) == (1001, 1002)
     assert board_state.Board.from_json(loaded.to_json(), "round trip").to_json() == loaded.to_json()
@@ -806,20 +810,13 @@ def test_nested_non_object_reports_index(tmp_path: pathlib.Path, field: str) -> 
         board_state.Board.from_json(raw, "test")
 
 
-def test_private_schema5_stays_out_of_public_load_save(tmp_path: pathlib.Path) -> None:
+def test_public_schema5_load_save_preserves_identity(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     original = saved_board(path)
     original_bytes = path.read_bytes()
-    snapshot = prepare_schema5(
-        original.to_json(),
-        "private",
-        allocate_generation=lambda: "65e18b13-6c3b-483d-8c50-81e08fc12b56",
-    )
-    with pytest.raises(AttributeError, match="to_json"):
-        board_state.save(cast("board_state.Board", snapshot), path)
+    loaded = board_state.load(path)
+    assert loaded.to_json() == original.to_json()
+    board_state.save(loaded, path)
     assert path.read_bytes() == original_bytes
-    path.write_text(json.dumps(serialize_schema5(snapshot)), encoding="utf-8")
-    with pytest.raises(board_state.BoardError, match="this build reads 4"):
-        board_state.load(path)
-    assert board_state.SCHEMA == 4
-    assert original.to_json()["schema"] == 4
+    assert board_state.SCHEMA == 5
+    assert original.to_json()["schema"] == 5

@@ -1,13 +1,14 @@
 # localswim
 
-> This branch is a nonwatched ownership and inert write-protocol candidate.
+> This branch is a nonwatched schema-5 / write-protocol-2 release candidate.
 > It is not installed in the active shared package. Adoption and rollback require
 > separate approval and coordinated quiescence of every consumer of a board.
 
-The generation-aware service, transport and browser preparations are private test paths.
-Normal service, CLI and gateway startup remain schema 4 / write protocol 1; no
-option, environment variable or saved setting enables a partial protocol upgrade.
-See [the contributor preparation contract](docs/ORIENTATION.md#private-service-and-transport-preparation).
+This isolated candidate activates the complete generation-aware service, CLI,
+browser and gateway together. New boards use schema 5; existing schema-4 boards
+require explicit stopped-board migration. The running shared installation remains
+on its previous package until separately approved coordinated rollout.
+See [the generation contract](docs/ORIENTATION.md#schema-5-and-write-protocol-2).
 
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among
@@ -59,7 +60,7 @@ uv run --frozen localswim path/to/state-store --port 8810
 ~~~
 
 A directory starts the workspace; a JSON file still starts an individual board. The
-workspace defaults to **http://127.0.0.1:8810/**. It discovers schema-4 boards below the
+workspace defaults to **http://127.0.0.1:8810/**. It discovers schema-5 boards below the
 directory and presents one active board at a time. Existing healthy board services are
 reused; absent services start on available loopback ports. If a writer is restarting,
 the gateway waits for its rendezvous to recover instead of starting another writer.
@@ -392,15 +393,29 @@ to cliUser; browser changes are attributed to browserUser. Request bodies cannot
 choose another identity. CLI stdout and stderr are always UTF-8, including when Windows
 redirects them through a legacy system encoding.
 
-Schema 4 embeds the complete resolved policy so a board's lane identities and
-permissions travel atomically with its state. With the service stopped, upgrade a
-schema-3 board with the policy it already uses:
+Schema 5 retains the complete embedded policy introduced in schema 4 and adds a
+persisted generation UUID. Ordinary reads, writes and restarts preserve generation.
+For an existing schema-4 board, obtain coordinated operational approval, stop all
+of its consumers, retain recovery material and run the matching candidate package:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json board migrate-generation
+~~~
+
+This explicit operation validates admission before allocating one generation and
+advances revision once under the launch gate, writer lease and snapshot transaction.
+Ordinary load/save and service startup never silently upgrade schema 4. A repeated
+migration refuses an already upgraded board without allocating another generation.
+Do not run this command against live project boards merely to test the candidate.
+
+The earlier schema-2/3 migrations remain explicit. With the service stopped,
+upgrade a schema-3 board using its existing policy:
 
 ~~~console
 uv run --frozen localswim-cli boards/my-project.json board embed-policy path/to/rules.json
 ~~~
 
-The earlier schema-2 Ready For Work migration also produces a schema-4 board:
+The earlier schema-2 Ready For Work migration now also produces schema 5:
 
 ~~~console
 uv run --frozen localswim-cli boards/my-project.json lane migrate <old-lane-id> ready_for_work
@@ -485,7 +500,7 @@ still applies.
 `board show --json` always exports the complete snapshot, including archived cards.
 Verification and activity reports also retain archived cards; activity records
 `archived` and `unarchived` events with the card identity, actor, and timestamp.
-Archiving is an optional schema-4 extension: older boards start with no archived cards.
+Archiving was introduced as an optional schema-4 extension and remains optional in schema 5.
 The snapshot stores a card's `archived` flag only when true and an append-only
 `archiveHistory` array after the first archive operation.
 
@@ -520,7 +535,7 @@ Copy the board directory, including `attachments/`, when moving or backing up a 
 With `--autopush`, the board snapshot and its audited attachment paths are committed
 together; unrelated files and staged changes are excluded.
 
-This is an optional schema-4 extension: cards without files retain their existing
+Attachments were introduced under schema 4 and remain optional in schema 5: cards without files retain their existing
 shape. `attachments` records metadata (GUID, name, size, detected media type, SHA-256,
 upload time, actor); `coverAttachment` records the chosen image GUID; `attachmentHistory`
 records uploads, removals, and cover choices. CLI activity includes these actions and
@@ -590,18 +605,21 @@ urgent effective priority than requested. The result reports each selected card'
 effective priority and every actual change, including promotions to unselected cards.
 Audit entries are written once per changed card, in ticket order, under the real
 credential actor. A no-op writes no audit entries but follows the store's normal
-revision policy. Supply `--expected-revision` to require a specific revision; without
-it, the CLI fetches once and submits once. It does not refresh or retry after a conflict.
+revision policy. Supply `--expected-generation` and `--expected-revision` together
+to require a specific originating state. Either option alone refuses before network
+dispatch. With neither, the CLI captures the complete token from one board read and
+submits once. Paired mode skips that snapshot fetch, not board-identity verification.
+It does not refresh state or retry a mutation after a conflict.
 If a mutation request times out or its successful response cannot be decoded as a
 JSON object, its outcome is unknown; inspect the board before retrying. The CLI does
 not replay the mutation automatically. `--json` prints the structured result.
 
-The live service reconciles older boards on startup, and reconciles valid externally
+The live service reconciles older valid schema-5 states on startup, and valid externally
 replaced snapshots when reading them, through audited, revision-checked transactions
 attributed to `cliUser`. Offline CLI reads never rewrite the snapshot. If verification
 finds an older blocked card below its required priority, start the service to reconcile it.
 Controlled offline lane/policy migrations also reconcile dependency priorities in
-their existing transaction. No new persisted fields or schema migration are required. When priorities use IDs
+their existing transaction. Priority reconciliation itself adds no further schema change. When priorities use IDs
 such as P0 through P5, their numeric values define urgency; named priority scales use
 their embedded policy order.
 
@@ -825,18 +843,21 @@ Only the `/api/v001` routes are API endpoints. For seamless upgrades of already-
 tabs, `/v1/status` and `/mtime` issue no-cache redirects to
 `/api/v001/status`. Earlier board and mutation routes are not retained.
 
-Mutations require the per-process bearer credential and an
-If-Match: "revision-N" header. Credentials are published in a user-local temporary
+Board mutations require the per-process bearer credential and the exact quoted
+`If-Match: "generation-UUID-revision-N"` header from the originating state.
+Credentials are published in a user-local temporary
 service descriptor; they are not stored in the board. The shutdown route accepts only
 the CLI credential and does not change the board revision.
 
-Missing, malformed or unconvertible `If-Match` values receive the existing HTTP 428
-response before command dispatch. Supported bare, quoted and `revision-` forms retain
-nonnegative revisions, including zero, and the existing stale-revision checks.
+Missing, malformed or scalar revision preconditions receive HTTP 428. Valid tokens
+whose generation or revision differs receive HTTP 412 with `state_changed`, before
+command, blob or reconciliation effects. Board/session and successful mutation
+payloads include `writeProtocol: 2`, `generation`, `revision` and `writeToken`.
+Old numeric clients cannot write schema-5 boards; there is no permissive fallback.
 
 CLI writes and shutdown verify that both the local descriptor and the live
 browser-session identity name the requested canonical board before sending a POST.
-An explicit revision skips the snapshot revision fetch, but still requires that
+An explicit generation/revision pair skips the snapshot fetch, but still requires that
 identity check. CLI commands continue to use the CLI credential; reading session
 identity does not grant browser authority.
 

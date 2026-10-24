@@ -137,7 +137,7 @@ def transport(tmp_path: pathlib.Path) -> Iterator[Transport]:
     ],
 )
 def test_prepared_cli_captures_one_board_read(transport: Transport, arguments: list[str]) -> None:
-    result = CliRunner().invoke(cli._prepared_cli(), [str(transport.path), *arguments])
+    result = CliRunner().invoke(cli.cli, [str(transport.path), *arguments])
     assert result.exit_code == 0, result.output
     assert transport.gets == [API + "/browser-session", API + "/board"]
     assert len(transport.posts) == 1
@@ -149,7 +149,7 @@ def test_prepared_explicit_pair_never_fetches_board(transport: Transport) -> Non
     transport.generation = OTHER_GENERATION
     transport.descriptor()
     result = CliRunner().invoke(
-        cli._prepared_cli(),
+        cli.cli,
         [
             str(transport.path),
             "card",
@@ -182,7 +182,7 @@ def test_prepared_bad_pair_refuses_before_any_network(
     transport: Transport, options: list[str]
 ) -> None:
     result = CliRunner().invoke(
-        cli._prepared_cli(),
+        cli.cli,
         [str(transport.path), "card", "set-priorities", "P3", "alpha", *options],
     )
     assert result.exit_code != 0
@@ -192,9 +192,7 @@ def test_prepared_bad_pair_refuses_before_any_network(
 def test_prepared_wrong_board_refuses_before_snapshot_or_post(transport: Transport) -> None:
     transport.identity = "foreign-board"
     with pytest.raises(board_state.BoardError, match="identity"):
-        board_state.apply_remote_mutation(
-            transport.path, API + "/board/project", {"project": "x"}, _complete_token=True
-        )
+        board_state.apply_remote_mutation(transport.path, API + "/board/project", {"project": "x"})
     assert transport.gets == [API + "/browser-session"]
     assert transport.posts == []
 
@@ -205,9 +203,7 @@ def test_prepared_refusal_is_sanitized_and_never_replayed(
 ) -> None:
     transport.refusal = status
     with pytest.raises(board_state.BoardError, match="inspect before retrying") as error:
-        board_state.apply_remote_mutation(
-            transport.path, API + "/board/project", {"project": "x"}, _complete_token=True
-        )
+        board_state.apply_remote_mutation(transport.path, API + "/board/project", {"project": "x"})
     assert "private" not in str(error.value)
     assert len(transport.posts) == 1
     assert transport.gets == [API + "/browser-session", API + "/board"]
@@ -215,7 +211,7 @@ def test_prepared_refusal_is_sanitized_and_never_replayed(
 
 def test_prepared_legacy_mapping_retains_complete_token(transport: Transport) -> None:
     args = argparse.Namespace(create=None, set_project="new name")
-    assert board_state._remote_apply(transport.path, args, _complete_token=True) == "accepted"
+    assert board_state._remote_apply(transport.path, args) == "accepted"
     assert transport.posts == [(API + "/board/project", CAPTURED, "Bearer cli-capability")]
 
 
@@ -223,21 +219,21 @@ def test_prepared_construction_does_not_change_public_cli() -> None:
     commands = dict(cli.cli.commands)
     cards = dict(cli.card_commands.commands)
     options = tuple(cli.card_set_priorities.params)
-    private = cli._prepared_cli()
+    private = cli.cli
     private_help = CliRunner().invoke(private, ["board.json", "card", "set-priorities", "--help"])
     public_help = CliRunner().invoke(cli.cli, ["board.json", "card", "set-priorities", "--help"])
     assert "--expected-generation" in private_help.output
-    assert "--expected-generation" not in public_help.output
+    assert "--expected-generation" in public_help.output
     assert cli.cli.commands == commands
     assert cli.card_commands.commands == cards
     assert tuple(cli.card_set_priorities.params) == options
-    assert private.commands["card"] is not cli.card_commands
+    assert private.commands["card"] is cli.card_commands
 
 
 def test_prepared_workspace_validates_bounded_board_session(
     tmp_path: pathlib.Path, transport: Transport
 ) -> None:
-    prepared = workspace._prepared_workspace(tmp_path)
+    prepared = workspace.Workspace(tmp_path)
     public = workspace.Workspace(tmp_path)
     try:
         endpoint = prepared._browser_endpoint(transport.path, transport.port)
@@ -255,8 +251,8 @@ def test_prepared_workspace_validates_bounded_board_session(
         assert endpoint.browser_session(transport.path, prepared.token)["generation"] == GENERATION
         shipped = public._browser_endpoint(transport.path, transport.port)
         assert shipped is not None
-        assert shipped.generation is None
-        assert "generation" not in shipped.browser_session(transport.path, public.token)
+        assert shipped.generation == GENERATION
+        assert shipped.browser_session(transport.path, public.token)["generation"] == GENERATION
         transport.identity = "foreign"
         assert prepared._browser_endpoint(transport.path, transport.port) is None
     finally:
@@ -284,13 +280,13 @@ def test_prepared_rejects_inconsistent_snapshot(field: str, value: board_state.J
     }
     snapshot[field] = value
     with pytest.raises(board_state.BoardError):
-        board_state._snapshot_precondition(snapshot, complete=True)
+        board_state._snapshot_precondition(snapshot)
 
 
 def test_prepared_gateway_rotates_only_authentication_and_never_replays(
     tmp_path: pathlib.Path, transport: Transport, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    instance = workspace._prepared_workspace(tmp_path)
+    instance = workspace.Workspace(tmp_path)
     resolutions: list[str] = []
     transport.generation = OTHER_GENERATION
 
@@ -347,7 +343,7 @@ def test_prepared_unknown_post_outcome_is_sanitized_without_replay(
             "http://127.0.0.1:1" + API + "/board/project",
             "synthetic-capability",
             body={"project": "x"},
-            _write_token=CAPTURED,
+            write_token=CAPTURED,
         )
     assert len(requests) == 1
     assert requests[0].get_header("If-match") == CAPTURED
@@ -367,7 +363,7 @@ def test_prepared_unknown_post_outcome_is_sanitized_without_replay(
 def test_prepared_session_cannot_synthesize_a_partial_token(
     tmp_path: pathlib.Path, field: str, value: board_state.JsonValue
 ) -> None:
-    instance = workspace._prepared_workspace(tmp_path)
+    instance = workspace.Workspace(tmp_path)
     session: board_state.JsonObject = {
         "writeProtocol": 2,
         "generation": GENERATION,
@@ -400,6 +396,6 @@ def test_prepared_read_error_does_not_expose_upstream_secrets(
 
     monkeypatch.setattr(urllib.request, "urlopen", respond)
     with pytest.raises(board_state.BoardError, match="HTTP 500") as error:
-        board_state._service_snapshot("http://127.0.0.1:1", "synthetic-capability", complete=True)
+        board_state._service_snapshot("http://127.0.0.1:1", "synthetic-capability")
     assert len(requests) == 1
     assert "private" not in str(error.value)

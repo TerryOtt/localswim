@@ -129,7 +129,10 @@ def test_permission_grants_reject_ambiguous_json(api: RunningApi, raw: bytes) ->
     request = urllib.request.Request(
         api.base + API + "/board/permissions",
         data=raw,
-        headers={"Authorization": "Bearer " + api_endpoint.CLI_TOKEN, "If-Match": '"revision-0"'},
+        headers={
+            "Authorization": "Bearer " + api_endpoint.CLI_TOKEN,
+            "If-Match": '"generation-11111111-1111-4111-8111-111111111111-revision-0"',
+        },
         method="POST",
     )
     with pytest.raises(urllib.error.HTTPError) as caught:

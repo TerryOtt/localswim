@@ -18,6 +18,7 @@ import pytest
 
 from localswim import api_endpoint, attachments, board_state, write_protocol
 from tests.support import USERS
+from tests.support import token as fixture_token
 
 
 def run_git(cwd: pathlib.Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -60,6 +61,7 @@ def wait_for_file(path: pathlib.Path) -> None:
 def make_store(path: pathlib.Path) -> api_endpoint.BoardStore:
     """Persist an empty board and return its store."""
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Store",
         users=USERS,
         browser_user="terry",
@@ -77,14 +79,7 @@ def create_alpha(board: board_state.Board) -> str:
 
 def prepared_store(path: pathlib.Path) -> api_endpoint.BoardStore:
     """Create private schema-5 test data without enabling any public entrypoint."""
-    normal = make_store(path)
-    snapshot = write_protocol._prepare_initial_schema5(  # noqa: SLF001
-        normal.snapshot().to_json(),
-        "test",
-        allocate_generation=lambda: "11111111-1111-4111-8111-111111111111",
-    )
-    path.write_text(json.dumps(write_protocol._serialize_schema5(snapshot)), encoding="utf-8")  # noqa: SLF001
-    return api_endpoint._protocol2_store(path)  # noqa: SLF001
+    return make_store(path)
 
 
 def test_prepared_store_complete_token_persists_and_public_constructor_refuses(
@@ -94,10 +89,9 @@ def test_prepared_store_complete_token_persists_and_public_constructor_refuses(
     store = prepared_store(path)
     metadata = store.write_metadata()
     token = write_protocol.WriteToken.parse(metadata["writeToken"])
-    with pytest.raises(board_state.BoardError):
-        api_endpoint.BoardStore(path)
+    assert api_endpoint.BoardStore(path).write_metadata() == metadata
     with pytest.raises(write_protocol.InvalidWriteToken):
-        store.execute(token.revision, create_alpha)
+        store.execute(token.revision, create_alpha)  # pyright: ignore[reportArgumentType]
     with pytest.raises(write_protocol.StaleWriteToken):
         store.execute(
             write_protocol.WriteToken("22222222-2222-4222-8222-222222222222", token.revision),
@@ -105,7 +99,7 @@ def test_prepared_store_complete_token_persists_and_public_constructor_refuses(
         )
     assert not store.snapshot().items
     _, revision = store.execute(token, create_alpha)
-    restarted = api_endpoint._protocol2_store(path)  # noqa: SLF001
+    restarted = api_endpoint.BoardStore(path)
     assert restarted.write_metadata() == store.mutation_metadata(token, revision)
     assert restarted.snapshot().find("alpha").subject == "Alpha"
     assert json.loads(path.read_text(encoding="utf-8"))["schema"] == 5
@@ -149,7 +143,7 @@ def test_admission_rejects_audit_defect_without_repair_or_publication(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, create_alpha)
+    store.execute(fixture_token(0), create_alpha)
     accepted = store.snapshot()
     candidate = store.snapshot()
     accepted_policy = store.policy
@@ -226,6 +220,7 @@ def test_admission_rechecks_changed_disk_inside_reconciliation_transaction(
         policy: board_state.TransitionPolicy | None = None,
         *,
         install_context: bool = True,
+        outcome: board_state.SaveOutcome | None = None,
     ) -> Generator[board_state.Board]:
         nonlocal injected
         if not injected:
@@ -237,7 +232,9 @@ def test_admission_rechecks_changed_disk_inside_reconciliation_transaction(
                 replacement.project = "Concurrent valid change"
                 replacement.revision += 1
             board_state.save(replacement, path)
-        with original_edit(edit_path, policy, install_context=install_context) as board:
+        with original_edit(
+            edit_path, policy, install_context=install_context, outcome=outcome
+        ) as board:
             yield board
 
     monkeypatch.setattr(board_state, "edit", racing_edit)
@@ -373,11 +370,15 @@ def test_accepted_cast_drives_http_credentials_owner_and_css_without_ambient_ins
     assert "--accent: var(--user-newhuman)" in api_endpoint.user_css(accepted)
     assert actor is not None
     api_endpoint.execute_http_command(
-        store, 0, ["cards"], {"id": "alpha", "subject": "Alpha", "state": "backlog"}, actor
+        store,
+        fixture_token(0),
+        ["cards"],
+        {"id": "alpha", "subject": "Alpha", "state": "backlog"},
+        actor,
     )
     assert store.snapshot().find("alpha").owner == "newbot"
     api_endpoint.execute_http_command(
-        store, 1, ["cards", "alpha", "assign"], {"owner": " Newhuman "}, actor
+        store, fixture_token(1), ["cards", "alpha", "assign"], {"owner": " Newhuman "}, actor
     )
     assert store.snapshot().find("alpha").owner == "newhuman"
     assert ambient == board_state.ACTORS
@@ -404,7 +405,7 @@ def test_startup_admission_refusal_never_starts_server_or_structural_http_fallba
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, create_alpha)
+    store.execute(fixture_token(0), create_alpha)
     candidate = store.snapshot()
     candidate.find("alpha").archived = True
     board_state.save(candidate, path)
@@ -444,7 +445,7 @@ def test_root_page_refuses_candidate_title_cast_and_context(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, create_alpha)
+    store.execute(fixture_token(0), create_alpha)
     candidate = board_state.Board.from_json(
         recast_candidate(store.snapshot().to_json()), "recast", install_context=False
     )
@@ -501,7 +502,7 @@ def test_bad_board_reports_external_policy_refusal_once_and_recovers(
 def test_success_increments_revision_after_save(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    result, revision = store.execute(0, create_alpha)
+    result, revision = store.execute(fixture_token(0), create_alpha)
 
     saved = board_state.load(path)
     assert "created" in result
@@ -513,10 +514,10 @@ def test_success_increments_revision_after_save(tmp_path: pathlib.Path) -> None:
 def test_stale_revision_changes_nothing(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, create_alpha)
+    store.execute(fixture_token(0), create_alpha)
 
-    with pytest.raises(api_endpoint.RevisionConflict, match="revision is 1"):
-        store.execute(0, lambda board: board.comment("alpha", "stale", "bot"))
+    with pytest.raises(write_protocol.StaleWriteToken, match="state_changed"):
+        store.execute(fixture_token(0), lambda board: board.comment("alpha", "stale", "bot"))
     saved = board_state.load(path)
     assert saved.revision == 1
     assert saved.find("alpha").comments == []
@@ -527,7 +528,9 @@ def test_domain_refusal_changes_nothing(tmp_path: pathlib.Path) -> None:
     store = make_store(path)
 
     with pytest.raises(board_state.BoardError, match="may not create"):
-        store.execute(0, lambda board: board.create("alpha", "Alpha", "completed", "bot"))
+        store.execute(
+            fixture_token(0), lambda board: board.create("alpha", "Alpha", "completed", "bot")
+        )
     saved = board_state.load(path)
     assert saved.revision == 0
     assert saved.items == []
@@ -547,7 +550,7 @@ def test_save_failure_does_not_publish_candidate(
 
     monkeypatch.setattr(board_state, "save", fail_save)
     with pytest.raises(OSError, match="injected"):
-        store.execute(0, create_alpha)
+        store.execute(fixture_token(0), create_alpha)
 
     assert store._board is accepted, "failed save published cache"  # noqa: SLF001 -- before refresh
     assert store.policy is accepted_policy
@@ -564,7 +567,9 @@ def test_same_revision_concurrency_has_one_winner(tmp_path: pathlib.Path) -> Non
     store = make_store(path)
 
     def command(name: str) -> tuple[str, int]:
-        return store.execute(0, lambda board: board.create(name, name.title(), "backlog", "bot"))
+        return store.execute(
+            fixture_token(0), lambda board: board.create(name, name.title(), "backlog", "bot")
+        )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(command, name) for name in ("alpha", "beta")]
@@ -573,7 +578,7 @@ def test_same_revision_concurrency_has_one_winner(tmp_path: pathlib.Path) -> Non
     failures = [future.exception() for future in futures if future.exception() is not None]
     assert len(successes) == 1
     assert len(failures) == 1
-    assert isinstance(failures[0], api_endpoint.RevisionConflict)
+    assert isinstance(failures[0], write_protocol.StaleWriteToken)
     saved = board_state.load(path)
     assert saved.revision == 1
     assert len(saved.items) == 1
@@ -628,6 +633,7 @@ def test_autopush_adopts_an_untracked_board_without_staging_other_files(
     board_path.parent.mkdir()
     board_state.save(
         board_state.Board(
+            generation="11111111-1111-4111-8111-111111111111",
             project="Untracked",
             users=USERS,
             browser_user="terry",
@@ -667,6 +673,7 @@ def test_concurrent_board_pushes_serialize_for_one_repository(tmp_path: pathlib.
         path.parent.mkdir()
         board_state.save(
             board_state.Board(
+                generation="11111111-1111-4111-8111-111111111111",
                 project=path.parent.name.title(),
                 users=USERS,
                 browser_user="terry",
@@ -776,6 +783,7 @@ def test_clean_board_reconciles_an_already_committed_push_failure(tmp_path: path
     board_path.parent.mkdir()
     board_state.save(
         board_state.Board(
+            generation="11111111-1111-4111-8111-111111111111",
             project="Recovery",
             users=USERS,
             browser_user="terry",
@@ -996,7 +1004,7 @@ def test_execute_prepares_isolated_publication_before_snapshot_replacement(
     with monkeypatch.context() as fault:
         fault.setattr(api_endpoint.copy, "deepcopy", fail_copy)
         with pytest.raises(MemoryError, match="candidate preparation failed"):
-            store.execute(0, create_alpha, outcome=outcome)
+            store.execute(fixture_token(0), create_alpha, outcome=outcome)
     assert outcome.state == "uncommitted"
     assert path.read_bytes() == before
     assert store.snapshot().revision == 0
@@ -1013,7 +1021,7 @@ def test_reused_execute_outcome_resets_before_early_failure(
     path = tmp_path / "board.json"
     store = make_store(path)
     outcome = board_state.SaveOutcome()
-    store.execute(0, create_alpha, outcome=outcome)
+    store.execute(fixture_token(0), create_alpha, outcome=outcome)
     assert outcome.state == "committed"
     if prior_outcome == "unknown":
         outcome.state = "unknown"
@@ -1034,8 +1042,10 @@ def test_reused_execute_outcome_resets_before_early_failure(
     with monkeypatch.context() as fault:
         if failure == "load":
             fault.setattr(board_state, "load", fail_load)
-        with pytest.raises(board_state.BoardError, match=r"revision|injected"):
-            store.execute(0 if failure == "conflict" else 1, fail_command, outcome=outcome)
+    with pytest.raises(board_state.BoardError, match=r"state_changed|injected"):
+        store.execute(
+            fixture_token(0 if failure == "conflict" else 1), fail_command, outcome=outcome
+        )
     assert outcome.state == "uncommitted"
     assert path.read_bytes() == before
     assert store.snapshot().revision == 1
@@ -1085,8 +1095,8 @@ def test_prepared_upload_retains_bytes_for_unknown_or_committed_outcome(
         store.upload(token, "alpha", "a.txt", "YQ==", "bot")
     blobs = list((path.parent / "attachments").rglob("*.txt"))
     assert len(blobs) == 1
-    saved = write_protocol._parse_schema5(json.loads(path.read_text(encoding="utf-8")), "test")  # noqa: SLF001
-    assert len(saved.board.find("alpha").attachments) == int(after_replace)
+    saved = board_state.Board.from_json(json.loads(path.read_text(encoding="utf-8")), "test")
+    assert len(saved.find("alpha").attachments) == int(after_replace)
 
 
 def test_prepared_reconciliation_rechecks_complete_disk_token(
@@ -1170,7 +1180,7 @@ def test_prepared_store_pins_canonical_snapshot_for_read_lock_and_replace(
         directory = tmp_path / "existing"
         directory.mkdir()
         alias = directory / ".." / target.name
-    store = api_endpoint._protocol2_store(alias)  # noqa: SLF001
+    store = api_endpoint.BoardStore(alias)
     token = write_protocol.WriteToken.parse(store.write_metadata()["writeToken"])
     assert store.path == target.resolve()
     _, revision = store.execute(token, create_alpha)
@@ -1181,6 +1191,6 @@ def test_prepared_store_pins_canonical_snapshot_for_read_lock_and_replace(
     assert json.loads(alias.read_text(encoding="utf-8")) == raw
     if alias_kind == "symlink":
         assert alias.is_symlink()
-    restarted = api_endpoint._protocol2_store(alias)  # noqa: SLF001
+    restarted = api_endpoint.BoardStore(alias)
     assert restarted.snapshot().find("alpha").subject == "Alpha"
     assert restarted.write_metadata() == store.mutation_metadata(token, revision)

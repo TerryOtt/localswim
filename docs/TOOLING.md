@@ -72,10 +72,10 @@ clearly if Node is unavailable. Static HTML/string assertions are not a substitu
 Run the focused wrapper with:
 
 ```console
-uv run --frozen pytest -q tests/test_api.py::test_private_browser_intent_executable
+uv run --frozen pytest -q tests/test_api.py -k browser_intent
 ```
 
-The harness exercises the embedded browser preparation with controlled DOM state,
+The harness exercises the active public browser script with controlled DOM state,
 fetch completion and navigation events. Its results qualify the tested state
 transitions, not browser layout, native input methods or screen-reader speech.
 

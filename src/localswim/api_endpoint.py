@@ -83,9 +83,6 @@ from typing import TYPE_CHECKING, cast
 
 from . import attachments, board_state, service_ownership, write_protocol
 
-# Preparation intentionally consumes the private, nonproduction schema codec.
-# Types below deliberately name the private snapshot envelope.
-
 if TYPE_CHECKING:
     import socketserver
     from collections.abc import Callable, Generator
@@ -1177,25 +1174,7 @@ class RevisionConflict(board_state.BoardError):
     """A command was based on a board snapshot that is no longer current."""
 
 
-type WritePrecondition = int | write_protocol.WriteToken
-_PREPARED_WRITE_PROTOCOL = 2
-
-
-class _SnapshotWriter:
-    """Adapt only private serialization to the shared atomic save implementation."""
-
-    def __init__(self, snapshot: write_protocol._Schema5Snapshot) -> None:  # pyright: ignore[reportPrivateUsage]
-        self.snapshot = snapshot
-
-    def to_json(self) -> board_state.JsonObject:
-        return write_protocol._serialize_schema5(self.snapshot)  # noqa: SLF001
-
-
-def _protocol2_store(path: pathlib.Path) -> BoardStore:  # pyright: ignore[reportUnusedFunction]
-    """Preparation-only factory; no public constructor or startup selects this path."""
-    store = BoardStore.__new__(BoardStore)
-    store._initialize(path, None, protocol2=True)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-    return store
+type WritePrecondition = write_protocol.WriteToken
 
 
 class BoardStore:
@@ -1206,19 +1185,7 @@ class BoardStore:
         path: pathlib.Path,
         policy: board_state.TransitionPolicy | None = None,
     ) -> None:
-        self._initialize(path, policy, protocol2=False)
-
-    def _initialize(
-        self,
-        path: pathlib.Path,
-        policy: board_state.TransitionPolicy | None,
-        *,
-        protocol2: bool,
-    ) -> None:
-        # Pin prepared reads, transaction ownership and replacement to one file.
-        # Saving through an unresolved symlink would replace the alias itself.
-        self.path = path.resolve() if protocol2 else path
-        self._protocol2 = protocol2
+        self.path = path.resolve()
         self._external_policy = policy is not None
         self._mutex = threading.RLock()
         self.admission_error: str | None = None
@@ -1227,32 +1194,16 @@ class BoardStore:
         self._policy_observation = self.policy
 
     def _load(self, policy: board_state.TransitionPolicy | None) -> board_state.Board:
-        if not self._protocol2:
-            return board_state.load(self.path, policy, install_context=False)
-        snapshot = write_protocol._decode_schema5(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            board_state._read_json(self.path),  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            str(self.path),
-        )
-        snapshot.board.__dict__["_write_token"] = snapshot.write_token
-        snapshot.board.__dict__["_restore_receipt"] = snapshot.restore_receipt
-        return snapshot.board
+        return board_state.load(self.path, policy, install_context=False)
 
     def _precondition(self, board: board_state.Board) -> WritePrecondition:
-        if self._protocol2:
-            return cast("write_protocol.WriteToken", board.__dict__["_write_token"])
-        return board.revision
+        return write_protocol.WriteToken(board.generation, board.revision)
 
     def _require_match(self, board: board_state.Board, expected: WritePrecondition) -> None:
-        current = self._precondition(board)
-        if self._protocol2:
-            if not isinstance(expected, write_protocol.WriteToken):
-                raise write_protocol.InvalidWriteToken("complete write token required")
-            if current != expected:
-                raise write_protocol.StaleWriteToken("state_changed")
-        elif current != expected:
-            raise RevisionConflict(
-                f"board revision is {board.revision}, not {expected}; refresh and try again"
-            )
+        if not isinstance(cast("object", expected), write_protocol.WriteToken):
+            raise write_protocol.InvalidWriteToken("complete write token required")
+        if self._precondition(board) != expected:
+            raise write_protocol.StaleWriteToken("state_changed")
 
     @contextlib.contextmanager
     def _edit(
@@ -1261,40 +1212,14 @@ class BoardStore:
         *,
         outcome: board_state.SaveOutcome | None = None,
     ) -> Generator[board_state.Board]:
-        if not self._protocol2:
-            transaction = (
-                board_state.edit(self.path, policy, install_context=False)
-                if outcome is None
-                else board_state.edit(self.path, policy, install_context=False, outcome=outcome)
-            )
-            with transaction as board:
-                yield board
-            return
-        with board_state.locked(self.path):
-            board = self._load(policy)
+        with board_state.edit(self.path, policy, install_context=False, outcome=outcome) as board:
             yield board
-            token = cast("write_protocol.WriteToken", self._precondition(board))
-            snapshot = write_protocol._Schema5Snapshot(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                board,
-                token.generation,
-                cast("write_protocol._RestoreReceipt | None", board.__dict__["_restore_receipt"]),  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            )
-            # Save's adapter carries no command behavior; shared replacement and
-            # outcome handling remain authoritative, including post-replace failures.
-            if outcome is not None:
-                outcome.state = "unknown"
-                board_state.save(_SnapshotWriter(snapshot), self.path, outcome=outcome)
-            else:
-                board_state.save(_SnapshotWriter(snapshot), self.path)
 
     def write_metadata(self, board: board_state.Board | None = None) -> board_state.JsonObject:
         """Describe one accepted snapshot without a second disk admission."""
         with self._mutex:
             accepted = self._board if board is None else board
-            if not self._protocol2:
-                return {}
-            token = cast("write_protocol.WriteToken", self._precondition(accepted))
-            token = write_protocol.WriteToken(token.generation, accepted.revision)
+            token = self._precondition(accepted)
             return {
                 "writeProtocol": 2,
                 "generation": token.generation,
@@ -1306,10 +1231,6 @@ class BoardStore:
         self, expected: WritePrecondition, revision: int
     ) -> board_state.JsonObject:
         """Bind response state to this commit, even if a later command has run."""
-        if not self._protocol2:
-            return {}
-        if not isinstance(expected, write_protocol.WriteToken):
-            raise write_protocol.InvalidWriteToken("complete write token required")
         token = write_protocol.WriteToken(expected.generation, revision)
         return {
             "writeProtocol": 2,
@@ -1320,8 +1241,8 @@ class BoardStore:
 
     @property
     def write_protocol(self) -> int:
-        """Read-only protocol identity; construction alone selects the private path."""
-        return 2 if self._protocol2 else 1
+        """Every live board uses the complete generation/revision protocol."""
+        return 2
 
     @staticmethod
     def _verify_candidate(candidate: board_state.Board) -> bool:
@@ -1427,11 +1348,6 @@ class BoardStore:
         """Grant only embedded permissions through the normal locked transaction."""
         if self._external_policy:
             raise board_state.BoardError("permission grants require an embedded board policy")
-        if not self._protocol2:
-            actors, create, moves = permission_grant_specs(body)
-            return self.execute(
-                expected, lambda board: board.grant_permissions(actors, create, moves, actor)
-            )
 
         def grant(board: board_state.Board) -> str:
             actors, create, moves = permission_grant_specs(body)
@@ -2744,6 +2660,14 @@ move any card whoever owns it. Click to hand it over."></button>
   <p id="attachment-refusal-reason"></p>
   <form method="dialog"><button type="submit">OK</button></form>
 </dialog>
+<div id="intent-review" hidden role="status"><span id="intent-message"></span>
+  <button id="intent-review-go" type="button">
+    I reviewed the board; choose a card to reattach</button>
+</div>
+<div id="intent-drafts" hidden><p>Saved text from before the board changed</p>
+  <textarea id="intent-draft-text" readonly aria-label="Saved draft text"></textarea>
+  <button id="intent-reattach" type="button">Reattach to the same card or creation lane</button>
+</div>
 %WORKSPACE%
 <script>
 let API_TOKEN = '%TOKEN%';
@@ -2801,10 +2725,8 @@ function createBrowserIntent(context, invalidate) {
 }
 // END PRIVATE BROWSER INTENT
 
-// Production cannot select the preparation through service metadata or configuration.
-const PRIVATE_BROWSER_PROTOCOL2 = false;
-const browserIntent = PRIVATE_BROWSER_PROTOCOL2 ? createBrowserIntent(
-  () => ({prefix: API_PREFIX, epoch: window.workspaceEpoch}), invalidateBrowserIntent) : null;
+const browserIntent = createBrowserIntent(
+  () => ({prefix: API_PREFIX, epoch: window.workspaceEpoch}), invalidateBrowserIntent);
 let drawerIntent = null, makeIntent = null, dragIntent = null;
 let drawerSerial = 0, makeSerial = 0;
 let pendingIntentUpload = null;
@@ -2906,28 +2828,7 @@ async function apiGet(path) {
 }
 
 async function apiPost(path, body) {
-  if (browserIntent) return intentPost(path, body, mutationIntent(path));
-  const epoch = window.workspaceEpoch;
-  const prefix = API_PREFIX;
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + API_TOKEN,
-      'Content-Type': 'application/json',
-      'If-Match': '"revision-' + data.revision + '"',
-    },
-    body: JSON.stringify(body),
-  });
-  const read = response.json.bind(response);
-  response.json = async () => {
-    const out = await read();
-    if (epoch !== window.workspaceEpoch) {
-      if (response.ok && window.WorkspaceUI) window.WorkspaceUI.reconcile(prefix, path, body);
-      out.workspaceBoardChanged = true;
-    }
-    return out;
-  };
-  return response;
+  return intentPost(path, body, mutationIntent(path));
 }
 
 async function intentPost(path, body, intent) {
@@ -2959,7 +2860,12 @@ async function intentPost(path, body, intent) {
       if (!intentResponseCurrent(intent, panel, make)) return {workspaceBoardChanged: true};
       throw error;
     }
-    if (!intentResponseCurrent(intent, panel, make)) return {workspaceBoardChanged: true};
+    if (!intentResponseCurrent(intent, panel, make)) {
+      if (response.ok && out.generation === intent.generation && window.WorkspaceUI
+          && (intent.prefix !== API_PREFIX || intent.epoch !== window.workspaceEpoch))
+        window.WorkspaceUI.reconcile(intent.prefix, path, body, intent.generation);
+      return {workspaceBoardChanged: true};
+    }
     if (response.status === 412 && out.error === 'state_changed') {
       browserIntent.suspend();
       return {workspaceBoardChanged: true};
@@ -5228,24 +5134,6 @@ setInterval(renderLive, 500);
 """
 
 
-def _private_protocol2_page() -> str:  # pyright: ignore[reportUnusedFunction]
-    """Build the unreachable browser preparation for isolated synthetic tests."""
-    return PAGE.replace(
-        "const PRIVATE_BROWSER_PROTOCOL2 = false;", "const PRIVATE_BROWSER_PROTOCOL2 = true;"
-    ).replace(
-        "%WORKSPACE%",
-        """<div id="intent-review" hidden role="status"><span id="intent-message"></span>
-  <button id="intent-review-go" type="button">
-    I reviewed the board; choose a card to reattach</button>
-</div>
-<div id="intent-drafts" hidden><p>Saved text from before the board changed</p>
-  <textarea id="intent-draft-text" readonly aria-label="Saved draft text"></textarea>
-  <button id="intent-reattach" type="button">Reattach to the same card or creation lane</button>
-</div>
-%WORKSPACE%""",
-    )
-
-
 def _report_rule_gaps(policy: board_state.TransitionPolicy) -> None:
     """Say how many permission rows still owe a description. Card #0064.
 
@@ -5876,20 +5764,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return None
 
     def _expected_revision(self) -> WritePrecondition | None:
-        if STORE is not None and STORE.write_protocol == _PREPARED_WRITE_PROTOCOL:
-            values = self.headers.get_all("If-Match", [])
-            try:
-                return write_protocol.WriteToken.parse(values[0] if len(values) == 1 else None)
-            except write_protocol.InvalidWriteToken:
-                return None
-        raw = self.headers.get("If-Match", "").strip().strip('"')
-        if raw.startswith("revision-"):
-            raw = raw.removeprefix("revision-")
-        if not raw.isdecimal():
-            return None
+        values = self.headers.get_all("If-Match", [])
         try:
-            return int(raw)
-        except ValueError:
+            return write_protocol.WriteToken.parse(values[0] if len(values) == 1 else None)
+        except write_protocol.InvalidWriteToken:
             return None
 
     def _attachment_get(self, route: str) -> None:
@@ -6104,12 +5982,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if expected is None:
             self._json(
                 {
-                    "error": "If-Match must name the expected board revision",
-                    **(
-                        {"code": "precondition_required"}
-                        if STORE is not None and STORE.write_protocol == _PREPARED_WRITE_PROTOCOL
-                        else {}
-                    ),
+                    "error": "If-Match must contain a complete generation/revision write token",
+                    "code": "precondition_required",
                 },
                 428,
             )

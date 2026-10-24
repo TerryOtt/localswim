@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from localswim import api_endpoint, board_state
+from localswim import api_endpoint, board_state, write_protocol
+from tests.support import token as fixture_token
 from tests.test_api import API, RunningApi, request_json
 from tests.test_api import api as api_fixture
 
@@ -183,7 +184,9 @@ def test_store_save_failure_keeps_disk_and_published_state_unchanged(
 
     monkeypatch.setattr(board_state, "save", fail_save)
     with pytest.raises(OSError, match="injected"):
-        store.execute(0, lambda candidate: candidate.approve_review("review", "terry"))
+        store.execute(
+            fixture_token(0), lambda candidate: candidate.approve_review("review", "terry")
+        )
     assert path.read_bytes() == before
     assert store.snapshot().to_json() == board.to_json()
 
@@ -197,13 +200,15 @@ def test_concurrent_same_revision_has_exactly_one_acceptance(
     store = api_endpoint.BoardStore(path)
 
     def accept() -> tuple[str, int]:
-        return store.execute(0, lambda candidate: candidate.approve_review("review", "terry"))
+        return store.execute(
+            fixture_token(0), lambda candidate: candidate.approve_review("review", "terry")
+        )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(accept) for _ in range(2)]
     assert sum(future.exception() is None for future in futures) == 1
     assert (
-        sum(isinstance(future.exception(), api_endpoint.RevisionConflict) for future in futures)
+        sum(isinstance(future.exception(), write_protocol.StaleWriteToken) for future in futures)
         == 1
     )
     saved = board_state.load(path)

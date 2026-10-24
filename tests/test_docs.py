@@ -1,6 +1,7 @@
 """Executable documentation examples."""
 
 import pathlib
+import uuid
 
 from localswim import board_state
 
@@ -76,6 +77,21 @@ TERRY_LANE_POLICY: list[board_state.JsonObject] = [
 ]
 
 
+def assert_initialized_example(
+    first: board_state.Board, second: board_state.Board, checked: board_state.Board
+) -> None:
+    """Only fresh generation differs from the checked structure and policy."""
+    expected = checked.to_json()
+    expected.pop("generation")
+    for board in [first, second, checked]:
+        assert str(uuid.UUID(board.generation)) == board.generation
+    assert first.generation != second.generation
+    for board in [first, second]:
+        actual = board.to_json()
+        actual.pop("generation")
+        assert actual == expected
+
+
 def test_example_board_is_valid_and_empty() -> None:
     example = pathlib.Path(__file__).resolve().parents[1] / "examples" / "board.example.json"
 
@@ -99,7 +115,13 @@ def test_initialization_examples_regenerate_checked_board(tmp_path: pathlib.Path
     )
 
     checked = board_state.load(root / "examples" / "board.example.json")
-    assert board_state.load(generated).to_json() == checked.to_json()
+    independent = tmp_path / "independent.json"
+    board_state.initialize_board(
+        independent,
+        root / "examples" / "board-description.example.json",
+        root / "examples" / "permissions.example.json",
+    )
+    assert_initialized_example(board_state.load(generated), board_state.load(independent), checked)
 
 
 def test_terry_workflow_board_preserves_personal_lane_and_priority_model() -> None:
@@ -192,4 +214,10 @@ def test_terry_workflow_inputs_regenerate_checked_board(tmp_path: pathlib.Path) 
     )
 
     checked = board_state.load(root / "examples" / "board.terry-workflow.json")
-    assert board_state.load(generated).to_json() == checked.to_json()
+    independent = tmp_path / "independent.json"
+    board_state.initialize_board(
+        independent,
+        root / "examples" / "board-description.terry-workflow.json",
+        root / "examples" / "permissions.terry-workflow.json",
+    )
+    assert_initialized_example(board_state.load(generated), board_state.load(independent), checked)

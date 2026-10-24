@@ -7,6 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from localswim import api_endpoint, board_state, cli
+from tests.support import token as fixture_token
 
 if TYPE_CHECKING:
     import pathlib
@@ -132,7 +133,7 @@ def test_failed_transaction_does_not_publish_grants(
     monkeypatch.setattr(board_state, "save", refuse_save)
     with pytest.raises(OSError, match="synthetic save failure"):
         store.execute(
-            0,
+            fixture_token(0),
             lambda candidate: candidate.grant_permissions(
                 ["bot"], ["in_progress"], [("backlog", "completed")], "bot"
             ),

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import copy
 import io
 import json
 import pathlib
@@ -25,7 +24,6 @@ class CliContext:
     """One board selected at the root of a CLI command tree."""
 
     board: pathlib.Path
-    complete_token: bool = False
 
 
 def _configure_streams() -> None:
@@ -57,10 +55,6 @@ def _mutate(context: CliContext, route: str, body: dict[str, object]) -> None:
     """Apply one mutation through the live service and print its result."""
 
     def apply() -> str:
-        if context.complete_token:
-            return board_state.apply_remote_mutation(
-                context.board.resolve(), route, body, _complete_token=True
-            )
         return board_state.apply_remote_mutation(context.board.resolve(), route, body)
 
     result = _board_call(apply)
@@ -184,6 +178,13 @@ def board_init(
         lambda: board_state.initialize_board(context.board, description, permissions)
     )
     click.echo(f"  {result}")
+
+
+@board_commands.command("migrate-generation")
+@click.pass_obj
+def board_migrate_generation(context: CliContext) -> None:
+    """Upgrade a stopped schema-4 BOARD to schema 5 with a new generation."""
+    click.echo(f"  {_board_call(lambda: board_state.migrate_generation(context.board))}")
 
 
 @board_commands.command("embed-policy")
@@ -605,9 +606,14 @@ def card_set_priority(context: CliContext, reference: str, priority: str) -> Non
     default=None,
     help="Require this exact board revision; never refresh or retry a conflict.",
 )
+@click.option(
+    "--expected-generation",
+    default=None,
+    help="Require this generation together with --expected-revision.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit the complete service result as JSON.")
 @click.pass_obj
-def card_set_priorities(  # noqa: PLR0913 -- private paired precondition is independent of output
+def card_set_priorities(  # noqa: PLR0913 -- paired precondition is independent of output
     context: CliContext,
     priority: str,
     references: tuple[str, ...],
@@ -623,7 +629,7 @@ def card_set_priorities(  # noqa: PLR0913 -- private paired precondition is inde
     can clamp requested priorities. JSON includes effective selected priorities and
     every actual change, including changes outside the selection.
 
-    Without --expected-revision, fetch the current revision once before submitting.
+    Without the explicit generation/revision pair, fetch one current write token before submitting.
     A mutation timeout has an unknown outcome; inspect the board before retrying.
     """
     if len(references) > board_state.MAX_PRIORITY_BATCH:
@@ -633,20 +639,12 @@ def card_set_priorities(  # noqa: PLR0913 -- private paired precondition is inde
         )
 
     def apply() -> board_state.JsonObject:
-        if context.complete_token:
-            return board_state.apply_remote_priority_batch(
-                context.board.resolve(),
-                references,
-                priority,
-                expected_revision=expected_revision,
-                _expected_generation=expected_generation,
-                _complete_token=True,
-            )
         return board_state.apply_remote_priority_batch(
             context.board.resolve(),
             references,
             priority,
             expected_revision=expected_revision,
+            expected_generation=expected_generation,
         )
 
     result = _board_call(apply)
@@ -662,32 +660,6 @@ def card_set_priorities(  # noqa: PLR0913 -- private paired precondition is inde
     for reference, effective in priorities.items():
         if effective != priority:
             click.echo(f"  Clamped {reference}: requested {priority}, effective {effective}.")
-
-
-def _prepared_cli() -> click.Group:  # pyright: ignore[reportUnusedFunction]
-    """Construct the inert complete-token command tree without changing bootstrap."""
-    root = copy.copy(cli)
-    root.commands = dict(cli.commands)
-
-    @click.pass_context
-    def prepare(context: click.Context, board: pathlib.Path) -> None:
-        context.obj = CliContext(board, complete_token=True)
-
-    root.callback = prepare
-    cards = copy.copy(card_commands)
-    cards.commands = dict(card_commands.commands)
-    batch = copy.copy(card_set_priorities)
-    batch.params = [
-        *card_set_priorities.params,
-        click.Option(
-            ["--expected-generation"],
-            default=None,
-            help="Require this generation together with --expected-revision.",
-        ),
-    ]
-    cards.commands["set-priorities"] = batch
-    root.commands["card"] = cards
-    return root
 
 
 @card_commands.command("set-detail")

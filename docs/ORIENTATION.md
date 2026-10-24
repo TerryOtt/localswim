@@ -88,8 +88,8 @@ domain extraction, new audit rules, a generation protocol or supported backup re
 | `src/localswim/rules.json` | Checked legacy/default policy used by controlled migrations. |
 | `pyproject.toml` | uv build metadata, Python contract, dependencies, Ruff/formatter policy, and strict Pyright policy. |
 | `.python-version` / `uv.lock` | Exact development interpreter and cross-platform dependency lock. |
-| `examples/*.example.json` | Generic human-readable initialization inputs and their checked empty schema-4 board. |
-| `examples/*.terry-workflow.json` | Terry's preferred seven-lane workflow inputs and their checked empty schema-4 board. |
+| `examples/*.example.json` | Generic human-readable initialization inputs and their checked empty schema-5 board. |
+| `examples/*.terry-workflow.json` | Terry's preferred seven-lane workflow inputs and their checked empty schema-5 board. |
 | `check.py` | Complete local/CI gate: line endings, Ruff, formatting, strict Pyright, pytest, workflow/shell linting, and US English vocabulary. |
 | `tests/` | Domain, policy, serialization, store, API, CLI, docs, and gate behavior. |
 | `src/localswim/vendor/typefaces/inter/` | Unmodified Inter WOFF2 subsets and their SIL OFL license. |
@@ -111,15 +111,15 @@ interpreter pin are honored.
 
 Passing a directory to `localswim` selects workspace mode; passing a JSON snapshot keeps
 individual-board mode. The workspace default port is 8810. It discovers validated
-schema-4 snapshots recursively, excluding hidden directories, Git metadata, attachment
-storage, and symbolic-link escapes. Nonboard JSON is ignored; malformed schema-4 boards
+schema-5 snapshots recursively, excluding hidden directories, Git metadata, attachment
+storage, and symbolic-link escapes. Nonboard JSON is ignored; malformed schema-5 boards
 remain visible as unavailable entries with an error instead of being partially loaded.
 
 Each regular candidate has an 8 MiB (8,388,608-byte) discovery ceiling, with a
 limit-plus-one read to detect growth beyond it. The ceiling is about 4.8 times the
 largest representative snapshot measured when introduced. Unreadable, oversized,
 invalid JSON, excessive JSON nesting and non-envelope files are omitted. A recognized
-schema-4 envelope that fails board validation, including validation recursion, stays
+supported board envelope that fails board validation, including validation recursion, stays
 in the catalog with an error. API and attachment limits are separate; discovery does
 not promise a bound on total traversal or file count.
 
@@ -474,21 +474,21 @@ a legal edge was really made by that actor.
 Link and unlink actions append a board-level `relationshipHistory` entry containing the
 timestamp, actor, caller-facing relationship direction, and both stable card IDs. It is
 separate from current canonical `links` state so a removed link remains attributable.
-The field is optional under schema 4: older boards begin recording with their first new
+Introduced in schema 4 and retained in schema 5, the field is optional: older boards begin recording with their first new
 relationship mutation, and no timestamp or actor is fabricated for an existing link.
 
 Parent changes similarly append a board-level `parentHistory` entry containing the
 timestamp, actor, child stable ID, and nullable before/after parent IDs. The field is
-optional under schema 4, and an existing parent receives no fabricated earlier event.
+optional in schema 5, and an existing parent receives no fabricated earlier event.
 `Board.verify()` checks each recorded child's hierarchy chain and compares its last
 event with current parent state.
 
 Subject changes append a board-level `subjectHistory` entry containing only the
-timestamp, actor, and stable card ID. The optional schema-4 field begins with the first
+timestamp, actor, and stable card ID. The optional field introduced in schema 4 begins with the first
 rename made by a supporting build; no earlier events are fabricated. Neither subject
 value is duplicated into the event, so Git history remains the optional source for
 comparing text when the operator has deliberately arranged versioned board storage.
-Description changes similarly append optional schema-4 `detailHistory` entries with
+Description changes similarly append optional `detailHistory` (introduced in schema 4) entries with
 only timestamp, actor, and stable card ID. This lets a board-write monitor attribute
 `set-detail` mutations without reading or logging private prose; Git remains the
 source for comparing old and new text. Older boards have no fabricated detail history.
@@ -496,7 +496,7 @@ Project edits and no-op writes still have no actor-only event, so the monitor
 alerts on those even when Bot issued them.
 
 Archiving is independent of lane state. `Item.archived` defaults to false and is omitted
-from persisted cards while false. The optional schema-4 `archiveHistory` array records
+from persisted cards while false. The optional `archiveHistory` (introduced in schema 4) array records
 each change as `{at, by, item, archived}`. Its parser rejects invalid booleans, timestamps,
 unknown fields, and missing card references. Verification replays archive state from
 false, checks the actor and alternating states, and compares it with every stored flag.
@@ -707,7 +707,7 @@ the lease cannot retroactively coordinate a process that never acquired it.
 ## Attachment storage and audit
 
 Cards optionally persist `attachments`, `attachmentHistory`, and `coverAttachment`
-without changing schema 4. `attachments.py` validates each GUID, printable original
+as an extension introduced under schema 4 and retained in schema 5. `attachments.py` validates each GUID, printable original
 filename, byte count (1 through 10 MiB), detected media type, SHA-256, timestamp, and
 actor. Audit replay checks attachment membership and cover choice against current
 state; activity emits action/GUID attribution without filenames or bytes.
@@ -766,7 +766,7 @@ Moving a board requires moving its attachment directory as well as the JSON snap
 
 The server binds only to `127.0.0.1`. Read routes are loopback-accessible without a
 credential. Mutations require both a per-process bearer credential and
-`If-Match: "revision-N"`.
+`If-Match: "generation-UUID-revision-N"` from the originating board state.
 
 Current API routes:
 
@@ -800,19 +800,17 @@ Descriptor files must be regular; file and browser-session/status JSON reads use
 controlled refusal. Full board responses and attachment payloads are not metadata.
 
 CLI descriptor acquisition also checks the live browser-session `boardIdentity`
-before ordinary mutation, explicit-revision priority batch or shutdown dispatch.
-An explicit revision avoids the snapshot GET, not identity verification. CLI POSTs
+before ordinary mutation, paired explicit generation/revision priority batch or shutdown dispatch.
+An explicit generation/revision pair avoids the snapshot GET, not identity verification. CLI POSTs
 still use only the descriptor's CLI credential; the probe does not grant browser
 authority. Workspace consumers retain browser token/userCSS checks, legacy upgrade
 handling and exact workspaceLaunch ownership checks during child cleanup.
-Generic CLI mutations also refuse a snapshot revision that is not a nonnegative genuine
-integer before dispatching any POST; zero remains valid.
+Generic CLI mutations require a consistent complete token and genuine nonnegative revision before dispatching any POST; zero remains valid inside a complete token.
 
 Metadata failures produce sanitized refusal or unavailable/recovery behavior, without
 including capabilities. Service replacement can occur after a successful identity
 probe, so credential rotation may safely refuse the subsequent request. This does not
-introduce an atomic session-generation protocol or automatic POST replay; uncertain
-mutation outcomes still require inspection before any deliberate retry.
+make authentication itself a state token or authorize POST replay. Complete generation/revision comparison occurs in the writer transaction; uncertain mutation outcomes still require inspection before any deliberate retry.
 
 The approval route accepts an empty JSON object and uses the authenticated browser actor
 and request revision. It validates the `ready_for_review -> completed` move before
@@ -1171,122 +1169,90 @@ end that differs from the saved cursor. Queue acknowledgement and status persist
 are separate, so crash recovery has at-least-once duplicate windows. See README's shared board-write monitor
 section for launch arguments and migration from the old FGA-local watcher.
 
-## Private schema-5 preparation (#0129)
+## Schema 5 and write protocol 2
 
-`write_protocol.py` provides an inert preparation boundary for the accepted restore
-protocol. Production `SCHEMA`, initialization, load/save, HTTP, CLI, browser and
-workspace behavior remain schema 4 / write protocol 1. There is no feature switch,
-public schema-5 writer, migration command or runtime generation allocation.
+This isolated release activates the reviewed preparations together. Public Board
+state owns canonical `generation`, genuine nonnegative `revision`, and optional
+latest `restoreReceipt`; `write_protocol.py` validates complete tokens and receipts.
+Initialization allocates one generation after admission. Load/save, ordinary
+commands, reconciliation and restart retain it. Preparation-only service, CLI,
+workspace and page selectors are removed; normal entrypoints use one complete
+protocol, with no scalar revision fallback.
 
-The private envelope contains the existing `Board`, one canonical lowercase UUID
-and an optional immutable latest maintenance receipt. It is not a `Board` and has
-no `to_json` interface, so public save cannot silently discard its generation.
-`_parse_schema5` and `_serialize_schema5` validate complete state using isolated
-board policy/users and audit verification. Ordinary round trips allocate nothing
-and preserve generation, revision and receipt. Preparation uses the same supported
-priority adoption followed by audit verification as live candidate admission;
-rejected candidates never install ambient actors or policy.
+The exact header is `If-Match: "generation-UUID-revision-N"`, including the quotes.
+The UUID is canonical lowercase; N has no leading zeros except zero. Missing or
+malformed state receives 428; a valid different generation or revision receives
+412 with `state_changed`. Compare complete state under store/snapshot ownership
+before command, blob or reconciliation effects. Response metadata identifies the
+specific committed generation/revision, not a later independently read snapshot.
 
-`_prepare_initial_schema5` retains the supplied initial revision;
-`_prepare_migration_schema5` advances schema-4 revision exactly once. Both require
-an explicit generation allocator, invoked once after successful admission. Future
-restore planning must supply its independently allocated generation and final
-reviewed revision; these helpers do not implement restore execution or receipts.
+### Explicit stopped-board migration
 
-`WriteToken` accepts exactly `"generation-UUID-revision-N"`, including the quotes,
-with a canonical lowercase UUID and a non-Boolean nonnegative integer revision.
-`N` has no leading zeros except zero itself. Missing/malformed input raises
-`InvalidWriteToken`; a valid differing generation or revision raises
-`StaleWriteToken("state_changed")`. Future adapters map these to 428 and 412 and
-must compare under the transaction lock before any mutation or attachment write.
+`localswim-cli BOARD board migrate-generation` is the only schema-4-to-5 upgrade
+entrypoint. Normal load/save and service startup refuse schema 4 with migration
+guidance. Directory discovery retains recognized legacy envelopes so an old board
+can report the required migration instead of disappearing. No command silently
+upgrades a running or merely inspected board.
 
-A present `restoreReceipt` requires exactly `operationId`, `planDigest`,
+Migration resolves the target once and holds launch gate, writer lease and snapshot
+transaction through admission and save. Validate existing policy/users/history and
+supported priority adoption before allocating generation; advance revision once.
+Repeated migration refuses an already upgraded board without another allocation.
+Retain SaveOutcome distinctions after interrupted or post-replacement failure;
+inspect actual state before retrying, and never infer rollback from an exception.
+
+Schema-5 lane addition, label rename and lane-ID migration preserve generation and
+the latest receipt. Existing schema-2/3 policy embedding and lane migration remain
+explicit offline operations, retaining supported policy/audit semantics while
+producing schema 5 and allocating generation after admission. They do not guess a
+policy or provide a normal-load compatibility fallback.
+
+A present `restoreReceipt` contains exactly `operationId`, `planDigest`,
 `sourceSnapshotDigest`, `priorRawDigest`, `timestamp` and `authority`. Operation ID
-is a canonical lowercase UUID; digests are lowercase 64-character SHA-256 hex.
-`priorRawDigest` may instead be the explicit string `missing`, never null or an
-omitted field. Timestamp is offset-bearing RFC 3339; authority is exactly
-`local-maintenance`. An absent receipt is valid. Receipt data is validated and
-copied into immutable values; returned JSON cannot change canonical receipt state.
+is a canonical UUID, digests are lowercase SHA-256, prior raw digest may instead be
+`missing`, timestamp is offset-bearing RFC 3339 and authority is `local-maintenance`.
+Validation and detached serialization preserve the accepted receipt. This release
+does not yet implement restore plan/apply; those later children supply sealed data.
 
-Later adapter integration checklist:
+### Client and browser intent
 
-- Keep this boundary private until server, CLI, browser and workspace preparations
-  pass independent review and coordinated isolated release acceptance together.
-- Add explicit stopped-board initialization/migration ownership and persistence;
-  preserve generation and receipt in every supported maintenance/write path.
-- Require the complete token under the writer transaction lock; never accept a
-  schema-5 numeric fallback. Advertise protocol 2 and retain captured intent tokens
-  across polls, credential refresh and gateway forwarding.
-- Restore planning allocates/seals generation, revision, receipt time and content
-  once; apply validates the same sealed bytes and performs no new allocation.
-- Coordinate consumer rollout separately; this preparation authorizes no live
-  migration, installation, restart, restore or backup configuration change.
+The CLI retains the exact token from its accepted board read and submits once.
+Explicit priority mode requires generation and revision together, before network
+dispatch, and does not fetch newer state to replace supplied intent. Identity and
+credential rendezvous remain board-bound and separate from state preconditions.
+The gateway forwards the caller's complete header unchanged; refreshed browser
+credentials change authentication only. Gateway preferences still use their own
+numeric revision CAS, independently of all board generations.
 
-## Private service and transport preparation
+Normal browser bootstrap now uses the complete protocol. One shared intent helper
+binds all mutation controls to originating generation, board/window/navigation
+context and relevant card identity. Polling advances revision only within the same
+generation. Generation changes retain useful text separately, disable stale actions,
+fetch fresh state/session and require explicit review/reattachment. Same card ID
+with a different ticket is not the original target. Never auto-target removed cards.
 
-The service and transport preparation builds on `write_protocol.WriteToken` and
-the private schema-5 envelope. It is reachable only through private construction
-for synthetic tests. Production service, CLI and workspace entrypoints continue
-to use schema 4 / protocol 1. No command-line option, environment variable or
-persisted preference activates a partial protocol upgrade.
+Review requests and mutation completions retain their captured checkpoints/nonces;
+older success, failure or JSON completion cannot close another drawer, clear its
+draft, or replace newer state. Confirmed original-board success may reconcile only
+the matching original generation; another board/new generation remains untouched.
+Unknown outcomes never authorize automatic replay. Authentication refresh and
+workspace restart do not renew draft origin.
 
-The prepared store uses the existing command/admission and ownership boundaries.
-It compares both generation and revision under the store mutex and snapshot
-transaction before invoking a command, writing an attachment or persisting
-reconciliation. Missing or malformed complete tokens map to 428; a valid but
-different token maps to 412 with `state_changed`. Prepared board, session and
-successful mutation metadata carry `writeProtocol`, `generation`, `revision` and
-`writeToken`. Ordinary writes and private restart preserve the stored generation.
-Private store construction fixes one canonical path for locking, reading and
-saving; writing through an alias must preserve the alias and update its target.
+The executable Node VM/DOM matrix runs the public PAGE and actual workspace
+capture/restore seams. It qualifies deterministic state/control behavior, not
+native browser layout, IME input or screen-reader speech.
 
-Private persistence retains the shared atomic save and `SaveOutcome` boundary.
-Rejected candidates do not replace accepted policy or memory, and committed or
-uncertain attachment outcomes retain their bytes. The preparation adds no restore
-operation or generation allocation during an ordinary mutation.
+### Candidate versus operational rollout
 
-The store's private structural schema-5 decoder does not grant admission. The
-store still performs supported priority adoption and complete audit verification
-before publication or reconciliation writes. The foundation's strict parser
-retains its full verification contract; a structurally decoded candidate must
-never be installed as accepted state by itself.
+Schema 5 / protocol 2 is activated only in this NONWATCHED release and its synthetic
+tests. The active shared package, production schema-4 boards and their services are
+not replaced, stopped or migrated by this handoff. Keep all later restore work
+isolated through synthetic acceptance.
 
-The prepared CLI retains the complete token from its accepted board read and
-sends one mutation POST. Explicit priority-batch mode requires generation and
-revision together and does not fetch a newer state to replace that intent. The
-workspace forwards the exact originating header; refreshing an upstream browser
-capability changes authentication only. Per-board generation is independent of
-gateway preference revision, and browser and CLI authority remain distinct.
-Refusal, timeout, credential rotation and unusable successful responses never
-authorize automatic POST replay.
-
-Workspace discovery still uses the shipped schema-4 contract. Combined synthetic
-tests bind a known private schema-5 service through an endpoint resolver, then use
-the actual descriptor/session validation and proxy. This does not claim public
-schema-5 catalog support; coordinated activation remains responsible for it.
-
-These are isolated preparation contracts, not a migration or deployment guide.
-Coordinated isolated activation still follows separately.
-Live adoption requires a concrete all-consumer quiescence/rollback preflight and
-explicit operational approval; accepting a code handoff does not grant it.
-
-## Private browser intent preparation
-
-The prepared browser uses one edit-session boundary for all mutation controls.
-It binds the originating generation to the board/window/navigation context when
-the user opens a drawer or starts an action. Polling can advance a revision within
-that generation; authentication refresh and workspace restart cannot renew old
-intent. A generation change disables stale submission, drag and queued actions,
-retains useful draft text separately, and requires explicit review of the fresh
-board before reattachment. Missing cards are never replaced by a guessed target.
-
-Request completion is bound to the captured context. An older success or failure
-cannot update a newer board, close another drawer, or clear its draft. Fresh edits
-send the exact complete token for the accepted generation. Saved workspace state
-retains origin information rather than turning restored form text into new intent.
-
-Production bootstrap remains protocol 1 regardless of response metadata. Only
-private page/test construction enables the prepared protocol-2 path, pending
-coordinated activation. The executable Node VM/DOM harness covers state and
-control behavior with delayed responses and separate board/window fixtures.
-It does not certify native browser layout, IME input or screen-reader speech.
+Operational adoption requires a fresh inventory of every shared board service,
+gateway, CLI and monitor, retained old packages/recovery material, concrete
+all-consumer quiescence and rollback checks, and separate explicit owner approval.
+Do not install activation code into watched shared source while unmigrated consumers
+still depend on it. Preserve ports, stable board keys, policy, attachment bytes,
+monitor targets and opt-in publishing settings. Source review approval does not
+authorize live rollout, shutdown, migration or restore.

@@ -20,6 +20,7 @@ from click.testing import CliRunner
 
 from localswim import api_endpoint, attachments, board_state, cli
 from tests.support import USERS
+from tests.support import token as fixture_token
 from tests.test_completed_dependencies import complete
 
 if TYPE_CHECKING:
@@ -31,7 +32,12 @@ def served_board(tmp_path: pathlib.Path) -> Iterator[pathlib.Path]:
     """Publish the production rendezvous file for an isolated service."""
     path = tmp_path / "board.json"
     board = board_state.Board(
-        project="CLI", users=USERS, browser_user="terry", cli_user="bot", default_owner="bot"
+        generation="11111111-1111-4111-8111-111111111111",
+        project="CLI",
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
     )
     board_state.save(board, path)
     api_endpoint.BOARD_PATH = path
@@ -88,6 +94,7 @@ HELP_PATHS = [
     ("board",),
     ("board", "embed-policy"),
     ("board", "init"),
+    ("board", "migrate-generation"),
     ("board", "grant-permissions"),
     ("board", "set-project"),
     ("board", "show"),
@@ -157,6 +164,7 @@ def write_schema_two_lane_board(path: pathlib.Path, port: int) -> str:
     current_lane = "ready_for_work"
     legacy_lane = "ready_for_" + "claude"
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Migration",
         port=port,
         users=USERS,
@@ -232,7 +240,9 @@ def test_listed_cli_mutations_roundtrip_through_sole_writer(served_board: pathli
         "/api/v001/cards/b/parent",
     ]
     assert execute.call_count == 12
-    assert [call.args[0] for call in execute.call_args_list] == list(range(12))
+    assert [call.args[0] for call in execute.call_args_list] == [
+        fixture_token(revision) for revision in range(12)
+    ]
 
 
 def listed_cli_mutations(served_board: pathlib.Path) -> None:
@@ -356,6 +366,7 @@ def test_cli_forces_utf8_when_inherited_output_encoding_cannot_print_move_arrow(
 def test_offline_mutation_has_no_direct_write(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Offline",
         users=USERS,
         browser_user="terry",
@@ -395,7 +406,20 @@ def test_cli_missing_string_result_requires_inspection_without_replay(
     def respond(request: urllib.request.Request, *, timeout: float) -> BytesIO:
         assert timeout > 0
         requests.append(request.get_method())
-        return BytesIO(b'{"revision":0}' if request.get_method() == "GET" else reply)
+        return BytesIO(
+            json.dumps(
+                {
+                    "writeProtocol": 2,
+                    "generation": board_state.load(served_board).generation,
+                    "revision": 0,
+                    "writeToken": '"generation-'
+                    + board_state.load(served_board).generation
+                    + '-revision-0"',
+                }
+            ).encode()
+            if request.get_method() == "GET"
+            else reply
+        )
 
     monkeypatch.setattr(urllib.request, "urlopen", respond)
     arguments = ["board", "shutdown"] if operation == "shutdown" else ["card", "comment", "1", "x"]
@@ -440,7 +464,11 @@ def test_cli_board_identity_mismatch_never_posts(
             )
         if operation == "batch":
             return board_state.apply_remote_priority_batch(
-                requested, ["alpha"], "p3", expected_revision=0
+                requested,
+                ["alpha"],
+                "p3",
+                expected_revision=0,
+                expected_generation=board_state.load(served_board).generation,
             )
         return board_state.shutdown_service(requested)
 
@@ -465,7 +493,13 @@ def test_cli_stale_capability_refuses_once_without_replay(
 
     monkeypatch.setattr(api_endpoint.Handler, "do_POST", post)
     with pytest.raises(board_state.BoardError, match="refused"):
-        board_state.apply_remote_priority_batch(served_board, ["alpha"], "p3", expected_revision=0)
+        board_state.apply_remote_priority_batch(
+            served_board,
+            ["alpha"],
+            "p3",
+            expected_revision=0,
+            expected_generation=board_state.load(served_board).generation,
+        )
     assert posts == [board_state.API_PREFIX + "/cards/priorities"]
 
 
@@ -493,13 +527,20 @@ def test_cli_invalid_live_metadata_never_posts(
     monkeypatch.setattr(api_endpoint.Handler, "do_GET", get)
     monkeypatch.setattr(api_endpoint.Handler, "do_POST", post)
     with pytest.raises(board_state.BoardError, match="nothing changed"):
-        board_state.apply_remote_priority_batch(served_board, ["alpha"], "p3", expected_revision=0)
+        board_state.apply_remote_priority_batch(
+            served_board,
+            ["alpha"],
+            "p3",
+            expected_revision=0,
+            expected_generation=board_state.load(served_board).generation,
+        )
     assert posts == []
 
 
 def test_read_only_report_works_offline(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Offline report",
         users=USERS,
         browser_user="terry",
@@ -515,6 +556,7 @@ def test_read_only_report_works_offline(tmp_path: pathlib.Path) -> None:
 def activity_board(path: pathlib.Path) -> None:
     """Write every persisted activity shape at deterministic timestamps."""
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Activity",
         users=USERS,
         browser_user="terry",
@@ -550,6 +592,7 @@ def activity_board(path: pathlib.Path) -> None:
 def newest_comments_board(path: pathlib.Path) -> None:
     """Write comments on two cards at deterministic timestamps."""
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Newest comments",
         users=USERS,
         browser_user="terry",
@@ -570,6 +613,7 @@ def newest_comments_board(path: pathlib.Path) -> None:
 def inspection_board(path: pathlib.Path) -> None:
     """Write one card with every focused-inspection relationship shape."""
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Inspection",
         users=USERS,
         browser_user="terry",
@@ -1350,7 +1394,12 @@ def test_activity_between_includes_only_rename_at_exact_bounds(tmp_path: pathlib
 def test_activity_between_attributes_detail_without_exposing_prose(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "board.json"
     board = board_state.Board(
-        project="Activity", users=USERS, browser_user="terry", cli_user="bot", default_owner="bot"
+        generation="11111111-1111-4111-8111-111111111111",
+        project="Activity",
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
     )
     board.create("alpha", "Alpha", "backlog", "bot", detail="Private original")
     board.find("alpha").history[-1].at = "2026-08-24T09:00:00Z"
@@ -1424,6 +1473,7 @@ def test_activity_microsecond_bounds_exclude_an_event_before_the_cursor(
 ) -> None:
     path = tmp_path / "board.json"
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Activity precision",
         users=USERS,
         browser_user="terry",
@@ -1491,7 +1541,7 @@ def test_cli_migrates_lane_state_and_history_offline(tmp_path: pathlib.Path) -> 
     result = run_cli(path, "lane", "migrate", legacy_lane, "ready_for_work")
 
     assert result.returncode == 0, result.stderr
-    assert "migrated schema 2 -> 4" in result.stdout
+    assert "migrated schema 2 -> 5" in result.stdout
     assert "replaced 4 lane value(s)" in result.stdout
     board = board_state.load(path)
     assert board.revision == 1
@@ -1846,6 +1896,7 @@ def completed_lane_board(path: pathlib.Path) -> board_state.Board:
         candidate.bind(("127.0.0.1", 0))
         port = candidate.getsockname()[1]
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Completed migration",
         port=port,
         users=USERS,
@@ -1956,6 +2007,7 @@ def test_cli_embeds_policy_into_a_schema_three_board(tmp_path: pathlib.Path) -> 
         candidate.bind(("127.0.0.1", 0))
         port = candidate.getsockname()[1]
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="Migration",
         port=port,
         users=USERS,
@@ -1987,9 +2039,16 @@ def test_generic_mutation_invalid_revision_never_posts(
             return_value={"host": "127.0.0.1", "port": 1, "token": "synthetic"},
         ),
         patch.object(
-            board_state, "_service_json", return_value={"revision": revision}
+            board_state,
+            "_service_json",
+            return_value={
+                "writeProtocol": 2,
+                "generation": fixture_token(0).generation,
+                "writeToken": fixture_token(0).format(),
+                "revision": revision,
+            },
         ) as transport,
-        pytest.raises(board_state.BoardError, match="no valid revision"),
+        pytest.raises(board_state.BoardError, match="write metadata"),
     ):
         board_state.apply_remote_mutation(
             tmp_path / "board.json", board_state.API_PREFIX + "/cards", {}
@@ -2009,7 +2068,15 @@ def test_generic_mutation_valid_revision_posts_once(tmp_path: pathlib.Path, revi
         patch.object(
             board_state,
             "_service_json",
-            side_effect=[{"revision": revision}, {"result": "changed"}],
+            side_effect=[
+                {
+                    "writeProtocol": 2,
+                    "generation": fixture_token(revision).generation,
+                    "revision": revision,
+                    "writeToken": fixture_token(revision).format(),
+                },
+                {"result": "changed"},
+            ],
         ) as transport,
     ):
         result = board_state.apply_remote_mutation(
@@ -2017,4 +2084,7 @@ def test_generic_mutation_valid_revision_posts_once(tmp_path: pathlib.Path, revi
         )
     assert result == "changed"
     assert transport.call_count == 2
-    assert transport.call_args.kwargs == {"body": {"subject": "Synthetic"}, "revision": revision}
+    assert transport.call_args.kwargs == {
+        "body": {"subject": "Synthetic"},
+        "write_token": fixture_token(revision).format(),
+    }

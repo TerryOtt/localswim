@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from localswim import api_endpoint, board_state
+from tests.support import token as fixture_token
 
 if TYPE_CHECKING:
     import pathlib
@@ -262,7 +263,7 @@ def test_dependency_promotion_rolls_back_when_transaction_fails(
         raise board_state.BoardError("injected refusal")
 
     with pytest.raises(board_state.BoardError, match="injected refusal"):
-        store.execute(0, refuse)
+        store.execute(fixture_token(0), refuse)
     assert path.read_bytes() == before
     assert store.snapshot().find("urgent").priority == "P5"
 

@@ -430,6 +430,18 @@ function attachmentButton(b, index) {
   assert.equal(independent.requests().length, 1);
   assert(ws.run('browserIntent.blocked()'));
   scenarioCount++;
+  const reconcile = workspace.slice(workspace.indexOf('  function reconcile('),
+    workspace.indexOf('  window.WorkspaceUI ='));
+  ws.run(reconcile);
+  for (const savedGeneration of [g1, g2, null]) {
+    ws.run(`current='two'; state.records.one={drafts:{a:'confirmed text'},
+      browserIntent:${savedGeneration ? `{generation:'${savedGeneration}'}` : 'null'}};
+      reconcile('/workspace/one','/workspace/one/cards/a/comment',
+        {text:'confirmed text'},'${g1}');`);
+    assert.equal(ws.run("state.records.one.drafts.a"),
+      savedGeneration === g1 ? undefined : 'confirmed text');
+    scenarioCount++;
+  }
   console.log(JSON.stringify({passed: true, scenarioCount, engine: 'Node VM deterministic DOM',
     modes: ['direct', 'workspace'], mutationFamilies: Object.keys(controls)}));
 })().catch(error => {console.error(error); process.exitCode = 1;});

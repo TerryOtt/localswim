@@ -24,6 +24,7 @@ const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, {textContent:'', className:'', value:'draft',
+     addEventListener(){},
     classList:{values:new Set(),toggle(k,v){v?this.values.add(k):this.values.delete(k)},
       add(k){this.values.add(k)},remove(k){this.values.delete(k)}}});
   return elements.get(id);
@@ -35,11 +36,13 @@ const location={get href(){return href},get search(){return new URL(href).search
 const history={replaceState(a,b,url){href=new URL(url,href).href}};
 const window={location,localswimWorkspace:!!input.workspace,history,
   WorkspaceUI:input.workspace?{pageStatus:()=>input.status,capture(){}}:null};
-const context=vm.createContext({window,location,URL,Date,document:{getElementById:element},
+const context=vm.createContext({window,location,URL,Date,
+    document:{getElementById:element,
+    querySelectorAll:()=>[]},
   sessionStorage:{setItem(k,v){stored[k]=v}},serverBuild:input.boardBuild || null,
   codeStale:!!input.boardStale,restarting:!!input.boardRestarting,restartProblem:input.boardProblem||null,
   pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,LIVE_MS:5000,WARN_MS:15000,
-  drafts:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
+  drafts:{},draftTickets:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
   STALE_RELOAD_STATE_KEY:'saved',STALE_RELOAD_QUERY:'_localswim_build',staleReloadStarted:false,
   PAGE_BUILD:'aaaaaaa',clockOf:()=>'',agoOf:()=>''});
 function section(source,start,end) {
@@ -47,12 +50,16 @@ function section(source,start,end) {
   if(a<0||b<0)throw Error('Production helper boundary not found: '+start);
   return source.slice(a,b);
 }
-function loadInertBrowserHelpers(target) {
-  // Partial-script fixtures need the same disabled preparation declarations as PAGE.
+function loadBrowserHelpers(target) {
+  // Execute active shipped intent helpers with synthetic generation metadata.
   vm.runInContext(section(input.page,'// BEGIN PRIVATE BROWSER INTENT',
     'async function apiGet('),target);
 }
-loadInertBrowserHelpers(context);
+loadBrowserHelpers(context);
+context.API_PREFIX='/api/v001';window.workspaceEpoch=0;context.crypto=require('node:crypto');
+context.fixtureMetadata={writeProtocol:2,generation:'11111111-1111-4111-8111-111111111111',revision:4,
+  writeToken:'"generation-11111111-1111-4111-8111-111111111111-revision-4"'};
+vm.runInContext('browserIntent.observe(fixtureMetadata)',context);
 if(input.mode==='card-focus'){
   const assert=require('assert/strict');let opened=[],cards=[],rendered=[];
   function node(tag){
@@ -90,7 +97,8 @@ if(input.mode==='card-focus'){
     for(const c of rendered)if(c.dataset.id===context.filterOut)c.classList.add('nomatch')};
   const item=id=>({id,ticket:'#0001',subject:'Title '+id,state:'ready',
     priority:'P3',comments:[],draggable:true});
-  context.data={lanes:[{items:[item('a'),item('b')]}]};vm.runInContext('paint()',context);
+  context.data={...context.fixtureMetadata,
+    lanes:[{items:[item('a'),item('b')]}]};vm.runInContext('paint()',context);
   const a=rendered[0];assert.equal(a.action.tag,'button');
   assert.equal(a.action.attrs['aria-label'],'Open card #0001: Title a');
   a.listeners.click({target:a.action});assert.deepEqual(opened,['a']);opened=[];
@@ -134,7 +142,12 @@ if(input.mode==='card-focus'){
         if(input.failure==='read')throw Error('unreadable response');return input.response}}}});
   vm.runInContext(section(input.page,'function laneEl(', '\n// Match headings'),context);
   const lane=vm.runInContext('laneEl({state:"ready",label:"Ready",ownerLabel:"Owner"})',context);
-  await lane.listeners.drop({preventDefault(){},dataTransfer:{getData(){return input.payload}}});
+  vm.runInContext("dragIntent=browserIntent.capture('drag');dragIntent.dragKey='synthetic-drag'",context);
+  let payload=input.payload;
+  try {const parsed=JSON.parse(payload);
+    if(parsed && typeof parsed==='object' && !Array.isArray(parsed)) {
+    parsed.dragKey='synthetic-drag';payload=JSON.stringify(parsed)}} catch {}
+  await lane.listeners.drop({preventDefault(){},dataTransfer:{getData(){return payload}}});
   assert.equal(lane.classList.values.size,0);
   process.stdout.write(JSON.stringify({posts,refreshes,accepted,messages,seen:context.seen}));
 }else if(input.mode==='alerts'){
@@ -169,7 +182,9 @@ if(input.mode==='card-focus'){
   vm.runInContext(section(input.page,'function paint()', '\n// ---- proof of life'),context);
   if(input.gesture){element('alerts').checked=true;await listeners.change()}
   for(const count of [0,1,1,2]){
-    context.data={project:'Synthetic board',browserUser:'reader',lanes:[],counts:{blocked:count}};
+    context.data={...context.fixtureMetadata,project:'Synthetic board',
+    browserUser:'reader',
+    lanes:[],counts:{blocked:count}};
     vm.runInContext('paint()',context);
   }
   for(const notification of messages)if(notification.onclick)notification.onclick();
@@ -201,9 +216,15 @@ if(input.mode==='card-focus'){
   context.document.body=node('body');context.document.activeElement=context.document.body;
   const get=context.document.getElementById, calls=[];
   let resolve;
-  Object.assign(context,{API_PREFIX:'/api/a',seen:1,
-    itemById:id=>({id,subject:'Original'}),toast:()=>{},acceptRevision:()=>{},
-    apiPost:(path,body)=>{calls.push({path,body});return new Promise(r=>{resolve=r})}});
+  Object.assign(context,{API_PREFIX:'/api/a',API_TOKEN:'synthetic',seen:1,
+    itemById:id=>({id,subject:'Original'}),toast:message=>{context.lastToast=message},acceptRevision:()=>{},
+    data:{...context.fixtureMetadata,lanes:[]},
+    fetch:(path,options)=>{calls.push({path,body:JSON.parse(options.body)});
+      return new Promise(r=>{resolve=value=>r({...value,status:value.ok?200:409,
+        json:async()=>({...await value.json(),...context.fixtureMetadata})})})}});
+  vm.runInContext(section(input.page,'async function apiPost(',
+     '// **The repaint counter'),context);
+  vm.runInContext("browserIntent.observe(fixtureMetadata);browserIntent.review();drawerIntent=browserIntent.capture('drawer');drawerIntent.target='a'",context);
   vm.runInContext(section(input.page,'let editing = null;', 'function startDetailEdit()'),context);
   vm.runInContext(section(input.page,'function attachmentImage(', 'function fileBase64('),context);
   vm.runInContext(section(input.page,"document.getElementById('p-subject-edit').addEventListener('keydown'",
@@ -215,7 +236,7 @@ if(input.mode==='card-focus'){
   context.openId='a';vm.runInContext('startSubjectEdit()',context);
   get('p-subject-edit').value='New title';
   assert.equal(key('Enter',true).prevented,false);assert.equal(calls.length,0);
-  assert.equal(key('Enter').prevented,true);key('Enter');assert.equal(calls.length,1);
+  assert.equal(key('Enter').prevented,true);key('Enter');assert.equal(calls.length,1,context.lastToast);
   resolve({ok:true,json:async()=>({result:'saved'})});await new Promise(setImmediate);
   assert.equal(context.document.activeElement,get('p-subject'));
   vm.runInContext('startSubjectEdit()',context);
@@ -226,7 +247,7 @@ if(input.mode==='card-focus'){
   resolve({ok:false,json:async()=>({error:'refused'})});await new Promise(setImmediate);
   assert.equal(get('p-subject-edit').hidden,false);assert.equal(get('p-subject-edit').disabled,false);
   assert.equal(context.document.activeElement,get('p-subject-edit'));
-  key('Enter');context.openId='b';vm.runInContext('closeEditors(false);startSubjectEdit()',context);
+  key('Enter');context.openId='b';vm.runInContext("closeEditors(false);drawerIntent=browserIntent.capture('drawer');drawerIntent.target='b';startSubjectEdit()",context);
   get('p-subject-edit').value='B draft';
   resolve({ok:true,json:async()=>({result:'saved A'})});await new Promise(setImmediate);
   assert.equal(get('p-subject-edit').value,'B draft');
@@ -249,7 +270,8 @@ if(input.mode==='card-focus'){
     context.attachmentRefusal=()=>{};
     const a={id:'a',attachments:[{id:'file-a',name:'A.png',url:'/a',size:8,mediaType:'image/png'}]};
     const b={id:'b',attachments:[{id:'file-b',name:'B.png',url:'/b',size:8,mediaType:'image/png'}]};
-    context.card=a;vm.runInContext('paintAttachments(card)',context);
+    context.card=a;context.openId='a';
+    vm.runInContext("browserIntent.observe(fixtureMetadata);browserIntent.review();drawerIntent=browserIntent.capture('drawer');drawerIntent.target='a';paintAttachments(card)",context);
     const box=get('p-attachments'), row=box.children[0], actions=row.children.at(-1);
     const button=actions.children[action==='cover'?0:1];button.focus();
     const pending=button.listeners.click();const count=calls.length;
@@ -285,7 +307,7 @@ if(input.mode==='card-focus'){
         }},get innerHTML(){return this.html}};
   }
   context.document.createElement=node;
-  context.data={actors:input.actors};
+  context.data={...context.fixtureMetadata,actors:input.actors};
   vm.runInContext(section(input.page,'function userLabel(',
     '// **The owner control CYCLES'),context);
   vm.runInContext(section(input.page,'const HAY =','function paint()'),context);
@@ -295,9 +317,10 @@ if(input.mode==='card-focus'){
   // A changed payload must invalidate the existing ID through the actual poll handler.
   Object.assign(context,{pollingEpoch:null,seen:0,API_PREFIX:'/api/v001',
     apiGet:async path=>path.endsWith('/status')?{ok:true,mtime:1}:
-      {actors:input.actors,lanes:[{state:'completed',items:input.items}]},
+      {...context.fixtureMetadata,actors:input.actors,
+    lanes:[{state:'completed',items:input.items}]},
     paint(){},restoreStaleReloadState(){},renderLive(){}});
-  context.window.workspaceEpoch=1;
+  context.window.workspaceEpoch=0;
   vm.runInContext(section(input.page,'async function tick()', '\ntick();'),context);
   await vm.runInContext('tick()',context);
   const refreshed=vm.runInContext('hay(items[0])',context);
@@ -336,16 +359,19 @@ if(input.mode==='card-focus'){
   vm.runInContext('saveStaleReloadState();',context);
   const saved=JSON.parse(stored.saved), freshElements=new Map(), storageCalls=[];
   function freshElement(id){
-    if(!freshElements.has(id))freshElements.set(id,{value:''});
+    if(!freshElements.has(id))freshElements.set(id,{value:'',addEventListener(){}});
     return freshElements.get(id);
   }
   // No saved-value globals cross the reload boundary. The shipped reader and
   // declarations must populate drafts, query and completed visibility themselves.
-  const fresh=vm.createContext({document:{getElementById:freshElement},
+  const fresh=vm.createContext({window:{workspaceEpoch:0},API_PREFIX:'/api/v001',
+    draftTickets:{},
+    document:{getElementById:freshElement,
+    querySelectorAll:()=>[]},
     sessionStorage:{getItem(key){storageCalls.push(['get',key]);
       return input.emptyStored?null:stored.saved},
       removeItem(key){storageCalls.push(['remove',key])}}});
-  loadInertBrowserHelpers(fresh);
+  loadBrowserHelpers(fresh);
   vm.runInContext(section(input.page,"const STALE_RELOAD_STATE_KEY =",
     '// **Card #0072.'),fresh);
   vm.runInContext(section(input.page,'let query =','const HAY ='),fresh);
@@ -371,7 +397,7 @@ if(input.mode==='card-focus'){
     staleShown:element('stale').classList.values.has('show'),restart:element('restart').textContent,
     restartShown:element('restart').classList.values.has('show'),stored}));
 }
-})().catch(error=>{process.stderr.write(String(error));process.exitCode=1});
+})().catch(error=>{process.stderr.write(error.stack || String(error));process.exitCode=1});
 """
 
 
@@ -394,8 +420,9 @@ def browser_helpers(**values: Any) -> Any:  # noqa: ANN401 - JSON browser test b
         text=True,
         encoding="utf-8",
         timeout=10,
-        check=True,
+        check=False,
     )
+    assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
@@ -616,6 +643,8 @@ def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm()
     """Node VM evidence only: DOM opening/rendering is represented by narrow stubs."""
     result = browser_helpers(mode="roundtrip")
     assert result["saved"] == {
+        "browserIntent": {"generation": "11111111-1111-4111-8111-111111111111", "pending": True},
+        "draftTickets": {},
         "drafts": {"other-card": "other unsent comment", "card-17": "unsent comment\nsecond line"},
         "openId": "card-17",
         "editing": "detail",
@@ -639,7 +668,20 @@ def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm()
         "mkOpen": "ready_for_work",
         "staleReloadState": None,
     }
+    preserved = result["fields"].pop("intent-draft-text")
+    for text in (
+        "other unsent comment",
+        "unsent comment\nsecond line",
+        "unsaved **detail**",
+        "new draft subject",
+        "new draft detail\nwith newline",
+    ):
+        assert text in preserved
+    for field in ("p-subject-edit", "intent-drafts", "intent-review", "intent-message"):
+        assert result["fields"].pop(field) == ""
     assert result["fields"] == {
+        "intent-reattach": "",
+        "intent-review-go": "",
         "find": "urgent café",
         "say": "unsent comment\nsecond line",
         "p-detail-text": "unsaved **detail**",
@@ -666,7 +708,7 @@ def test_reload_state_empty_storage_control_cannot_restore_seeded_drafts() -> No
         "mkOpen": None,
         "staleReloadState": None,
     }
-    assert result["fields"] == {}
+    assert result["fields"] == {"intent-reattach": "", "intent-review-go": ""}
 
 
 def test_matching_gateway_clears_completed_reload_proof() -> None:

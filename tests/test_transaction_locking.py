@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from localswim import attachments, board_state, transaction_lock
+from tests.support import token as fixture_token
 from tests.test_attachments import PNG
 from tests.test_serialization import saved_board
 from tests.test_service_ownership import child_event, maintenance_child, release_child
@@ -518,7 +519,7 @@ def test_upload_keeps_bytes_after_real_transaction_cleanup_or_unknown_replace(
 ) -> None:
     path = tmp_path / "board.json"
     store = make_store(path)
-    store.execute(0, lambda board: board.create("card", "Card", "backlog", "bot"))
+    store.execute(fixture_token(0), lambda board: board.create("card", "Card", "backlog", "bot"))
     original: Callable[[int], None] = (
         transaction_lock._close if boundary == "close" else transaction_lock._unlock
     )
@@ -543,7 +544,13 @@ def test_upload_keeps_bytes_after_real_transaction_cleanup_or_unknown_replace(
                 transaction_lock, "_close" if boundary == "close" else "_unlock", fail_release
             )
         with pytest.raises(type(failure)) as caught:
-            store.upload(1, "card", "picture.png", base64.b64encode(PNG).decode("ascii"), "bot")
+            store.upload(
+                fixture_token(1),
+                "card",
+                "picture.png",
+                base64.b64encode(PNG).decode("ascii"),
+                "bot",
+            )
     assert caught.value is failure
     current = board_state.load(path)
     assert current.revision == 2

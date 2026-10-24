@@ -12,6 +12,7 @@ import pytest
 
 from localswim import api_endpoint, board_state
 from tests.support import USERS
+from tests.support import token as fixture_token
 
 if TYPE_CHECKING:
     import pathlib
@@ -40,7 +41,11 @@ def test_duplicate_priority_ids_refuse_before_label_collapse(
     message = rf"priorities\[{index}\]\.id repeats id"
     if embedded:
         raw = board_state.Board(
-            project="Duplicate priorities", users=USERS, browser_user="terry", cli_user="bot"
+            generation="11111111-1111-4111-8111-111111111111",
+            project="Duplicate priorities",
+            users=USERS,
+            browser_user="terry",
+            cli_user="bot",
         ).to_json()
         raw["policy"] = doc
         with pytest.raises(board_state.BoardError, match=message):
@@ -97,7 +102,12 @@ def make_store(
 ) -> api_endpoint.BoardStore:
     path = tmp_path / f"{name}.json"
     board = board_state.Board(
-        project=name, users=USERS, browser_user="terry", cli_user="bot", default_owner="bot"
+        generation="11111111-1111-4111-8111-111111111111",
+        project=name,
+        users=USERS,
+        browser_user="terry",
+        cli_user="bot",
+        default_owner="bot",
     )
     board_state.save(board, path)
     return api_endpoint.BoardStore(path, policy)
@@ -293,6 +303,7 @@ def test_edge_actors_must_be_the_configured_browser_and_cli_users(
     policy = board_state.TransitionPolicy.load(path)
     users = (*USERS, board_state.User("scott", "Scott", board_state.BOT, "#884422"))
     board = board_state.Board(
+        generation="11111111-1111-4111-8111-111111111111",
         project="configured-actors",
         users=users,
         browser_user="terry",
@@ -410,12 +421,12 @@ def test_stores_enforce_their_own_transition_policies(
 
     allowed = make_store(tmp_path, "allowed", board_state.TransitionPolicy.load(allowed_path))
     denied = make_store(tmp_path, "denied", board_state.TransitionPolicy.load(denied_path))
-    allowed.execute(0, create_alpha)
-    denied.execute(0, create_alpha)
+    allowed.execute(fixture_token(0), create_alpha)
+    denied.execute(fixture_token(0), create_alpha)
 
-    allowed.execute(1, lambda board: board.move("alpha", "ready_for_work", "bot"))
+    allowed.execute(fixture_token(1), lambda board: board.move("alpha", "ready_for_work", "bot"))
     with pytest.raises(board_state.BoardError, match="not to ready_for_work"):
-        denied.execute(1, lambda board: board.move("alpha", "ready_for_work", "bot"))
+        denied.execute(fixture_token(1), lambda board: board.move("alpha", "ready_for_work", "bot"))
 
 
 def test_policy_reload_is_isolated_to_its_store(tmp_path: pathlib.Path) -> None:

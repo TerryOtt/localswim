@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from localswim import api_endpoint, attachments, board_state, service_ownership
+from localswim import api_endpoint, attachments, board_state, service_ownership, write_protocol
 from tests.test_api import request_json
 from tests.test_cli import run_cli, write_schema_two_lane_board
 from tests.test_workspace import make_board
@@ -805,7 +805,7 @@ def test_admitted_command_retains_lease_and_gate_until_worker_join(  # noqa: PLR
 
     def paused(
         store: api_endpoint.BoardStore,
-        expected: int,
+        expected: write_protocol.WriteToken,
         parts: list[str],
         body: board_state.JsonObject,
         actor: str,
@@ -860,7 +860,8 @@ def test_admitted_command_retains_lease_and_gate_until_worker_join(  # noqa: PLR
             client.sendall(
                 b"POST /api/v001/cards HTTP/1.0\r\n"
                 + f"Authorization: Bearer {api_endpoint.CLI_TOKEN}\r\n".encode()
-                + f'If-Match: "revision-0"\r\nContent-Length: {len(body)}\r\n\r\n'.encode()
+                + b'If-Match: "generation-11111111-1111-4111-8111-111111111111-revision-0"\r\n'
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
                 + body
             )
             assert entered.wait(5)

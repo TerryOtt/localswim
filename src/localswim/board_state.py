@@ -67,6 +67,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from types import MappingProxyType
@@ -86,13 +87,14 @@ type JsonObject = dict[str, JsonValue]
 # instead of `from`, and it would write an empty `comments` list onto every card.
 # **The file is JSON so a person can read the diff**, and that is worth two dozen lines.
 
-SCHEMA = 4
+SCHEMA = 5
+GENERATION_PREVIOUS_SCHEMA = 4
 PREVIOUS_BOARD_SCHEMA = 2
 EMBEDDED_POLICY_PREVIOUS_SCHEMA = 3
 DESCRIPTION_SCHEMA = 1
 PERMISSIONS_SCHEMA = 1
 API_PREFIX = "/api/v001"
-_PREPARED_WRITE_PROTOCOL = 2
+WRITE_PROTOCOL = 2
 
 # **A SECOND, INDEPENDENT NUMBER, and splitting it was the first thing card #0064 had to
 # do.** One `SCHEMA` used to gate both `board.json` and `rules.json`, so flattening the
@@ -2435,6 +2437,8 @@ class Board:
     # Monotonic optimistic-concurrency token. Older schema-2 boards predate the field
     # and enter at revision zero; the first service mutation writes revision one.
     revision: int = 0
+    generation: str = field(default_factory=lambda: str(uuid.uuid4()))
+    restore_receipt: JsonObject | None = None
 
     # **The next ticket to hand out. It only ever goes UP.**
     #
@@ -2555,6 +2559,9 @@ class Board:
         # `save()` rewrites the WHOLE file from this dict, and `api_endpoint.py` pushes it five
         # seconds later -- so a forgotten key here would erase the cast, commit the
         # erasure, and the next load would refuse to start.
+        from .write_protocol import RestoreReceipt, WriteToken  # noqa: PLC0415
+
+        WriteToken(self.generation, self.revision)
         users: list[JsonValue] = [
             {"id": u.id, "label": u.label, "class": u.user_class, "color": u.color}
             for u in self.users
@@ -2562,6 +2569,7 @@ class Board:
         items: list[JsonValue] = [item.to_json() for item in self.items]
         out: JsonObject = {
             "schema": SCHEMA,
+            "generation": self.generation,
             "revision": self.revision,
             "project": self.project,
             "port": self.port,
@@ -2575,6 +2583,8 @@ class Board:
         }
         # **Omitted while empty, which is also the migration.** Every board written before
         # card #0028 simply has no `links` key, and reads back as a board with no links.
+        if self.restore_receipt is not None:
+            out["restoreReceipt"] = RestoreReceipt.from_json(self.restore_receipt).to_json()
         if self.links:
             out["links"] = [cast("JsonValue", link.to_json()) for link in self.links]
         if self.relationship_history:
@@ -2617,8 +2627,23 @@ class Board:
         """
         if not isinstance(raw, dict):
             raise BoardError(f"{where}: top level is {type(raw).__name__}, want object")
-        if raw.get("schema") != SCHEMA:
-            raise BoardError(f"{where}: schema {raw.get('schema')!r}, this build reads {SCHEMA}")
+        if type(raw.get("schema")) is not int or raw["schema"] != SCHEMA:
+            guidance = (
+                "; stop the board and run localswim-cli BOARD board migrate-generation"
+                if raw.get("schema") == GENERATION_PREVIOUS_SCHEMA
+                else ""
+            )
+            raise BoardError(
+                f"{where}: schema {raw.get('schema')!r}, this build reads {SCHEMA}{guidance}"
+            )
+        from .write_protocol import RestoreReceipt, validate_generation  # noqa: PLC0415
+
+        generation = validate_generation(raw.get("generation"))
+        receipt = (
+            RestoreReceipt.from_json(raw["restoreReceipt"]).to_json()
+            if "restoreReceipt" in raw
+            else None
+        )
         items_raw = raw.get("items")
         if not isinstance(items_raw, list):
             raise BoardError(f"{where}: 'items' is missing or not a list")
@@ -2627,7 +2652,7 @@ class Board:
         if not isinstance(port, int) or not MIN_PORT <= port <= MAX_PORT:
             raise BoardError(f"{where}: port {port!r} is not a TCP port number")
 
-        revision = raw.get("revision", 0)
+        revision = raw.get("revision")
         if type(revision) is not int or revision < 0:
             raise BoardError(f"{where}: revision {revision!r} is not a non-negative integer")
 
@@ -2689,6 +2714,8 @@ class Board:
             port=port,
             items=items,
             revision=revision,
+            generation=generation,
+            restore_receipt=receipt,
             next_ticket=next_ticket,
             links=_links_from_json(raw.get("links", []), seen, where),
             relationship_history=_relationship_history_from_json(
@@ -4027,6 +4054,42 @@ def _resolved_policy(
     return policy, users, browser, cli, default_owner
 
 
+def _generation_candidate(raw: JsonObject, where: str) -> Board:
+    """Admit initialization/migration before allocating a persistent generation."""
+    candidate = dict(raw)
+    candidate["schema"] = SCHEMA
+    candidate["generation"] = "00000000-0000-0000-0000-000000000000"
+    candidate.setdefault("revision", 0)
+    board = Board.from_json(candidate, where, install_context=False)
+    board.enforce_dependency_priorities(board.cli_user)
+    if problems := board.verify():
+        raise BoardError(f"{where}: snapshot rejected: " + "; ".join(problems))
+    return board
+
+
+def migrate_generation(path: pathlib.Path, *, outcome: SaveOutcome | None = None) -> str:
+    """Explicitly upgrade one stopped schema-4 board; never upgrade during load."""
+    target = path.resolve()
+    if outcome is not None:
+        outcome.state = "uncommitted"
+    with _maintenance_locked(target):
+        raw = _read_json(target)
+        if (
+            not isinstance(raw, dict)
+            or type(raw.get("schema")) is not int
+            or raw["schema"] != GENERATION_PREVIOUS_SCHEMA
+        ):
+            raise BoardError(f"{target}: generation migration requires a schema-4 board")
+        if "generation" in raw or "restoreReceipt" in raw:
+            raise BoardError(f"{target}: schema-4 board contains schema-5 metadata")
+        _require_board_port_stopped(target, raw)
+        board = _generation_candidate(raw, str(target))
+        board.generation = str(uuid.uuid4())
+        board.revision += 1
+        save(board, target, outcome=outcome)
+    return f"migrated schema 4 -> {SCHEMA}; revision {board.revision}"
+
+
 def initialize_board(
     target: pathlib.Path, description_path: pathlib.Path, permissions_path: pathlib.Path
 ) -> str:
@@ -4064,7 +4127,8 @@ def initialize_board(
         "nextTicket": 1,
         "items": [],
     }
-    board = Board.from_json(board_raw, str(target))
+    board = _generation_candidate(board_raw, str(target))
+    board.generation = str(uuid.uuid4())
     with locked(target):
         if target.exists():
             raise BoardError(f"{target}: another initializer created the board first")
@@ -4103,13 +4167,14 @@ def embed_policy(path: pathlib.Path, policy_path: pathlib.Path) -> str:
         _require_board_port_stopped(target, raw)
         raw["schema"] = SCHEMA
         raw["policy"] = policy.to_json()
-        migrated = Board.from_json(raw, str(target))
+        migrated = _generation_candidate(raw, str(target))
         migrated.enforce_dependency_priorities(migrated.cli_user)
         if problems := migrated.verify():
             raise BoardError(
                 f"{target}: embedded-policy board does not verify: {'; '.join(problems)}"
             )
         migrated.revision += 1
+        migrated.generation = str(uuid.uuid4())
         save(migrated, target)
     return (
         f"embedded {len(policy.states)} lanes; schema 3 -> {SCHEMA}; revision {migrated.revision}"
@@ -4313,7 +4378,7 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
     each card's current state and the append-only lane history, so changing only the
     current state would make verification fail and changing only the policy would make
     the board unreadable. The original file remains untouched unless the complete
-    schema-4 result with its embedded policy validates and replays cleanly.
+    schema-5 result with its embedded policy validates and replays cleanly.
     """
     target = path.resolve()
     if not source or not destination or source == destination:
@@ -4336,11 +4401,12 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
         replacements = _rewrite_lane_values(target, raw, source, destination)
         raw["schema"] = SCHEMA
         raw["policy"] = _POLICY.to_json()
-        migrated = Board.from_json(raw, str(target))
+        migrated = _generation_candidate(raw, str(target))
         migrated.enforce_dependency_priorities(migrated.cli_user)
         if problems := migrated.verify():
             raise BoardError(f"{target}: migrated history does not replay: {'; '.join(problems)}")
         migrated.revision += 1
+        migrated.generation = str(uuid.uuid4())
         save(migrated, target)
 
     return (
@@ -4382,26 +4448,21 @@ def _service_json(
     token: str,
     *,
     body: dict[str, object] | None = None,
-    revision: int | None = None,
-    _write_token: str | None = None,
+    write_token: str | None = None,
     _sanitize_errors: bool = False,
     timeout: float = 5,
 ) -> JsonObject:
     """Make one authenticated service request and turn refusals into BoardError."""
     headers = {"Authorization": f"Bearer {token}"}
-    if _write_token is not None:
-        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
+    if write_token is not None:
+        from .write_protocol import WriteToken  # noqa: PLC0415 -- avoid codec import cycle
 
-        WriteToken.parse(_write_token)
-        if revision is not None:
-            raise BoardError("complete token and numeric revision cannot be combined")
+        WriteToken.parse(write_token)
     data: bytes | None = None
     if body is not None:
         headers["Content-Type"] = "application/json"
-        if revision is not None:
-            headers["If-Match"] = f'"revision-{revision}"'
-        elif _write_token is not None:
-            headers["If-Match"] = _write_token
+        if write_token is not None:
+            headers["If-Match"] = write_token
         data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310 -- URL comes from validated loopback data
         url, data=data, headers=headers, method="POST" if body is not None else "GET"
@@ -4412,7 +4473,7 @@ def _service_json(
         ) as response:
             raw = cast("JsonValue", json.loads(response.read()))
     except urllib.error.HTTPError as exc:
-        if _write_token is not None or _sanitize_errors:
+        if write_token is not None or _sanitize_errors:
             code = exc.code
             exc.close()
             raise BoardError(
@@ -4439,7 +4500,7 @@ def _service_json(
             if body is not None
             else "nothing changed"
         )
-        detail = "" if _write_token is not None or _sanitize_errors else f": {exc}"
+        detail = "" if write_token is not None or _sanitize_errors else f": {exc}"
         raise BoardError(f"could not reach board service; {outcome}{detail}") from exc
     if not isinstance(raw, dict):
         outcome = (
@@ -4480,8 +4541,6 @@ def apply_remote_mutation(
     path: pathlib.Path,
     route: str,
     body: dict[str, object],
-    *,
-    _complete_token: bool = False,
 ) -> str:
     """Apply one CLI mutation through the same REST boundary the browser uses."""
     if not route.startswith(API_PREFIX + "/"):
@@ -4490,10 +4549,8 @@ def apply_remote_mutation(
     descriptor = _service_descriptor(path)
     base = f"http://{descriptor['host']}:{descriptor['port']}"
     token = str(descriptor["token"])
-    snapshot = _service_snapshot(base, token, complete=_complete_token)
-    response = _service_json(
-        base + route, token, body=body, **_snapshot_precondition(snapshot, complete=_complete_token)
-    )
+    snapshot = _service_snapshot(base, token)
+    response = _service_json(base + route, token, body=body, **_snapshot_precondition(snapshot))
     result = response.get("result")
     if not isinstance(result, str):
         raise BoardError(
@@ -4503,37 +4560,29 @@ def apply_remote_mutation(
 
 
 class _ServicePrecondition(TypedDict, total=False):
-    revision: int
-    _write_token: str
+    write_token: str
 
 
-def _service_snapshot(base: str, token: str, *, complete: bool) -> JsonObject:
-    """Read state once; keep private prepared transport diagnostics credential-free."""
-    if complete:
-        return _service_json(base + API_PREFIX + "/board", token, _sanitize_errors=True)
-    return _service_json(base + API_PREFIX + "/board", token)
+def _service_snapshot(base: str, token: str) -> JsonObject:
+    """Read state once with credential-free failure diagnostics."""
+    return _service_json(base + API_PREFIX + "/board", token, _sanitize_errors=True)
 
 
-def _snapshot_precondition(snapshot: JsonObject, *, complete: bool) -> _ServicePrecondition:
+def _snapshot_precondition(snapshot: JsonObject) -> _ServicePrecondition:
     """Retain one accepted read's exact precondition, never session metadata."""
-    if complete:
-        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
+    from .write_protocol import WriteToken  # noqa: PLC0415 -- avoid codec import cycle
 
-        raw = snapshot.get("writeToken")
-        parsed = WriteToken.parse(raw)
-        if (
-            type(snapshot.get("writeProtocol")) is not int
-            or snapshot["writeProtocol"] != _PREPARED_WRITE_PROTOCOL
-            or snapshot.get("generation") != parsed.generation
-            or type(snapshot.get("revision")) is not int
-            or snapshot["revision"] != parsed.revision
-        ):
-            raise BoardError("board service response has inconsistent write metadata")
-        return {"_write_token": cast("str", raw)}
-    revision = snapshot.get("revision")
-    if type(revision) is not int or revision < 0:
-        raise BoardError("board service response has no valid revision")
-    return {"revision": revision}
+    raw = snapshot.get("writeToken")
+    parsed = WriteToken.parse(raw)
+    if (
+        type(snapshot.get("writeProtocol")) is not int
+        or snapshot["writeProtocol"] != WRITE_PROTOCOL
+        or snapshot.get("generation") != parsed.generation
+        or type(snapshot.get("revision")) is not int
+        or snapshot["revision"] != parsed.revision
+    ):
+        raise BoardError("board service response has inconsistent write metadata")
+    return {"write_token": cast("str", raw)}
 
 
 def _priority_batch_response(response: JsonObject, count: int) -> JsonObject:
@@ -4581,22 +4630,17 @@ def apply_remote_priority_batch(
     priority: str,
     *,
     expected_revision: int | None = None,
-    _expected_generation: str | None = None,
-    _complete_token: bool = False,
+    expected_generation: str | None = None,
 ) -> JsonObject:
     """Send one bounded batch, using an explicit revision without a snapshot GET."""
-    if _complete_token and (expected_revision is None) != (_expected_generation is None):
+    if (expected_revision is None) != (expected_generation is None):
         raise BoardError("expected generation and revision must be supplied together")
-    if _expected_generation is not None and not _complete_token:
-        raise BoardError("generation requires the prepared complete-token adapter")
     precondition: _ServicePrecondition = {}
-    if _complete_token and _expected_generation is not None:
-        from .write_protocol import WriteToken  # noqa: PLC0415 -- inert preparation
+    if expected_generation is not None:
+        from .write_protocol import WriteToken  # noqa: PLC0415 -- avoid codec import cycle
 
         precondition = {
-            "_write_token": WriteToken(
-                _expected_generation, cast("int", expected_revision)
-            ).format()
+            "write_token": WriteToken(expected_generation, cast("int", expected_revision)).format()
         }
     if expected_revision is not None and (
         type(expected_revision) is not int or expected_revision < 0
@@ -4615,10 +4659,8 @@ def apply_remote_priority_batch(
     base = f"http://{descriptor['host']}:{descriptor['port']}"
     token = str(descriptor["token"])
     if expected_revision is None:
-        snapshot = _service_snapshot(base, token, complete=_complete_token)
-        precondition = _snapshot_precondition(snapshot, complete=_complete_token)
-    elif not _complete_token:
-        precondition = {"revision": expected_revision}
+        snapshot = _service_snapshot(base, token)
+        precondition = _snapshot_precondition(snapshot)
     response = _service_json(
         base + API_PREFIX + "/cards/priorities",
         token,
@@ -4628,9 +4670,7 @@ def apply_remote_priority_batch(
     return _priority_batch_response(response, len(references))
 
 
-def _remote_apply(  # noqa: PLR0912 -- legacy command mapping plus inert dispatch seam
-    path: pathlib.Path, args: argparse.Namespace, *, _complete_token: bool = False
-) -> str:
+def _remote_apply(path: pathlib.Path, args: argparse.Namespace) -> str:
     """Translate one legacy flat CLI mutation into a live-service command."""
 
     route: str
@@ -4694,8 +4734,6 @@ def _remote_apply(  # noqa: PLR0912 -- legacy command mapping plus inert dispatc
     else:
         raise BoardError("no mutation requested")
 
-    if _complete_token:
-        return apply_remote_mutation(path, route, body, _complete_token=True)
     return apply_remote_mutation(path, route, body)
 
 
@@ -4707,6 +4745,11 @@ def _add_offline_arguments(parser: argparse.ArgumentParser) -> None:
         type=pathlib.Path,
         metavar=("DESCRIPTION", "PERMISSIONS"),
         help="initialize a new self-contained board from name-based JSON inputs",
+    )
+    parser.add_argument(
+        "--migrate-generation",
+        action="store_true",
+        help="upgrade one stopped schema-4 board to schema 5 with a new generation",
     )
     parser.add_argument(
         "--embed-policy",
@@ -4817,6 +4860,7 @@ def _validate_activity_arguments(args: argparse.Namespace) -> None:
             (
                 args.init,
                 args.embed_policy,
+                args.migrate_generation,
                 args.migrate_lane,
                 args.rename_lane_label,
                 args.migrate_lane_id,
@@ -4871,6 +4915,7 @@ def _validate_inspection_arguments(args: argparse.Namespace) -> None:
             (
                 args.init,
                 args.embed_policy,
+                args.migrate_generation,
                 args.migrate_lane,
                 args.rename_lane_label,
                 args.migrate_lane_id,
@@ -4896,11 +4941,14 @@ def _validate_inspection_arguments(args: argparse.Namespace) -> None:
         )
 
 
-def _run_offline_operation(args: argparse.Namespace) -> str | None:
+def _run_offline_operation(  # noqa: PLR0911 -- one return per explicit offline operation
+    args: argparse.Namespace,
+) -> str | None:
     """Validate and execute exactly one requested offline operation."""
     operations = (
         args.init,
         args.embed_policy,
+        args.migrate_generation,
         args.migrate_lane,
         args.rename_lane_label,
         args.migrate_lane_id,
@@ -4931,6 +4979,8 @@ def _run_offline_operation(args: argparse.Namespace) -> str | None:
         raise BoardError("offline board setup and migration flags cannot be combined")
     if args.init:
         return initialize_board(args.board, *args.init)
+    if args.migrate_generation:
+        return migrate_generation(args.board)
     if args.embed_policy:
         return embed_policy(args.board, args.embed_policy)
     if args.migrate_lane:
@@ -4952,6 +5002,7 @@ def _run_shutdown_operation(args: argparse.Namespace) -> str | None:
             (
                 args.init,
                 args.embed_policy,
+                args.migrate_generation,
                 args.migrate_lane,
                 args.rename_lane_label,
                 args.migrate_lane_id,

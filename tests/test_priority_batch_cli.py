@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from localswim import api_endpoint, board_state, cli, service_ownership
+from tests.support import token as fixture_token
 from tests.test_cli import assert_cli, run_cli, served_board
 
 __all__ = ["served_board"]
@@ -110,23 +111,33 @@ def test_cli_batch_completed_selection_is_atomic(served_board: pathlib.Path) -> 
         board.move("finished", "ready_for_review", "terry")
         return board.move("finished", "completed", "terry")
 
-    store.execute(store.snapshot().revision, complete)
+    captured = store.snapshot()
+    store.execute(fixture_token(captured.revision, captured.generation), complete)
     before = served_board.read_bytes()
     result = run_cli(served_board, "card", "set-priorities", "P3", "alpha", "finished")
     assert result.returncode != 0
-    assert "completed" in result.stderr.lower()
+    assert "HTTP 409" in result.stderr
     assert served_board.read_bytes() == before
 
 
 def test_cli_batch_stale_revision_never_refreshes(served_board: pathlib.Path) -> None:
-    stale = board_state.load(served_board).revision
+    captured = board_state.load(served_board)
+    stale = captured.revision
     create_card(served_board, "alpha")
     before = served_board.read_bytes()
     result = run_cli(
-        served_board, "card", "set-priorities", "P3", "alpha", "--expected-revision", str(stale)
+        served_board,
+        "card",
+        "set-priorities",
+        "P3",
+        "alpha",
+        "--expected-generation",
+        captured.generation,
+        "--expected-revision",
+        str(stale),
     )
     assert result.returncode != 0
-    assert "revision" in result.stderr
+    assert "HTTP 412" in result.stderr
     assert served_board.read_bytes() == before
 
 
@@ -157,7 +168,9 @@ def test_cli_batch_preserves_named_priority_and_utf8_result(
         priority: str,
         *,
         expected_revision: int | None = None,
+        expected_generation: str | None = None,
     ) -> board_state.JsonObject:
+        assert expected_generation == "11111111-1111-4111-8111-111111111111"
         calls.append((board, references, priority, expected_revision))
         return reply
 
@@ -170,6 +183,8 @@ def test_cli_batch_preserves_named_priority_and_utf8_result(
             "set-priorities",
             "normalCase",
             "café",
+            "--expected-generation",
+            "11111111-1111-4111-8111-111111111111",
             "--expected-revision",
             "7",
             "--json",
@@ -183,7 +198,23 @@ def test_cli_batch_preserves_named_priority_and_utf8_result(
 
 @pytest.mark.parametrize(
     "arguments",
-    [[], ["alpha", "--expected-revision", "-1"], ["alpha", "--expected-revision", "1.5"]],
+    [
+        [],
+        [
+            "alpha",
+            "--expected-generation",
+            "11111111-1111-4111-8111-111111111111",
+            "--expected-revision",
+            "-1",
+        ],
+        [
+            "alpha",
+            "--expected-generation",
+            "11111111-1111-4111-8111-111111111111",
+            "--expected-revision",
+            "1.5",
+        ],
+    ],
 )
 def test_cli_batch_rejects_missing_references_and_invalid_revision(
     tmp_path: pathlib.Path, arguments: list[str]
@@ -202,7 +233,14 @@ def test_cli_batch_reference_limit_and_help(tmp_path: pathlib.Path) -> None:
     assert "at most 1000" in result.output
     help_result = run_cli(path, "card", "set-priorities", "--help")
     assert help_result.returncode == 0
-    for text in ("atomic", "Completed", "--expected-revision", "--json", "unknown outcome"):
+    for text in (
+        "atomic",
+        "Completed",
+        "--expected-generation",
+        "--expected-revision",
+        "--json",
+        "unknown outcome",
+    ):
         assert text in help_result.stdout
 
 
@@ -315,6 +353,8 @@ def invoke_batch_transport(
             "boardIdentity": service_ownership.board_identity(path),
             "token": "browser-only-capability",
             "userCSS": "",
+            "writeProtocol": 2,
+            "generation": "11111111-1111-4111-8111-111111111111",
         }
     ).encode()
 
@@ -364,7 +404,17 @@ def invoke_batch_transport(
 
     monkeypatch.setattr(urllib.request, "urlopen", respond)
     monkeypatch.setattr(board_state.http.client, "HTTPConnection", MetadataConnection)
-    arguments = [str(path), "card", "set-priorities", "P3", "alpha", "--expected-revision", "7"]
+    arguments = [
+        str(path),
+        "card",
+        "set-priorities",
+        "P3",
+        "alpha",
+        "--expected-generation",
+        "11111111-1111-4111-8111-111111111111",
+        "--expected-revision",
+        "7",
+    ]
     if structured:
         arguments.append("--json")
     result = CliRunner().invoke(cli.cli, arguments)
@@ -380,7 +430,10 @@ def assert_batch_post(requests: list[urllib.request.Request]) -> None:
     assert request.get_method() == "POST"
     assert request.full_url == "http://127.0.0.1:12345/api/v001/cards/priorities"
     assert request.get_header("Authorization") == "Bearer synthetic"
-    assert request.get_header("If-match") == '"revision-7"'
+    assert (
+        request.get_header("If-match")
+        == '"generation-11111111-1111-4111-8111-111111111111-revision-7"'
+    )
     assert isinstance(request.data, bytes)
     assert json.loads(request.data) == {"cards": ["alpha"], "priority": "P3"}
 
@@ -464,7 +517,8 @@ def test_cli_batch_known_refusal_survives_unreadable_body(
     assert result.exit_code != 0
     assert result.stdout == ""
     assert "board service refused the command" in result.stderr
-    assert ("known refusal" if body_kind == "valid" else f"HTTP {status}") in result.stderr
+    assert f"HTTP {status}" in result.stderr
+    assert "known refusal" not in result.stderr
     assert "unknown" not in result.stderr
     assert "private" not in result.stderr
     assert "Traceback" not in result.stderr
