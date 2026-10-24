@@ -1408,8 +1408,8 @@ guarantees. Snapshot, attachment, plan and inventory caps remain unchanged.
 
 Qualification uses synthetic Windows files with actual caller-held maintenance
 contexts. The separate orchestration module below acquires that ownership and
-performs the commit. Synthetic end-to-end acceptance and watched rollout remain
-separate gates requiring the applicable review and operational approval.
+performs the commit. Release-specific synthetic end-to-end acceptance evidence and
+watched rollout remain separate gates requiring review and operational approval.
 
 ## Offline restore apply and inspect
 
@@ -1463,3 +1463,33 @@ This phase is qualified with synthetic local Windows fixtures only. It does not
 restore production snapshots, enable publishing, deploy the candidate or change
 running service/monitor ownership. File flush/readback and backups support the
 application-interruption contract, without directory-flush or power-loss promises.
+
+## Restore acceptance evidence and recovery layout
+
+`tests/test_restore_integration.py` exercises actual offline CLI restore and
+restarted direct/workspace HTTP clients. `tests/test_restore_browser.py` feeds
+those real pre/post-restore payloads into the shipped PAGE/workspace VM/DOM
+harness, including explicit reviewed edits through the real synthetic services.
+Deterministic queued/in-flight scheduling is VM evidence, not a claim that native
+browser timing races were reproduced. A release matrix must identify each method
+and retain its limitations, gate/build results and independent verdict.
+
+The same-revision test models an older recovered disk snapshot after a client
+captured a newer revision, then performs a genuine restore to a new generation
+at that captured number. It does not imply ordinary healthy restore lowers a
+known revision or that application crash normally loses acknowledged writes.
+
+The browser's board/editor surface and saved-text recovery tray occupy separate
+bounded rows. Drawer and creation backdrops stay within the surface; recovery
+actions remain above them without covering the editor footer. The tray scrolls
+internally when needed, respecting hidden state. Its Review/choose/Reattach flow
+keeps the existing generation/target rules and never submits saved text on its own.
+Real browser pointer/keyboard and layout evidence is required for this boundary;
+the VM harness does not implement CSS hit testing.
+
+Synthetic fixtures may defer repeated Git build-ID refresh timing while retaining
+the truthful loaded BUILD and source hashes. This isolates restore acceptance
+from unrelated Git latency and does not qualify or change production build-refresh
+behavior. Native GUI evidence and any required retry after an owned gateway
+restart must be recorded separately. Production consumers remain unchanged until
+a concrete stopped-board migration/rollback plan receives operational approval.

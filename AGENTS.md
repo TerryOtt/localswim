@@ -91,6 +91,9 @@ native board monitoring is an optional extra.
   drawer or clear its draft. Normal browser bootstrap uses the complete protocol;
   metadata must never revive a scalar fallback. Verify
   behavior through the executable Node VM/DOM harness, not string assertions alone.
+  Keep the saved-text recovery tray outside drawer/form backdrops and reserve its
+  layout space so Review/Reattach and editor actions remain reachable by pointer
+  and keyboard. VM fixtures do not establish native CSS hit-testing or layout.
 
 - Keep the service bound to loopback. Do not add remote exposure, external runtime
   services, or browser network dependencies without an explicit product decision.

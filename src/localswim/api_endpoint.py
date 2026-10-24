@@ -1860,6 +1860,23 @@ PAGE = """<!doctype html>
          margin: 0; background: var(--bg); color: var(--ink);
          font: 14px/1.5 'Inter', 'Segoe UI', system-ui, sans-serif;
          font-feature-settings: 'cv05' 1, 'tnum' 1; }
+  /* Recovery owns a bounded row outside the editor backdrops. The remaining
+     surface contains both editors, so their actions stay clear of saved text. */
+  #board-surface { position: relative; display: flex; flex-direction: column;
+                   flex: 1 1 0; min-height: 0; min-width: 0; }
+  #intent-recovery { display: none; position: relative; z-index: 42;
+                     flex: 0 1 auto; min-height: 0; max-height: 40%; overflow: auto;
+                     padding: 10px 14px; background: #FFFFFF;
+                     border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  #intent-recovery:has(> :not([hidden])) { display: block; }
+  #intent-recovery [hidden] { display: none; }
+  #intent-review, #intent-drafts { margin: 0; }
+  #intent-drafts p { margin: 6px 0; }
+  #intent-draft-text { display: block; width: 100%; height: 4.5em; resize: vertical;
+                       font: inherit; color: var(--ink); background: #FFFFFF;
+                       border: 1px solid var(--line); border-radius: 4px; }
+  #intent-recovery button { max-width: 100%; margin-top: 6px; padding: 6px 10px;
+                           font: inherit; cursor: pointer; white-space: normal; }
 
   /* **`color-scheme: dark` is load-bearing and is NOT decoration.** The alerts
      control is a native `<input type="checkbox">`, and a native control paints
@@ -2181,11 +2198,11 @@ PAGE = """<!doctype html>
      drawer keeps the board visible because a card is read IN CONTEXT. This form is
      composition -- Terry is looking at the field, not at the lanes -- and a modal
      stops a repaint two columns away from pulling his eye off a paragraph. */
-  #mkscrim { position: fixed; inset: 0; background: rgba(9,30,66,.45); display: none;
+  #mkscrim { position: absolute; inset: 0; background: rgba(9,30,66,.45); display: none;
              z-index: 40; }
   #mkscrim.show { display: block; }
-  #mk { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
-        width: 620px; max-width: 94vw; max-height: 88vh; background: #FFFFFF;
+  #mk { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+        width: 620px; max-width: 94vw; max-height: 88%; background: #FFFFFF;
         border-radius: 8px; z-index: 41; display: none; flex-direction: column;
         box-shadow: 0 12px 40px rgba(9,30,66,.35); }
   #mk.show { display: flex; }
@@ -2227,10 +2244,10 @@ PAGE = """<!doctype html>
 
   /* The detail panel. A drawer rather than a modal, so the board stays visible and
      a card's lane is still legible while you read it. */
-  #scrim { position: fixed; inset: 0; background: rgba(9,30,66,.45); display: none;
+  #scrim { position: absolute; inset: 0; background: rgba(9,30,66,.45); display: none;
            z-index: 30; }
   #scrim.show { display: block; }
-  #panel { position: fixed; top: 0; right: 0; bottom: 0; width: 560px;
+  #panel { position: absolute; top: 0; right: 0; bottom: 0; width: 560px;
            max-width: 92vw; background: #FFFFFF; z-index: 31; display: none;
            flex-direction: column; box-shadow: -4px 0 16px rgba(9,30,66,.2); }
   #panel.show { display: flex; }
@@ -2496,6 +2513,7 @@ PAGE = """<!doctype html>
 </style>
 </head>
 <body>
+<div id="board-surface">
   <div id="bar">
     <span id="dot"></span>
     <span id="brandtitle"><span id="brand"></span><span id="wordmark">localswim</span></span>
@@ -2660,6 +2678,8 @@ move any card whoever owns it. Click to hand it over."></button>
   <p id="attachment-refusal-reason"></p>
   <form method="dialog"><button type="submit">OK</button></form>
 </dialog>
+</div>
+<div id="intent-recovery">
 <div id="intent-review" hidden role="status"><span id="intent-message"></span>
   <button id="intent-review-go" type="button">
     I reviewed the board; choose a card to reattach</button>
@@ -2667,6 +2687,7 @@ move any card whoever owns it. Click to hand it over."></button>
 <div id="intent-drafts" hidden><p>Saved text from before the board changed</p>
   <textarea id="intent-draft-text" readonly aria-label="Saved draft text"></textarea>
   <button id="intent-reattach" type="button">Reattach to the same card or creation lane</button>
+</div>
 </div>
 %WORKSPACE%
 <script>

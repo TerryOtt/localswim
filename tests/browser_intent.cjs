@@ -1,4 +1,5 @@
-/* Execute the actual embedded preparation; no browser package or network is used. */
+/* Execute shipped PAGE in VM/DOM without a browser package. Default cases are offline;
+ * the optional restore fixture forwards bounded requests to real loopback HTTP services. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -57,11 +58,17 @@ class Element {
   showModal() {this.open = true;} close() {this.open = false;}
 }
 
-function browser(mode = '/direct') {
+function browser(mode = '/direct', suppliedBoard = null) {
   const elements = new Map();
   const document = {title: 'Synthetic board', activeElement: null, body: new Element(),
     documentElement: new Element(), head: new Element(),
-    getElementById(id) {if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id);},
+    getElementById(id) {
+      if (!elements.has(id)) {
+        const tag = page.match(new RegExp('<([a-z]+)[^>]*\\bid="' + id + '"'));
+        elements.set(id, new Element(tag ? tag[1] : 'div'));
+      }
+      return elements.get(id);
+    },
     createElement: tag => new Element(tag), createTextNode: text => ({textContent: text}),
     querySelectorAll(selector) {
       return selector.includes('#panel button') ? [...elements.values()].filter(n => n.tagName === 'BUTTON') : [];
@@ -87,7 +94,7 @@ function browser(mode = '/direct') {
   });
   vm.runInContext(source, ctx);
   const run = code => vm.runInContext(code, ctx);
-  const board = {...snapshot(g1, 1), browserUser: 'terry', attachmentMaxBytes: 100,
+  const board = suppliedBoard || {...snapshot(g1, 1), browserUser: 'terry', attachmentMaxBytes: 100,
     actors: [{id: 'terry', class: 'human'}, {id: 'bot', class: 'bot'}], priorities: [{id: 'p3'}],
     lanes: [{state: 'ready_for_review', label: 'Review', creatable: true, items: [
       {id: 'a', ticket: '#0001', subject: 'Original', state: 'ready_for_review', priority: 'p3',
@@ -136,6 +143,183 @@ function attachmentButton(b, index) {
   b.run("itemById('a').attachments = [{id: 'image', name: 'example.png', mediaType: 'image/png', size: 3, url: '/image'}]; paintAttachments(itemById('a'));");
   const row = b.element('p-attachments').children[0];
   return row.children.find(node => node.className === 'attachment-actions').children[index];
+}
+
+// These envelopes are recorded by a real offline restore and restarted HTTP services.
+// Scheduling old responses remains deterministic VM/DOM evidence, not a native browser.
+async function restoredClients(workspace) {
+  if (!process.argv[4]) return null;
+  const fixture = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'));
+  const before = fixture.before.board, after = fixture.after.board;
+  assert.equal(fixture.evidence.restoreOutcome, 'committed');
+  assert.equal(before.revision, after.revision, 'Actual restore must reuse the numeric revision');
+  assert.notEqual(before.generation, after.generation);
+  assert.notEqual(before.writeToken, after.writeToken);
+  const refresh = workspace.slice(workspace.indexOf('  async function refresh('),
+    workspace.indexOf('  function reconcile('));
+  const cases = [];
+  for (const mode of ['/direct', '/api/v001/workspace/boards/one']) {
+    const base = mode === '/direct' ? fixture.directBase : fixture.gatewayBase;
+    const prefix = mode === '/direct' ? fixture.directPrefix : fixture.gatewayPrefix;
+    const session = mode === '/direct' ? fixture.directSession : fixture.gatewaySession;
+    const boardSession = mode === '/direct' ? session : fixture.gatewayBoardSession;
+    const initialSession = mode === '/direct' ? fixture.oldDirectSession : fixture.oldGatewaySession;
+    assert.notEqual(initialSession.token, session.token, 'Restart rotates actual credentials');
+    const fresh = () => {
+      const b = browser(mode, structuredClone(before));
+      b.ctx.restored = structuredClone(after);
+      b.ctx.actualSession = session;
+      b.run('API_TOKEN = actualSession.token;');
+      b.window.workspaceReady = true;
+      return b;
+    };
+    const serveRestored = b => b.respond(async path => ({ok: true, status: 200,
+      json: async () => path.endsWith('/status') ? fixture.after.status
+        : path.endsWith('/browser-session') ? boardSession : structuredClone(after)}));
+    const pollRestored = async b => {serveRestored(b); await b.poll();};
+    const realResponses = [];
+    const serveLive = b => b.respond(async (path, options) => {
+      const response = await fetch(base + prefix + path.slice(mode.length), options);
+      if (options && options.method === 'POST')
+        realResponses.push({status: response.status, body: await response.clone().json()});
+      return response;
+    });
+    const review = async (b, live = false) => {
+      if (live) serveLive(b); else serveRestored(b);
+      await b.element('intent-review-go').fire('click');
+      assert.equal(b.run('browserIntent.blocked()'), false);
+      b.run("openCard('a');");
+    };
+    const serverStale = fresh();
+    serverStale.element('say').value = 'Actual stale comment must remain local';
+    serveLive(serverStale);
+    await serverStale.run('postComment()');
+    assert.equal(serverStale.requests().length, 1);
+    assert.equal(serverStale.requests()[0].options.headers['If-Match'], before.writeToken);
+    assert.equal(serverStale.requests()[0].options.headers.Authorization, 'Bearer ' + session.token);
+    assert.equal(realResponses[0].status, 412);
+    assert.equal(realResponses[0].body.error, 'state_changed');
+    assert.equal(serverStale.run('browserIntent.blocked()'), true);
+    assert.equal(serverStale.element('say').value, 'Actual stale comment must remain local');
+    assert(serverStale.run('preservedIntentDrafts.some(d => d.comment === "Actual stale comment must remain local")'));
+    realResponses.length = 0;
+    cases.push({mode, claim: 'actual stale POST with fresh restart credential refuses once with 412 and preserves draft'});
+    scenarioCount++;
+    const b = fresh();
+    b.run('startDetailEdit(); origin = drawerIntent; originEpoch = window.workspaceEpoch;');
+    b.element('say').value = 'Restore acceptance comment draft';
+    b.element('p-detail-text').value = 'Restore acceptance detail draft';
+    b.run('dragNode = card(itemById("a")); dropNode = laneEl(data.lanes.find(l => l.state === "completed"));');
+    const transfer = {value: '', setData(_, value) {this.value = value;}, getData() {return this.value;}};
+    await b.run('dragNode').fire('dragstart', {dataTransfer: transfer});
+    if (mode !== '/direct') {
+      b.ctx.actualCatalog = fixture.gatewayCatalog;
+      b.ctx.actualBoardKey = decodeURIComponent(fixture.gatewayPrefix.split('/').pop());
+      b.run(`let retryRequested = false, refreshing = false, initialized = true,
+        storageKey = 'localswim.workspace.' + actualCatalog.identity, catalog = [],
+        gatewayStatus = null, gatewayPush = null, current = actualBoardKey, recoverOnCatalog = false;
+        const nav = document.createElement('nav');
+        function normalizePageStatus(value) {return value;}
+        function acceptPreferences() {} function renderRows() {} function showWorkspaceStatus() {}
+        function flushPinCommands() {} function persist() {} function error() {}
+      `);
+      b.run(refresh);
+      b.respond(async path => ({ok: true, status: 200, json: async () =>
+        path.endsWith('/browser-session') ? session : fixture.gatewayCatalog}));
+      await b.run('refresh()');
+      assert.equal(b.run('API_TOKEN'), session.token);
+    }
+    assert.equal(b.run('origin.generation'), before.generation);
+    assert.equal(b.run('browserIntent.token(origin)'), before.writeToken);
+    assert.equal(b.run('window.workspaceEpoch'), b.run('originEpoch'));
+    await pollRestored(b);
+    assert.equal(b.run('data.generation'), after.generation);
+    assert.equal(b.run('data.revision'), after.revision);
+    assert.equal(b.run('browserIntent.valid(origin)'), false);
+    assert.equal(b.run('origin.generation'), before.generation);
+    assert(b.run('preservedIntentDrafts.some(d => d.comment === "Restore acceptance comment draft" && d.detail === "Restore acceptance detail draft")'));
+    assert.equal(b.element('post').disabled, true);
+    assert.equal(b.element('p-detail-save').disabled, true);
+    b.reset();
+    await b.run('postComment()'); await b.run('saveDetail()');
+    await b.run('dropNode').fire('drop', {dataTransfer: transfer});
+    assert.equal(b.requests().length, 0, 'Stale comment/detail/drop never dispatch');
+    await review(b, true);
+    assert.equal(b.run('browserIntent.valid(origin)'), false, 'Review cannot repair old capture');
+    await b.element('intent-reattach').fire('click');
+    assert.equal(b.element('say').value, 'Restore acceptance comment draft');
+    assert.equal(b.element('p-detail-text').value, 'Restore acceptance detail draft');
+    assert.equal(b.element('post').disabled, false);
+    assert.equal(b.element('p-detail-save').disabled, false);
+    const reviewedToken = b.run('data.writeToken'), reviewedRevision = b.run('data.revision');
+    b.reset();
+    serveLive(b);
+    await b.run('postComment()'); await b.run('saveDetail()');
+    assert.equal(b.requests().length, 2, 'Explicit reviewed edits each dispatch once');
+    assert.equal(b.requests()[0].options.headers['If-Match'], reviewedToken);
+    assert.equal(b.requests()[0].options.headers.Authorization, 'Bearer ' + session.token);
+    assert.equal(b.requests()[1].options.headers['If-Match'],
+      snapshot(after.generation, reviewedRevision + 1).writeToken);
+    assert.deepEqual(realResponses.map(r => r.status), [200, 200]);
+    assert(realResponses.every(r => r.body.generation === after.generation));
+    const persisted = await (await fetch(base + prefix + '/board')).json();
+    const savedCard = persisted.lanes.flatMap(lane => lane.items).find(card => card.id === 'a');
+    assert.equal(savedCard.detailRaw, 'Restore acceptance detail draft');
+    assert(savedCard.comments.some(comment => comment.text === 'Restore acceptance comment draft'));
+    assert(!savedCard.comments.some(comment => comment.text === 'Actual stale comment must remain local'));
+    cases.push({mode, claim: 'restart credential rotation, poll, preserved comment/detail, disabled stale submit, queued drag, explicit review'});
+    scenarioCount++;
+
+    for (const navigation of [false, true]) {
+      const late = fresh();
+      let finish;
+      late.respond(async () => ({ok: true, status: 200,
+        json: () => new Promise(resolve => {finish = resolve;})}));
+      late.element('say').value = 'Old in-flight draft';
+      const pending = late.run('postComment()');
+      for (let i = 0; i < 20 && !finish; i++) await Promise.resolve();
+      assert(finish);
+      await pollRestored(late);
+      if (navigation) {
+        late.run("API_PREFIX = '/workspace/two'; window.workspaceEpoch++;");
+        await pollRestored(late);
+      }
+      await review(late);
+      late.run("closeCard(); openCard('b'); startDetailEdit();");
+      late.element('say').value = 'Current comment';
+      late.element('p-detail-text').value = 'Current detail';
+      finish({...before, result: 'previous success'});
+      await pending;
+      assert.equal(late.run('openId'), 'b');
+      assert.equal(late.element('say').value, 'Current comment');
+      assert.equal(late.element('p-detail-text').value, 'Current detail');
+      assert.equal(late.run('data.generation'), after.generation);
+      assert.equal(late.run('data.revision'), after.revision);
+      assert.equal(late.requests().filter(r => r.options && r.options.method === 'POST').length, 1);
+      cases.push({mode, claim: navigation ? 'stale navigation success cannot publish/clear/close' : 'in-flight old success cannot publish/clear/close'});
+      scenarioCount++;
+    }
+    for (const failure of ['state_changed', 'credential', 'uncertain']) {
+      const refused = fresh();
+      await pollRestored(refused); await review(refused);
+      refused.element('say').value = 'Keep refused draft';
+      refused.reset();
+      refused.respond(async () => {
+        if (failure === 'uncertain') throw new Error('Synthetic uncertain completion');
+        return {ok: false, status: failure === 'credential' ? 401 : 412,
+          json: async () => ({error: failure === 'credential' ? 'Unauthorized' : 'state_changed'})};
+      });
+      if (failure === 'uncertain')
+        await assert.rejects(refused.run('postComment()'), /Synthetic uncertain completion/);
+      else await refused.run('postComment()');
+      assert.equal(refused.requests().length, 1, 'Refusal/uncertainty must not replay POST');
+      assert.equal(refused.element('say').value, 'Keep refused draft');
+      cases.push({mode, claim: 'no POST replay after ' + failure});
+      scenarioCount++;
+    }
+  }
+  return {provenance: fixture.evidence, cases, nativeBrowser: false,
+    responseScheduling: 'deterministic VM/DOM', freshMutationResponses: 'actual restarted HTTP service/gateway'};
 }
 
 (async () => {
@@ -442,6 +626,7 @@ function attachmentButton(b, index) {
       savedGeneration === g1 ? undefined : 'confirmed text');
     scenarioCount++;
   }
-  console.log(JSON.stringify({passed: true, scenarioCount, engine: 'Node VM deterministic DOM',
+  const restore = await restoredClients(workspace);
+  console.log(JSON.stringify({passed: true, scenarioCount, engine: 'Node VM deterministic DOM', restore,
     modes: ['direct', 'workspace'], mutationFamilies: Object.keys(controls)}));
 })().catch(error => {console.error(error); process.exitCode = 1;});

@@ -16,7 +16,8 @@ command only writes its new artifact. Internal storage can prepare recovery file
 and append missing attachment bytes; it never replaces a board snapshot. The
 creation boundary supports local Windows NTFS and refuses unsupported paths or
 unsafe aliases. Offline apply/inspect commands are available only in this isolated
-candidate; synthetic acceptance and separately approved live rollout remain ahead.
+candidate. Release-specific synthetic acceptance evidence and separately approved
+live rollout are distinct gates.
 
 ### Prepare an offline restore plan
 
@@ -105,6 +106,17 @@ If lease cleanup fails after an outcome was inspected under ownership, retain th
 known result with a cleanup diagnostic. Do not inspect again after releasing
 ownership or reinterpret a confirmed commit as a refusal. Interruptions preserve
 their original failure and recovery notes.
+
+After a restored generation is detected, the browser preserves useful unsent text
+and pauses old submissions. Use **I reviewed the board**, choose the current card
+or creation lane, then **Reattach**. The bounded saved-text tray stays outside
+drawer and creation-form backdrops, so its controls remain reachable without
+covering editor actions. Reattachment does not submit anything automatically.
+
+The executable acceptance fixtures combine real offline CLI restores and restarted
+direct/workspace clients with the shipped PAGE/workspace VM harness. VM timing checks and
+real browser layout checks have different evidence limits; retain the qualified
+release matrix and current gate/build proof before requesting operational rollout.
 
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among
