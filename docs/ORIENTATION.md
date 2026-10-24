@@ -1358,9 +1358,10 @@ Each independent plan receives a distinct proposed generation. The artifact itse
 is never board state and grants no write permission. This is reviewed-byte integrity,
 not authentication: filesystem maintenance access remains the authority boundary.
 Local Windows path restrictions and retained-byte provenance limitations still apply.
-No apply/inspect route, checkpoint, byte staging, attachment copying, automatic
-shutdown, extraction, network fetch, target replacement or live rollout is provided.
-All code remains NONWATCHED through later synthetic acceptance and separate
+The plan phase performs no checkpoint, staging, copying or snapshot replacement.
+The separate internal storage and offline apply/inspect phases below consume these
+sealed bytes. No automatic shutdown, extraction, network fetch or live rollout is
+provided. All code remains NONWATCHED through synthetic acceptance and separate
 operational approval.
 
 ## Internal restore checkpoint and staging
@@ -1406,5 +1407,59 @@ application-interruption recovery, not directory-flush or physical power-loss
 guarantees. Snapshot, attachment, plan and inventory caps remain unchanged.
 
 Qualification uses synthetic Windows files with actual caller-held maintenance
-contexts. Public restore acquisition/commit and synthetic end-to-end acceptance
-remain separate phases; watched rollout still requires separate operational approval.
+contexts. The separate orchestration module below acquires that ownership and
+performs the commit. Synthetic end-to-end acceptance and watched rollout remain
+separate gates requiring the applicable review and operational approval.
+
+## Offline restore apply and inspect
+
+`restore.apply_restore(document, expect_plan=..., target=..., staging=...,
+checkpoint=...)` and `inspect_restore(document, expect_plan=..., target=...)`
+expose a frozen `RestoreResult` with committed/uncommitted/unknown state and the
+operation, plan, generation and final-byte digest bindings. The thin CLI commands
+are `board restore apply PLAN --expect-plan DIGEST --staging PATH --checkpoint PATH`
+and `board restore inspect PLAN --expect-plan DIGEST`; `--json` exposes those
+bindings. Exit codes are 0, 1 and 2 for committed, uncommitted and unknown.
+
+Both operations validate sealed integrity and original target spelling, then hold
+the existing launch gate, lifetime writer claim and snapshot transaction lock in
+that order. Conservative legacy-listener refusal remains inside ownership. These
+commands do not contact the live mutation API or stop/start services.
+
+Apply first inspects exact current bytes under ownership. A match to the sealed
+final snapshot proves the embedded receipt, generation and digest together, so
+the same operation returns without replacement even if its old source changed or
+the plan expired. Static integrity and target binding still apply. A nonmatching
+operation must pass normal expiry and fresh source/current observation checks
+before preparation can write anything.
+
+Prepared recovery/staging bytes and live path proofs feed one terminal native
+replacement transition. The final snapshot is never regenerated: no new UUID,
+timestamp, adoption event or serializer output is allocated during apply. The
+replacement temporary file is exclusively created beside the target and receives
+flush and exact same-handle readback. Held ancestry and other path proofs remain
+in force; only the target leaf must be released at the terminal rename boundary.
+Maintenance ownership excludes cooperating writers through subsequent inspection.
+This is not a filesystem-wide compare-and-swap against noncooperating outside writers.
+The native rename uses the owned temporary handle and a bare target leaf with
+NULL `RootDirectory`, keeping the file in its existing pinned directory. This
+follows Microsoft's documented same-directory
+[FILE_RENAME_INFORMATION contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
+
+After a replacement call, including a raised or interrupted one, inspect the
+snapshot afresh while ownership is still held. Exact final bytes prove committed;
+the exact prior raw digest or prior absence proves uncommitted; unreadable or
+different bytes remain unknown. A copied receipt in modified bytes is insufficient.
+There is no native replacement retry, second snapshot completion marker, sidecar
+commit authority or inferred rollback from an exception. Recovery/staging/temp
+and possibly referenced orphan files remain available after failure. Inspection
+does not commit a plan; persistent ownership lock paths are never unlinked.
+Lease cleanup attempts every entered context in reverse order. A failure after
+owned inspection preserves the captured result and adds a sanitized diagnostic;
+there is no post-release inspection. Preserve a primary interruption and attach
+cleanup notes without replacing it with a later unlock/close error.
+
+This phase is qualified with synthetic local Windows fixtures only. It does not
+restore production snapshots, enable publishing, deploy the candidate or change
+running service/monitor ownership. File flush/readback and backups support the
+application-interruption contract, without directory-flush or power-loss promises.

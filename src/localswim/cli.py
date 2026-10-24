@@ -20,6 +20,8 @@ from localswim import attachments, board_state
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from localswim.restore import RestoreResult
+
 
 @dataclass(frozen=True)
 class CliContext:
@@ -99,7 +101,7 @@ def board_commands() -> None:
 
 @board_commands.group("restore", no_args_is_help=True)
 def board_restore() -> None:
-    """Prepare an offline restore for explicit review."""
+    """Plan, apply, or inspect an explicitly reviewed offline restore."""
 
 
 def _write_restore_plan(output: pathlib.Path, document: bytes, maximum: int) -> None:
@@ -204,6 +206,110 @@ def board_restore_plan(  # noqa: PLR0913 -- explicit Click options
         observation = cast("board_state.JsonObject", core[role])
         summary[role] = {key: observation[key] for key in ("status", "recovery")}
     click.echo(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+def _read_restore_plan(plan: pathlib.Path) -> bytes:
+    """Read one sealed artifact through the bounded native path boundary."""
+    from localswim import restore_plan  # noqa: PLC0415 -- offline command boundary
+    from localswim.restore_paths import CheckedPath  # noqa: PLC0415
+
+    with CheckedPath.capture(plan.absolute()) as proof:
+        return proof.read_bytes(restore_plan.MAX_PLAN_BYTES)
+
+
+def _restore_result(result: RestoreResult, *, as_json: bool) -> None:
+    """Report the inspected outcome without retrying an uncertain operation."""
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "state": result.state,
+                    "operationId": result.operation_id,
+                    "planDigest": result.plan_digest,
+                    "generation": result.generation,
+                    "finalDigest": result.final_digest,
+                    "detail": result.detail,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    else:
+        click.echo(f"Restore outcome: {result.state}")
+        click.echo(f"Operation: {result.operation_id}")
+        click.echo(f"Plan digest: {result.plan_digest}")
+        click.echo(f"Generation: {result.generation}")
+        click.echo(f"Final digest: {result.final_digest}")
+        if result.detail is not None:
+            click.echo(f"Detail: {result.detail}")
+        if result.state == "unknown":
+            click.echo("Inspect this sealed plan before any retry; no operation was replayed.")
+    if result.state != "committed":
+        raise click.exceptions.Exit(2 if result.state == "unknown" else 1)
+
+
+@board_restore.command("apply")
+@click.argument("plan", type=click.Path(path_type=pathlib.Path, dir_okay=False))
+@click.option("--expect-plan", required=True, help="Exact reviewed sealed-plan digest.")
+@click.option("--staging", required=True, type=click.Path(path_type=pathlib.Path, file_okay=False))
+@click.option(
+    "--checkpoint", required=True, type=click.Path(path_type=pathlib.Path, file_okay=False)
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the exact inspected outcome as JSON.")
+@click.pass_obj
+def board_restore_apply(  # noqa: PLR0913 -- explicit offline maintenance options
+    context: CliContext,
+    plan: pathlib.Path,
+    expect_plan: str,
+    staging: pathlib.Path,
+    checkpoint: pathlib.Path,
+    *,
+    as_json: bool,
+) -> None:
+    """Apply sealed PLAN once under offline maintenance ownership.
+
+    Exit codes: committed 0, uncommitted 1, unknown 2. Inspect unknown outcomes
+    before any retry. Staging and checkpoint paths must be new, distinct paths.
+    """
+    from localswim import restore  # noqa: PLC0415 -- offline command boundary
+
+    try:
+        result = restore.apply_restore(
+            _read_restore_plan(plan),
+            expect_plan=expect_plan,
+            target=context.restore_target or context.board,
+            staging=staging.absolute(),
+            checkpoint=checkpoint.absolute(),
+        )
+    except (ValueError, OSError, board_state.BoardError) as error:
+        raise click.ClickException(str(error)) from error
+    _restore_result(result, as_json=as_json)
+
+
+@board_restore.command("inspect")
+@click.argument("plan", type=click.Path(path_type=pathlib.Path, dir_okay=False))
+@click.option("--expect-plan", required=True, help="Exact reviewed sealed-plan digest.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the exact inspected outcome as JSON.")
+@click.pass_obj
+def board_restore_inspect(
+    context: CliContext, plan: pathlib.Path, expect_plan: str, *, as_json: bool
+) -> None:
+    """Inspect sealed PLAN's outcome under offline maintenance ownership.
+
+    Exit codes: committed 0, uncommitted 1, unknown 2. Inspection never applies
+    the plan or starts or stops a service.
+    """
+    from localswim import restore  # noqa: PLC0415 -- offline command boundary
+
+    try:
+        result = restore.inspect_restore(
+            _read_restore_plan(plan),
+            expect_plan=expect_plan,
+            target=context.restore_target or context.board,
+        )
+    except (ValueError, OSError, board_state.BoardError) as error:
+        raise click.ClickException(str(error)) from error
+    _restore_result(result, as_json=as_json)
 
 
 @board_commands.command("show")

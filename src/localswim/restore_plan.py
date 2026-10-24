@@ -580,6 +580,59 @@ def _fresh_observations(core: board_state.JsonObject, target: pathlib.Path) -> N
             proof.revalidate()
 
 
+def _validate_observation(row: board_state.JsonObject, maximum: int) -> None:
+    """Validate frozen file metadata without opening a source or target path."""
+    if set(row) != {"path", "identity", "digest", "size"}:
+        raise PlanError("invalid sealed observation fields")
+    if row["digest"] == "missing":
+        if row["identity"] is not None or row["size"] is not None:
+            raise PlanError("invalid missing observation metadata")
+        return
+    _digest(row["digest"])
+    size = row["size"]
+    if type(size) is not int or not 0 <= size <= maximum:
+        raise PlanError("invalid sealed observation byte size")
+    identity = _mapping(row["identity"], "observation identity")
+    limits = {
+        "volume": 2**32 - 1,
+        "index": 2**64 - 1,
+        "attributes": 2**32 - 1,
+        "size": maximum,
+        "modified": 2**64 - 1,
+        "links": 1,
+    }
+    if set(identity) != set(limits) or any(
+        type(identity[key]) is not int or not 0 <= cast("int", identity[key]) <= limit
+        for key, limit in limits.items()
+    ):
+        raise PlanError("invalid sealed observation identity counters")
+    if (
+        identity["size"] != size
+        or identity["links"] != 1
+        or cast("int", identity["attributes"]) & (0x10 | 0x40 | 0x400)
+    ):
+        raise PlanError("sealed observation must identify one regular nonreparse file")
+
+
+def _sealed_observations(core: board_state.JsonObject) -> None:
+    """Enforce the same exact role/claim boundary before inspection without IO."""
+    rows = core["observations"]
+    roles = _observation_roles(core)
+    if not isinstance(rows, list) or len(rows) != len(roles):
+        raise PlanError("invalid sealed observation count")
+    observed: dict[str, board_state.JsonObject] = {}
+    for value in rows:
+        row = _mapping(value, "observation")
+        name = row.get("path")
+        if not isinstance(name, str) or name in observed or pathlib.Path(name) not in roles:
+            raise PlanError("invalid, duplicate or out-of-role sealed observation path")
+        _validate_observation(row, roles[pathlib.Path(name)])
+        observed[name] = row
+    if {pathlib.Path(name) for name in observed} != set(roles):
+        raise PlanError("sealed observations omit a referenced role")
+    _check_observation_claims(core, observed)
+
+
 def _check_observation_claims(
     core: board_state.JsonObject, actual: dict[str, board_state.JsonObject]
 ) -> None:
@@ -589,7 +642,10 @@ def _check_observation_claims(
     target_path = pathlib.Path(cast("str", current["path"]))
     for snapshot in (source, current):
         observed = actual.get(cast("str", snapshot["path"]))
-        if observed is None or observed["digest"] != snapshot.get("rawDigest"):
+        if observed is None or (observed["digest"], observed["size"]) != (
+            snapshot.get("rawDigest"),
+            snapshot.get("rawSize"),
+        ):
             raise PlanError("snapshot observation is missing or inconsistent")
         for file in cast("list[board_state.JsonObject]", snapshot["blobs"]):
             path = pathlib.Path(cast("str", snapshot["path"])).parent / cast(
@@ -616,8 +672,12 @@ def _check_observation_claims(
             raise PlanError("immutable target byte collision")
 
 
-def _verify_plan(document: bytes, *, expect_plan: str, target: pathlib.Path) -> SealedPlan:
-    """Check reviewed domains and fresh proofs; never regenerate frozen content."""
+def _verify_sealed_plan(document: bytes, *, expect_plan: str, target: pathlib.Path) -> SealedPlan:
+    """Check frozen domains only, for owned recovery inspection after interruption.
+
+    This private seam conveys no permission to apply stale content. Ordinary
+    verification additionally requires expiry and every fresh source/target proof.
+    """
     if len(document) > MAX_PLAN_BYTES:
         raise PlanError("plan exceeds bounded document limit")
     envelope = _parse(document)
@@ -635,11 +695,22 @@ def _verify_plan(document: bytes, *, expect_plan: str, target: pathlib.Path) -> 
     timestamp, expires = _timestamp(core["timestamp"]), _timestamp(core["expiresAt"])
     if expires - timestamp != timedelta(seconds=EXPIRY_SECONDS):
         raise PlanError("plan expiry must be exactly 30 minutes")
-    if datetime.now(UTC) >= expires:
-        raise PlanError("sealed plan has expired")
+    current = _mapping(core["current"], "current")
+    if str(target) != core["target"] or current["path"] != core["target"]:
+        raise PlanError("canonical target differs from reviewed target")
     final = _frozen_output(envelope, core, digest)
-    _fresh_observations(core, target)
+    _sealed_observations(core)
     return SealedPlan(document, final, digest)
+
+
+def _verify_plan(document: bytes, *, expect_plan: str, target: pathlib.Path) -> SealedPlan:
+    """Check reviewed domains and fresh proofs; never regenerate frozen content."""
+    sealed = _verify_sealed_plan(document, expect_plan=expect_plan, target=target)
+    core = sealed.core
+    if datetime.now(UTC) >= _timestamp(core["expiresAt"]):
+        raise PlanError("sealed plan has expired")
+    _fresh_observations(core, target)
+    return sealed
 
 
 def verify_plan(document: bytes, *, expect_plan: str, target: pathlib.Path) -> SealedPlan:

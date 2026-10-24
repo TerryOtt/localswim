@@ -15,7 +15,8 @@ and internal checkpoint/staging under caller-held maintenance ownership. The pla
 command only writes its new artifact. Internal storage can prepare recovery files
 and append missing attachment bytes; it never replaces a board snapshot. The
 creation boundary supports local Windows NTFS and refuses unsupported paths or
-unsafe aliases. Public apply, commit and live rollout remain separate work.
+unsafe aliases. Offline apply/inspect commands are available only in this isolated
+candidate; synthetic acceptance and separately approved live rollout remain ahead.
 
 ### Prepare an offline restore plan
 
@@ -43,7 +44,7 @@ does not provide a usable port. Plans expire after 30 minutes and are capped at
 digest domains, expiry, exact target and current source/target byte observations.
 It does not regenerate identities, times, adoption events or final snapshot bytes.
 The digest establishes reviewed-byte integrity, not authentication or permission
-to restore. No apply command or automatic service shutdown is provided here.
+to restore. The plan command never applies a restore or shuts down a service.
 
 ### Internal checkpoint and staging boundary
 
@@ -65,6 +66,45 @@ returned prepared handle is closed or a later commit finishes.
 Available-space checks are estimates, not reservations. Individual files receive
 flush and exact readback checks; physical power-loss durability is not promised.
 No active board, service, gateway or monitor is changed by this development work.
+
+### Apply once and inspect an offline restore
+
+These commands belong to the NONWATCHED candidate. They do not authorize a live
+restore, deployment or service shutdown. Every consumer of the target must be
+stopped separately under an approved operational procedure.
+
+Given an already reviewed plan and its exact digest:
+
+~~~console
+uv run --frozen localswim-cli C:/restore-example/target/board.json board restore apply C:/restore-example/plan.json --expect-plan PLAN_SHA256 --staging C:/restore-example/staging-OP --checkpoint C:/restore-example/recovery-OP --json
+uv run --frozen localswim-cli C:/restore-example/target/board.json board restore inspect C:/restore-example/plan.json --expect-plan PLAN_SHA256 --json
+~~~
+
+The staging and recovery directories must be new and separate from each other and
+the source/target directory roots, with existing safe parents. Keep the supplied
+backup and plan private. Apply takes the existing launch gate, writer lease and
+snapshot transaction lock, refuses listeners, prepares recovery material and
+attempts one atomic replacement with the exact sealed snapshot bytes.
+
+- **Committed (exit 0):** the current snapshot exactly matches the reviewed final
+  bytes, including its receipt and generation. Repeating that operation recognizes
+  the commit before stale-source/expiry checks and makes no second replacement.
+- **Uncommitted (exit 1):** current raw bytes, or absence, match the sealed prior
+  observation. A failure still leaves any partial recovery/staging/temp bytes.
+- **Unknown (exit 2):** neither exact proof is available. Preserve all material and
+  inspect before any retry. A copied receipt alone never proves commit.
+
+The JSON result includes `state`, `operationId`, `planDigest`, `generation`,
+`finalDigest` and optional diagnostic `detail`. Invalid input and unavailable
+maintenance ownership are command refusals. Inspect uses the same offline ownership;
+it does not apply the plan. Lock files remain persistent. No automatic cleanup,
+rollback, backup enablement or service start/stop occurs. A later rollback needs
+another reviewed plan and a new generation.
+
+If lease cleanup fails after an outcome was inspected under ownership, retain that
+known result with a cleanup diagnostic. Do not inspect again after releasing
+ownership or reinterpret a confirmed commit as a refusal. Interruptions preserve
+their original failure and recovery notes.
 
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among

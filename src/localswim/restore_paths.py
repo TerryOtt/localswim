@@ -23,7 +23,7 @@ from contextlib import suppress
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Self
-lazy from collections.abc import Iterable
+lazy from collections.abc import Callable, Iterable
 lazy from pathlib import Path
 
 
@@ -320,6 +320,15 @@ class _IoStatus(ctypes.Structure):
     _fields_ = (("status", ctypes.c_void_p), ("information", ctypes.c_size_t))
 
 
+class _RenameInformation(ctypes.Structure):
+    _fields_ = (
+        ("replace", wintypes.BYTE),
+        ("root", wintypes.HANDLE),
+        ("length", wintypes.ULONG),
+        ("name", wintypes.WCHAR * 1),
+    )
+
+
 class _CreatingWindows(_Windows):
     """Bindings initialized only inside an explicitly Windows-only session."""
 
@@ -340,6 +349,14 @@ class _CreatingWindows(_Windows):
             wintypes.ULONG,
         )
         self.ntdll.NtCreateFile.restype = wintypes.LONG
+        self.ntdll.NtSetInformationFile.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(_IoStatus),
+            ctypes.c_void_p,
+            wintypes.ULONG,
+            wintypes.ULONG,
+        )
+        self.ntdll.NtSetInformationFile.restype = wintypes.LONG
         self.dll.WriteFile.argtypes = self.dll.ReadFile.argtypes
         self.dll.FlushFileBuffers.argtypes = (wintypes.HANDLE,)
         self.dll.GetVolumeInformationByHandleW.argtypes = (
@@ -370,7 +387,9 @@ class _CreatingWindows(_Windows):
         ):
             raise PathBoundaryError("Creation requires a local NTFS volume")
 
-    def create_child(self, parent: int, name: str, *, directory: bool) -> int:
+    def create_child(
+        self, parent: int, name: str, *, directory: bool, replaceable: bool = False
+    ) -> int:
         # FILE_CREATE returns the new object's handle in the same native operation.
         # RootDirectory is the pinned parent; no pathname reopen confers ownership.
         buffer = ctypes.create_unicode_buffer(name)
@@ -392,7 +411,7 @@ class _CreatingWindows(_Windows):
         try:
             result = self.ntdll.NtCreateFile(
                 ctypes.byref(handle),
-                0x80100000 if directory else 0xC0100000,
+                (0x80100000 if directory else 0xC0100000) | (0x10000 if replaceable else 0),
                 ctypes.byref(attributes),
                 ctypes.byref(status),
                 None,
@@ -417,6 +436,29 @@ class _CreatingWindows(_Windows):
             if not transferred and isinstance(handle.value, int):
                 with suppress(BaseException):
                     self.close(handle.value)
+
+    def replace_child(self, source: int, parent: int, name: str) -> None:
+        """One handle-relative atomic rename; a raised call is an unknown outcome."""
+        if not self.information(parent).attributes & 0x10:
+            raise PathBoundaryError("Replacement requires the pinned destination directory")
+        encoded = name.encode("utf-16-le")
+        count = _RenameInformation.name.offset + len(encoded)
+        buffer = ctypes.create_string_buffer(max(count, ctypes.sizeof(_RenameInformation)))
+        information = _RenameInformation.from_buffer(buffer)
+        information.replace = 1
+        # A bare leaf and NULL root rename in the source handle's existing parent.
+        # Supplying RootDirectory makes NT reopen it with FILE_ADD_FILE, which
+        # conflicts with our deliberately denied-write directory proof. The temp
+        # was created in this exact pinned parent, so no directory reopen is needed.
+        information.root = None
+        information.length = len(encoded)
+        ctypes.memmove(
+            ctypes.addressof(buffer) + _RenameInformation.name.offset, encoded, len(encoded)
+        )
+        status = _IoStatus()
+        result = self.ntdll.NtSetInformationFile(source, ctypes.byref(status), buffer, count, 10)
+        if result < 0:
+            raise PathBoundaryError(f"Atomic native replacement refused (NTSTATUS {result:#x})")
 
     def seek_start(self, handle: int) -> None:
         if not self.dll.SetFilePointerEx(handle, 0, None, 0):
@@ -472,14 +514,16 @@ class _SessionPath(CheckedPath):
 
 
 class CreationSession:
-    """Fresh proof registry and append-only native ownership, never byte cleanup.
+    """Fresh proof registry and append-only preparation, with one terminal commit seam.
 
     Every read/create validates the complete registry. Only a successful owned
     child creation can advance that direct parent's size/write stamp, across all
     registered views. Owned writes advance only their own leaf. Other stamps
     remain strict. Close releases handles, including partial creations, without
     deleting anything. File flushes support application-crash preparation; this
-    API makes no directory-flush or physical power-loss durability claim.
+    API makes no directory-flush or physical power-loss durability claim. Only
+    ``replace_snapshot`` can replace existing bytes, under caller-held maintenance
+    ownership; its terminal transition invalidates the registry for later use.
     """
 
     def __init__(self) -> None:
@@ -597,7 +641,7 @@ class CreationSession:
             raise PathBoundaryError("A live proof from this session is required")
         self.revalidate()
 
-    def _create(self, path: Path, *, directory: bool) -> _SessionNode:
+    def _create(self, path: Path, *, directory: bool, replaceable: bool = False) -> _SessionNode:
         path = _validate_spelling(path)
         self.revalidate()
         parent = self._nodes.get(self._key(path.parent))
@@ -607,7 +651,12 @@ class CreationSession:
             raise PathBoundaryError("Exclusive destination already exists")
         handle: int | None = None
         try:
-            handle = self._native.create_child(parent.handle, path.name, directory=directory)
+            if replaceable:
+                handle = self._native.create_child(
+                    parent.handle, path.name, directory=directory, replaceable=True
+                )
+            else:
+                handle = self._native.create_child(parent.handle, path.name, directory=directory)
             child = _SessionNode(path, handle, self._native.information(handle))
             self._validate_node(child)
             if bool(child.identity.attributes & 0x10) != directory:
@@ -696,6 +745,51 @@ class CreationSession:
             expected_size=len(data),
             expected_sha256=hashlib.sha256(data).hexdigest(),
         )
+
+    def replace_snapshot(
+        self,
+        target: Path,
+        data: bytes,
+        *,
+        operation_id: str,
+        before_replace: Callable[[], None],
+    ) -> None:
+        """Commit frozen bytes once while the caller retains maintenance ownership.
+
+        All ancestor, attachment and recovery proofs stay held. Only the old target
+        leaf must be released because its denied-delete share forbids replacement.
+        The exclusive temporary file has DELETE access from its creation and is
+        renamed by handle within its existing pinned target parent. There is no path
+        reopen, retry, byte cleanup or serializer. After this terminal transition,
+        close the session and inspect the target afresh under the same leases.
+        These leases exclude cooperating writers; NT supplies atomic replacement,
+        not filesystem-wide compare-and-swap against noncooperating outside writers.
+        """
+        if type(data) is not bytes or len(data) > 64 * 1024 * 1024:
+            raise PathBoundaryError("Invalid bounded snapshot bytes")
+        if re.fullmatch(r"[0-9a-f-]{36}", operation_id) is None:
+            raise PathBoundaryError("Invalid sealed operation identity")
+        target = _validate_spelling(target)
+        self.revalidate()
+        if not any(proof.path == target and proof._directory is False for proof in self._proofs):
+            raise PathBoundaryError("Snapshot replacement requires a registered file proof")
+        temporary = target.with_name(f"{target.name}.restore-{operation_id}.tmp")
+        node = self._create(temporary, directory=False, replaceable=True)
+        self._write_verified(
+            node,
+            (data[offset : offset + 65536] for offset in range(0, len(data), 65536)),
+            expected_size=len(data),
+            expected_sha256=hashlib.sha256(data).hexdigest(),
+        )
+        before_replace()
+        self.revalidate()
+        parent = self._nodes[self._key(target.parent)]
+        self._failed = True  # No later operation can reuse transition-era proofs.
+        previous = self._nodes.get(self._key(target))
+        if previous is not None:
+            self._native.close(previous.handle)
+            del self._nodes[self._key(target)]
+        self._native.replace_child(node.handle, parent.handle, target.name)
 
     def copy_file(
         self,

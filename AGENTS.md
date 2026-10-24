@@ -22,6 +22,8 @@ native board monitoring is an optional extra.
   frozen-byte verification; it never applies a restore or writes a board.
 - `src/localswim/restore_storage.py` owns internal checkpoint/staging preparation
   and append-only attachment copies under caller-held maintenance ownership.
+- `src/localswim/restore.py` owns offline maintenance apply/inspect, exact committed
+  receipt recognition and conservative replacement-outcome classification.
 - `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
@@ -137,6 +139,19 @@ native board monitoring is an optional extra.
   expose public apply or promise power-loss durability in this phase.
   Native creation uses pinned exclusive local NTFS handles; unsupported paths
   fail closed. Preparation and safe handle cleanup do not release caller leases.
+- Offline restore apply/inspect hold the existing launch gate, writer claim and
+  snapshot transaction lock in that order. Refuse legacy listeners; never stop a
+  service, enter a live mutation route or infer authority from a plan digest.
+  Strict static plan integrity remains mandatory. Recognize exact committed final
+  bytes before expiry/source-drift checks on repeats; all other applies require
+  fresh unexpired observations and complete recovery/staging preparation.
+  Replace once with the sealed bytes; do not serialize, allocate identities,
+  retry an uncertain native replacement or write a second completion snapshot.
+  Confirm commit only by the exact final bytes and embedded receipt/generation;
+  exact prior bytes or prior absence prove uncommitted, everything else is unknown.
+  Retain partial recovery/staging/temp/orphan bytes and preserve interruption
+  causality. Inspect under ownership before retry. No automatic reverse restore,
+  blob deletion, backup enablement, service lifecycle or watched rollout.
 - Preserve the single-writer design, per-process bearer credential, `If-Match`
   revision checks, schema validation, monotonic revisions, flushed temporary writes,
   and atomic snapshot replacement. Acquire the board lifetime OS lease before constructing
