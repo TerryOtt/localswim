@@ -2836,7 +2836,7 @@ class Board:
         )
         return problems
 
-    def verify(self) -> list[str]:
+    def verify(self, *, include_priority_floors: bool = True) -> list[str]:
         """Replay every item's history and report anything the transition policy forbids.
 
         **THIS IS THE ENFORCEMENT THAT SURVIVES A DIRECT WRITE.** `move()` guards every
@@ -2882,11 +2882,12 @@ class Board:
                     item.attachments, item.attachment_history, item.cover_attachment, known_actors
                 )
             )
-        problems.extend(
-            f"{item_id}: blocked card priority is below required {priority}; "
-            "start the board service to reconcile dependency priorities"
-            for item_id, priority in self.dependency_priority_promotions().items()
-        )
+        if include_priority_floors:
+            problems.extend(
+                f"{item_id}: blocked card priority is below required {priority}; "
+                "start the board service to reconcile dependency priorities"
+                for item_id, priority in self.dependency_priority_promotions().items()
+            )
         problems.extend(
             f"subjectHistory[{index}] names unknown actor {change.by!r}"
             for index, change in enumerate(self.subject_history)

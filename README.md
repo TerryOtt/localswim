@@ -10,6 +10,12 @@ require explicit stopped-board migration. The running shared installation remain
 on its previous package until separately approved coordinated rollout.
 See [the generation contract](docs/ORIENTATION.md#schema-5-and-write-protocol-2).
 
+The restore work currently adds a read-only candidate preflight library, not a
+restore command. It admits supplied schema-4/5 backups, inventories exact file
+references and reports recovery limits without copying bytes or replacing state.
+Its hardened filesystem boundary currently supports local Windows paths and
+refuses unsupported platforms or unsafe aliases. Plan/apply remain separate work.
+
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among
 boards with an Attention sidebar. It binds only to loopback and has no core runtime dependency

@@ -14,6 +14,10 @@ native board monitoring is an optional extra.
   transaction lock, canonical thread serialization and owned-descriptor cleanup.
 - `src/localswim/write_protocol.py` owns canonical generation, complete write-token
   and maintenance-receipt validation for the public schema-5 contract.
+- `src/localswim/restore_candidate.py` owns read-only backup admission and exact
+  active/retained attachment inventory; it does not plan or apply a restore.
+- `src/localswim/restore_paths.py` owns the fail-closed Windows local-filesystem
+  identity/alias boundary used by restore preflight and later restore phases.
 - `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
@@ -84,6 +88,27 @@ native board monitoring is an optional extra.
 
 - Keep the service bound to loopback. Do not add remote exposure, external runtime
   services, or browser network dependencies without an explicit product decision.
+
+- Restore preflight is read-only and accepts only embedded-policy schema 4/5.
+  Enforce 64 MiB snapshots, 10,000 distinct physical referenced paths, 4 GiB total
+  referenced bytes and 10 MiB per file. Verify all audit/structure checks before
+  supported priority adoption, then run complete verification. The optional
+  `Board.verify(include_priority_floors=False)` skips only the derived floor
+  diagnostic for that first isolated pass; production/default verification stays
+  complete. Never install source policy/users into ambient state or allocate a
+  generation during preflight.
+  Inventory exact active and retained references, including archived/removed data;
+  no glob imports or borrowing missing backup bytes from the target. Existing
+  immutable destination bytes must agree. Malformed readable current state may
+  be raw-only recovery material, never a validated recovery point; unreadable
+  existing bytes and unsafe physical paths still refuse. Retained-only bytes do
+  not establish an original upload digest.
+  Snapshot roles are files; attachment, staging and recovery roles are directories
+  or missing. Reject links/reparse aliases, nonregular/type changes and replacement
+  races; revalidate at reads and before reuse. The current boundary supports local
+  Windows paths only and refuses unsupported platforms/network/device namespaces.
+  Do not create checkpoints/staging, copy files, replace a snapshot, extract an
+  archive, compute a plan digest or expose an apply/restore command in this child.
 - Preserve the single-writer design, per-process bearer credential, `If-Match`
   revision checks, schema validation, monotonic revisions, flushed temporary writes,
   and atomic snapshot replacement. Acquire the board lifetime OS lease before constructing

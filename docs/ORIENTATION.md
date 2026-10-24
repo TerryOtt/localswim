@@ -1256,3 +1256,49 @@ Do not install activation code into watched shared source while unmigrated consu
 still depend on it. Preserve ports, stable board keys, policy, attachment bytes,
 monitor targets and opt-in publishing settings. Source review approval does not
 authorize live rollout, shutdown, migration or restore.
+
+## Read-only restore candidate and path admission
+
+`restore_candidate.preflight(source_snapshot, target_snapshot, checkpoint=None,
+staging=None)` produces an isolated admitted schema-4/5 candidate and exact byte
+observations. It exposes no CLI/HTTP restore action and creates no checkpoint,
+staging directory, target copy, plan digest or replacement snapshot.
+
+Inputs are bounded to 64 MiB per snapshot, 10,000 distinct physical referenced
+paths, 4 GiB total referenced bytes and 10 MiB per file. Duplicate/deep/malformed
+JSON, structural defects and invalid audit refuse before supported priority
+adoption. `Board.verify(include_priority_floors=False)` omits only the derived
+floor diagnostic during the first isolated audit pass; adoption is followed by
+normal complete verification. Source policy/users are never installed as ambient
+state, and schema-4 admission does not perform migration or allocate generation.
+
+The inventory follows exact active and attachment-history references, including
+archived cards, removals and covers. Missing backup bytes always refuse; target
+bytes cannot repair an incomplete supplied source. Active size/hash/type must
+match metadata. Retained-only bytes are observed and sealed from the supplied
+backup, not authenticated against an unavailable original upload digest. Extra
+files are not imported by glob. Existing immutable destination paths with different
+bytes are conflicts, never overwrite or remapping requests.
+
+Current target observations distinguish missing, complete recovery, incomplete
+available-byte recovery and corrupt/raw-only preservation. Invalid logical current
+references grant no authority to follow paths. Exact readable raw bytes remain
+valuable recovery material without becoming a validated checkpoint. Known existing
+unreadable bytes, unsafe physical components and conflicting candidate destinations
+still refuse. Names, observed policies/actors, counters and ports disclose what is
+known or unavailable; later planning must acknowledge these limitations explicitly.
+
+`restore_paths` holds non-following Windows handles and validates component identity,
+type, reparse/link state and final spelling. Snapshot roles are regular files;
+attachment namespaces, staging and checkpoint roles are directories or missing.
+Inside-tree junctions, symlinks, hardlinks, short-name aliases, traversal, device/
+network namespaces and alternate data streams are rejected. Proofs are revalidated
+at reads and before return/reuse. Ancestor timestamp checks conservatively refuse
+unrelated sibling drift; they do not replace held-handle and identity checks.
+
+The selected boundary is Windows-only and fails closed before native operations
+on unsupported platforms. Importability is retained; no POSIX/network-filesystem
+restore guarantee is inferred. Native alias tests and deterministic replacement
+probes qualify this local boundary. Preflight closes its handles before returning.
+Later creation/apply phases must acquire fresh proofs against the sealed observations
+and revalidate them at creation/reuse; admission is not permanent filesystem authority.
