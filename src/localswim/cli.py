@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import pathlib
 import sys
 import urllib.parse
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -24,6 +26,7 @@ class CliContext:
     """One board selected at the root of a CLI command tree."""
 
     board: pathlib.Path
+    restore_target: pathlib.Path | None = None
 
 
 def _configure_streams() -> None:
@@ -81,17 +84,126 @@ def _positive_count(_context: click.Context, _parameter: click.Parameter, value:
 @click.group(no_args_is_help=True)
 @click.argument(
     "board",
-    type=click.Path(path_type=pathlib.Path, dir_okay=False, resolve_path=True),
+    type=click.Path(path_type=pathlib.Path, dir_okay=False),
 )
 @click.pass_context
 def cli(context: click.Context, board: pathlib.Path) -> None:
     """Inspect or update BOARD through explicit commands."""
-    context.obj = CliContext(board)
+    context.obj = CliContext(board.resolve(), board.absolute())
 
 
 @cli.group("board", no_args_is_help=True)
 def board_commands() -> None:
     """Inspect, initialize, verify, or administer the board itself."""
+
+
+@board_commands.group("restore", no_args_is_help=True)
+def board_restore() -> None:
+    """Prepare an offline restore for explicit review."""
+
+
+def _write_restore_plan(output: pathlib.Path, document: bytes, maximum: int) -> None:
+    """Create one bounded artifact, proving its newly created Windows identity."""
+    from localswim.restore_paths import (  # noqa: PLC0415 -- offline command boundary
+        CheckedPath,
+        PathBoundaryError,
+    )
+
+    if len(document) > maximum:
+        raise PathBoundaryError("Plan document exceeds bounded output cap")
+    # The caller pins every ancestor and rejects an existing leaf before this
+    # exclusive creation. Keep the descriptor until all bytes have been flushed;
+    # then capture a fresh read-only proof and compare the actual file identity.
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        created = os.fstat(stream.fileno())
+        stream.write(document)
+        stream.flush()
+        os.fsync(stream.fileno())
+    with CheckedPath.capture(output) as proof:
+        if proof.identity is None or proof.identity.index != created.st_ino:
+            raise PathBoundaryError("Created plan identity changed")
+        if proof.read_bytes(maximum) != document:
+            raise PathBoundaryError("Created plan bytes changed")
+
+
+@board_restore.command("plan")
+@click.argument("source", type=click.Path(path_type=pathlib.Path, dir_okay=False))
+@click.option("--output", required=True, type=click.Path(path_type=pathlib.Path, dir_okay=False))
+@click.option("--port", type=click.IntRange(1, 65535), help="Explicit intended restored port.")
+@click.option("--acknowledge-raw-recovery", is_flag=True)
+@click.option("--acknowledge-incomplete-recovery", is_flag=True)
+@click.pass_obj
+def board_restore_plan(  # noqa: PLR0913 -- explicit Click options
+    context: CliContext,
+    source: pathlib.Path,
+    output: pathlib.Path,
+    port: int | None,
+    *,
+    acknowledge_raw_recovery: bool,
+    acknowledge_incomplete_recovery: bool,
+) -> None:
+    """Seal SOURCE for BOARD without writing the active board or attachments."""
+    from localswim import restore_plan  # noqa: PLC0415 -- offline command boundary
+    from localswim.restore_paths import (  # noqa: PLC0415 -- offline command boundary
+        CheckedPath,
+        PathBoundaryError,
+        check_role_paths,
+    )
+
+    source = source.absolute()
+    target = context.restore_target or context.board
+    output = output.absolute()
+    try:
+        with ExitStack() as stack:
+            roles = {
+                name: stack.enter_context(CheckedPath.capture(path, allow_missing=True))
+                for name, path in {
+                    "source": source,
+                    "target": target,
+                    "source attachments": source.parent / "attachments",
+                    "target attachments": target.parent / "attachments",
+                    "output": output,
+                }.items()
+            }
+            check_role_paths(**roles)
+            if roles["output"].exists:
+                raise PathBoundaryError("Plan output must be a new file")
+            parent = stack.enter_context(CheckedPath.capture(output.parent))
+            if parent.identity is None or not parent.identity.attributes & 0x10:
+                raise PathBoundaryError("Plan output parent must be an existing directory")
+            plan = restore_plan.create_plan(
+                source,
+                target,
+                port=port,
+                acknowledge_raw_recovery=acknowledge_raw_recovery,
+                acknowledge_incomplete_recovery=acknowledge_incomplete_recovery,
+            )
+            # Pin each observed leaf through output completion. Verification
+            # below detects any change between plan creation and these captures.
+            observed = [
+                stack.enter_context(
+                    CheckedPath.capture(pathlib.Path(cast("str", row["path"])), allow_missing=True)
+                )
+                for row in cast("list[board_state.JsonObject]", plan.core["observations"])
+            ]
+            restore_plan.verify_plan(plan.document, expect_plan=plan.plan_digest, target=target)
+            for proof in (*roles.values(), parent, *observed):
+                proof.revalidate()
+            _write_restore_plan(output, plan.document, restore_plan.MAX_PLAN_BYTES)
+    except (ValueError, OSError, board_state.BoardError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"Plan: {output}")
+    click.echo(f"Plan digest (--expect-plan): {plan.plan_digest}")
+    core = plan.core
+    summary = {
+        key: core[key]
+        for key in ("target", "expiresAt", "policyChanged", "actorsChanged", "port", "limitations")
+    }
+    for role in ("source", "current"):
+        observation = cast("board_state.JsonObject", core[role])
+        summary[role] = {key: observation[key] for key in ("status", "recovery")}
+    click.echo(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2))
 
 
 @board_commands.command("show")

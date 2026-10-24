@@ -1211,8 +1211,8 @@ A present `restoreReceipt` contains exactly `operationId`, `planDigest`,
 `sourceSnapshotDigest`, `priorRawDigest`, `timestamp` and `authority`. Operation ID
 is a canonical UUID, digests are lowercase SHA-256, prior raw digest may instead be
 `missing`, timestamp is offset-bearing RFC 3339 and authority is `local-maintenance`.
-Validation and detached serialization preserve the accepted receipt. This release
-does not yet implement restore plan/apply; those later children supply sealed data.
+Validation and detached serialization preserve the accepted receipt. The generation
+codec does not prepare or apply a restore; the separate plan module supplies sealed data.
 
 ### Client and browser intent
 
@@ -1302,3 +1302,57 @@ restore guarantee is inferred. Native alias tests and deterministic replacement
 probes qualify this local boundary. Preflight closes its handles before returning.
 Later creation/apply phases must acquire fresh proofs against the sealed observations
 and revalidate them at creation/reuse; admission is not permanent filesystem authority.
+
+## Sealed offline restore plans
+
+`restore_plan.create_plan(source, target, port=None,
+acknowledge_raw_recovery=False, acknowledge_incomplete_recovery=False)` creates a
+format-1 intention in memory. The module writes nothing. The thin
+`board restore plan SOURCE --output PATH` CLI adapter creates only one new plan
+artifact, with safe pinned parent/role checks, exclusive creation, flush and exact
+identity/byte readback. Existing files, snapshot roles and attachment namespaces
+cannot be output destinations. Ordinary CLI board resolution stays unchanged;
+restore checks also retain the original target spelling so resolution cannot hide
+an unsafe alias.
+
+The artifact is private recovery material containing the complete proposed snapshot.
+Its 96 MiB ceiling is separate from 64 MiB snapshot and existing byte-inventory caps.
+The CLI displays the expected plan digest, 30-minute expiry, policy/actor changes,
+port and source/current recovery limitations. Missing/corrupt current data requires
+raw-recovery acknowledgment; incomplete recovery requires its own acknowledgment.
+An unavailable intended port must be supplied explicitly.
+
+The digest domains are acyclic:
+
+1. Freeze the admitted candidate, UUIDs, event times, supported priority adoptions,
+   intended port, fresh generation and revision once. Preserve a known newer
+   `nextTicket`; use one more than the greatest valid current/candidate revision.
+2. Hash canonical UTF-8 body JSON excluding only `restoreReceipt`. Canonical data
+   uses sorted keys and compact separators, with no trailing LF, floats, NaN,
+   Infinity or user-text normalization.
+3. Include that prepared-body digest in the core, together with the canonical target,
+   source/current identity and raw digests, exact sorted byte manifest, observed
+   filesystem identities, policy/actors and explicit recovery acknowledgments.
+   Hash this core without envelope digests or final bytes.
+4. Embed the core digest in the final receipt. Seal the exact final snapshot bytes
+   including their LF, hash those bytes, and store both their digest and base64
+   payload in the envelope. The envelope contains exactly `core`, `planDigest`,
+   `finalSnapshotDigest` and `finalSnapshotBase64`.
+
+`verify_plan(document, expect_plan=..., target=...)` requires the reviewed core
+digest and target. It checks the body/core/receipt/final-byte domains, strict field
+types and admission, expiry and fresh path/byte observations. It returns the original
+sealed bytes without fresh UUIDs, adoption, timestamps or Board serialization.
+Canonical encoding is checked solely to enforce one exact final representation,
+including exactly one LF; current time is consulted only for expiry. Tampered envelopes cannot substitute
+another valid snapshot. Source/current snapshots and referenced bytes must still
+match their sealed observations; identity replacement or drift refuses.
+
+Each independent plan receives a distinct proposed generation. The artifact itself
+is never board state and grants no write permission. This is reviewed-byte integrity,
+not authentication: filesystem maintenance access remains the authority boundary.
+Local Windows path restrictions and retained-byte provenance limitations still apply.
+No apply/inspect route, checkpoint, byte staging, attachment copying, automatic
+shutdown, extraction, network fetch, target replacement or live rollout is provided.
+All code remains NONWATCHED through later synthetic acceptance and separate
+operational approval.

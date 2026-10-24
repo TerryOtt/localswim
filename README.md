@@ -10,11 +10,39 @@ require explicit stopped-board migration. The running shared installation remain
 on its previous package until separately approved coordinated rollout.
 See [the generation contract](docs/ORIENTATION.md#schema-5-and-write-protocol-2).
 
-The restore work currently adds a read-only candidate preflight library, not a
-restore command. It admits supplied schema-4/5 backups, inventories exact file
-references and reports recovery limits without copying bytes or replacing state.
-Its hardened filesystem boundary currently supports local Windows paths and
-refuses unsupported platforms or unsafe aliases. Plan/apply remain separate work.
+The restore preparation supports read-only candidate admission and sealed offline
+plans. A plan freezes the proposed snapshot and exact referenced-byte manifest;
+it does not replace a board or copy attachments. The filesystem boundary supports
+local Windows paths and refuses unsupported platforms or unsafe aliases. Apply,
+recovery checkpoints and live rollout remain separate work.
+
+### Prepare an offline restore plan
+
+Run this command from the isolated candidate package:
+
+~~~console
+uv run --frozen localswim-cli path/to/current.json board restore plan path/to/backup.json --output path/to/new-plan.json
+~~~
+
+The output must be a new file in an existing safe directory, separate from the
+source, target and attachment namespaces. Existing files are never overwritten.
+Only this plan artifact is written; the board, attachments and service state stay
+unchanged. Keep the artifact private: it contains the complete proposed snapshot.
+An interrupted or failed artifact write may leave its new file for inspection;
+the command never deletes or automatically retries it.
+
+The command prints the plan digest for a later `--expect-plan` check, expiry,
+policy/actor changes and recovery limitations. Missing or corrupt current state
+requires `--acknowledge-raw-recovery`; incomplete recovery requires
+`--acknowledge-incomplete-recovery`. Supply `--port` when the current snapshot
+does not provide a usable port. Plans expire after 30 minutes and are capped at
+96 MiB, in addition to the existing snapshot and attachment limits.
+
+`restore_plan.verify_plan(document, expect_plan=..., target=...)` checks the frozen
+digest domains, expiry, exact target and current source/target byte observations.
+It does not regenerate identities, times, adoption events or final snapshot bytes.
+The digest establishes reviewed-byte integrity, not authentication or permission
+to restore. No apply command or automatic service shutdown is provided here.
 
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among

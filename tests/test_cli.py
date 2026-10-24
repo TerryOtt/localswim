@@ -96,6 +96,8 @@ HELP_PATHS = [
     ("board", "init"),
     ("board", "migrate-generation"),
     ("board", "grant-permissions"),
+    ("board", "restore"),
+    ("board", "restore", "plan"),
     ("board", "set-project"),
     ("board", "show"),
     ("board", "shutdown"),

@@ -221,7 +221,7 @@ class CheckedPath:
 
     def read_bytes(self, max_bytes: int) -> bytes:
         """Read at most cap+1 bytes, refusing directories, growth and overflow."""
-        if isinstance(max_bytes, bool) or not 0 <= max_bytes <= 64 * 1024 * 1024:
+        if isinstance(max_bytes, bool) or not 0 <= max_bytes <= 96 * 1024 * 1024:
             raise PathBoundaryError("Invalid bounded read cap")
         self.revalidate()
         if not self.exists or self.identity is None or self.identity.attributes & 0x10:

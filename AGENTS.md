@@ -18,6 +18,8 @@ native board monitoring is an optional extra.
   active/retained attachment inventory; it does not plan or apply a restore.
 - `src/localswim/restore_paths.py` owns the fail-closed Windows local-filesystem
   identity/alias boundary used by restore preflight and later restore phases.
+- `src/localswim/restore_plan.py` owns bounded format-1 plan creation and strict
+  frozen-byte verification; it never applies a restore or writes a board.
 - `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
@@ -107,8 +109,22 @@ native board monitoring is an optional extra.
   or missing. Reject links/reparse aliases, nonregular/type changes and replacement
   races; revalidate at reads and before reuse. The current boundary supports local
   Windows paths only and refuses unsupported platforms/network/device namespaces.
-  Do not create checkpoints/staging, copy files, replace a snapshot, extract an
-  archive, compute a plan digest or expose an apply/restore command in this child.
+  Preflight itself must not create checkpoints/staging, copy files, replace a
+  snapshot, extract an archive or allocate plan identities.
+- Sealed restore plans bind the canonical target, exact source/current observations,
+  byte manifest and frozen final snapshot through separate acyclic body/core/receipt
+  digest domains. Freeze UUIDs, times and priority adoption once. Verification returns
+  original sealed bytes and must not serialize a fresh Board or regenerate content;
+  canonical encoding is checked only to enforce one exact final representation.
+  Current time is only for expiry.
+  Reject malformed/tampered/expired plans, wrong expected digests, target mismatch
+  and source/current drift. Keep the 30-minute expiry and 96 MiB plan limit.
+  Recovery acknowledgments and intended port must be explicit when required.
+  The CLI may create only a new bounded plan artifact using fresh safe path proofs;
+  preserve original target spelling for alias checks without changing ordinary CLI
+  board resolution. Never overwrite an artifact, write an active board, copy blobs,
+  create recovery checkpoints, apply a restore or shut down services in this phase.
+  Plan digests provide integrity, not authentication or operational approval.
 - Preserve the single-writer design, per-process bearer credential, `If-Match`
   revision checks, schema validation, monotonic revisions, flushed temporary writes,
   and atomic snapshot replacement. Acquire the board lifetime OS lease before constructing
