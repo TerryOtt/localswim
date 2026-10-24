@@ -10,11 +10,12 @@ require explicit stopped-board migration. The running shared installation remain
 on its previous package until separately approved coordinated rollout.
 See [the generation contract](docs/ORIENTATION.md#schema-5-and-write-protocol-2).
 
-The restore preparation supports read-only candidate admission and sealed offline
-plans. A plan freezes the proposed snapshot and exact referenced-byte manifest;
-it does not replace a board or copy attachments. The filesystem boundary supports
-local Windows paths and refuses unsupported platforms or unsafe aliases. Apply,
-recovery checkpoints and live rollout remain separate work.
+Restore preparation supports read-only candidate admission, sealed offline plans
+and internal checkpoint/staging under caller-held maintenance ownership. The plan
+command only writes its new artifact. Internal storage can prepare recovery files
+and append missing attachment bytes; it never replaces a board snapshot. The
+creation boundary supports local Windows NTFS and refuses unsupported paths or
+unsafe aliases. Public apply, commit and live rollout remain separate work.
 
 ### Prepare an offline restore plan
 
@@ -44,6 +45,27 @@ It does not regenerate identities, times, adoption events or final snapshot byte
 The digest establishes reviewed-byte integrity, not authentication or permission
 to restore. No apply command or automatic service shutdown is provided here.
 
+### Internal checkpoint and staging boundary
+
+`restore_storage.prepare_restore(document, expect_plan=..., target=..., staging=...,
+checkpoint=...)` is an internal API, not a restore command. Its caller must hold
+the existing launch gate, lifetime writer lease and transaction lock until the
+returned prepared handle is closed or a later commit finishes.
+
+- Fresh held proofs must match the sealed plan. Staging/checkpoint destinations
+  are new, separate directories with existing safe parents.
+- Recovery files preserve the current snapshot (or its missing marker), readable
+  referenced bytes, plan, proposed snapshot and truthful recovery manifest. Their
+  completion marker is flushed and verified before any target attachment copy.
+- Source and final bytes are staged privately. Missing immutable attachments may
+  be appended; identical destinations are reused and conflicting bytes refuse.
+- Failures preserve partial recovery, staging and orphan bytes for inspection.
+  Closing releases handles without deleting files or releasing caller leases.
+
+Available-space checks are estimates, not reservations. Individual files receive
+flush and exact readback checks; physical power-loss durability is not promised.
+No active board, service, gateway or monitor is changed by this development work.
+
 A small, local swimlane application for one human and one automation agent. Each board
 lives in one JSON snapshot. Open an individual board or a workspace that switches among
 boards with an Attention sidebar. It binds only to loopback and has no core runtime dependency
@@ -53,7 +75,7 @@ beyond Click, the mature command-line parser used for its nested CLI.
 
 Requirements:
 
-- [Python 3.15.0](https://www.python.org/downloads/release/python-3150/) and [uv](https://docs.astral.sh/uv/) 0.13.1, as pinned for development and CI
+- [Python 3.15.1](https://www.python.org/downloads/release/python-3151/) and [uv](https://docs.astral.sh/uv/) 0.13.5, as pinned for development and CI
 - A modern browser
 - Git only if you want build identifiers or opt-in automatic pushes
 
@@ -340,13 +362,26 @@ uv run --frozen localswim-cli boards/my-project.json card next 5 --lane needs_te
 uv run --frozen localswim-cli boards/my-project.json card next 10 --lane ready_for_work --lane needs_terry_action --json
 ~~~
 
-Every lane and focused query uses **descending blocking depth, ascending priority
-number, then ascending ticket number**. Blocking depth is the longest downstream chain
-of `blocks` relationships across the whole board: A blocks B blocks C gives depths
-A=2, B=1, C=0. A card with no downstream blockers has depth 0. Ticket number is the
-unique tie-breaker. Lane order only filters candidates; it never changes the ranking. Each result includes focused identity and status, its parent, child count,
-and directional relationships. Use `card show` when the full child list is useful. Detail
-and comments remain absent unless `--include-comments` is supplied explicitly.
+Every lane and focused query uses **ascending triage score**, then ascending priority
+number and ticket number for ties:
+
+```text
+triageScore = ((priority number + 1) * 100) - blockedCardCount
+```
+
+P0 with no blocked cards scores 100; P1 blocking five cards scores 195. Count each
+distinct unfinished downstream card once, across the whole board. Multiple paths
+do not multiply the count, and cycles never count the card itself. Completed cards
+stop the path and do not count; archived unfinished cards still participate.
+Only `blocks` relationships contribute. A score can be zero or negative; it is not
+clamped. Named priority scales use their existing policy rank in place of a P number.
+
+Existing priority inheritance remains direct and transitive: a P1 blocker promotes
+its P3 child to P1, and scoring uses that resulting priority. Lane/search/visibility
+filters and result limits do not change the global scores. Each result includes its
+score, blocked-card count, focused identity/status, parent, child count and directional
+relationships. Use `card show` for the full child list. Detail and comments remain
+absent unless `--include-comments` is supplied explicitly.
 
 Find an existing card by concept without exporting the whole board:
 
@@ -360,7 +395,7 @@ Search is case-insensitive. Stable IDs and subjects use substring matching; a nu
 or `#NNNN` query matches that exact ticket number. All lanes are searched unless a
 repeatable `--lane` option filters them. Default matching and output exclude details and comments;
 `--include-comments` explicitly adds both to the search surface and the results. Matches
-use the same embedded-policy blocking-depth, priority, and ticket ordering as `card next`.
+use the same embedded-policy triage-score, priority, and ticket ordering as `card next`.
 
 Card lookup checks exact stable IDs before ticket conversion, including IDs made entirely
 of digits. Search retains its numeric ticket-query behavior. Numeric references retain
@@ -990,11 +1025,9 @@ uv run --frozen python check.py
 ~~~
 
 The gate runs LF line-ending validation, Ruff `ALL`, Ruff formatting, strict Pyright,
-pytest, actionlint with ShellCheck, and the project's US English vocabulary check. The
-vocabulary table comes from the public FlickrGroupAddr/backend-api repository; pass its
-path with **--word-table path/to/claude-dirty-words.py** if it is not in a neighboring
-checkout. actionlint 1.7.12 and ShellCheck 0.11.0 must be on `PATH`; installation details
-are in [docs/TOOLING.md](docs/TOOLING.md). Sidebar ordering regression tests execute
+pytest, and actionlint with ShellCheck. Every stage is mandatory, and no external
+repository is required. actionlint 1.7.12 and ShellCheck 0.11.0 must be on `PATH`;
+installation details are in [docs/TOOLING.md](docs/TOOLING.md). Sidebar ordering tests execute
 the production JavaScript helpers with Node.js when it is available on `PATH`; those
 tests skip when Node.js is absent. Node.js is optional test tooling, not a runtime
 dependency.

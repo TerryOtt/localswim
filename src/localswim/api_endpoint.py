@@ -5182,8 +5182,8 @@ def payload() -> bytes:
     drift = board.verify()
     # Retain archived cards for relationship lookups and existing open drawers.
     # Only active cards contribute to lane rendering, counts, and search matches.
-    lanes = board.lanes(include_archived=True)
-    depths = board_state.blocking_order(board).depths
+    order = board_state.blocking_order(board)
+    lanes = board.lanes(include_archived=True, order=order)
     policy = board.policy
     browser_edges = policy.edges_for(board.browser_user)
 
@@ -5222,7 +5222,7 @@ def payload() -> bytes:
             **(STORE.write_metadata(board) if STORE is not None else {}),
             "attachmentMaxBytes": attachments.MAX_BYTES,
             "project": board.project,
-            "order": ["blockingDepthDesc", "priority", "ticket"],
+            "order": list(board_state.TRIAGE_ORDER_FIELDS),
             "lanes": [
                 {
                     "state": lane.state,
@@ -5245,7 +5245,9 @@ def payload() -> bytes:
                             "laneLabel": lane.label,
                             "subject": item.subject,
                             "priority": item.priority,
-                            "blockingDepth": depths[item.id],
+                            "blockingDepth": order.depths[item.id],
+                            "blockedCardCount": order.blocked_counts[item.id],
+                            "triageScore": order.triage_scores[item.id],
                             "attachments": [
                                 {**file.to_json(), "url": attachment_url(item.id, file.id)}
                                 for file in item.attachments

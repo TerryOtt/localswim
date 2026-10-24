@@ -214,3 +214,368 @@ def test_capture_failure_closes_ancestors(
         CheckedPath.capture(source)
     source.write_bytes(b"released")
     tmp_path.rename(tmp_path.with_name(tmp_path.name + "_released"))
+
+
+def test_creation_session_owned_nested_sibling_transitions(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"source")
+    with restore_paths.CreationSession() as session:
+        original = session.capture(source, directory=False)
+        stage = session.capture(tmp_path / "stage", allow_missing=True, directory=True)
+        checkpoint = session.capture(tmp_path / "checkpoint", allow_missing=True, directory=True)
+        check_role_paths(source=original, staging=stage, checkpoint=checkpoint)
+        session.create_dir(stage.path)
+        assert stage.exists
+        assert stage.identity is not None
+        session.create_dir(checkpoint.path)
+        nested = session.ensure_dir(stage.path / "attachments" / "card")
+        created = session.create_file(nested.path / "bytes", b"candidate")
+        assert created.read_bytes(9) == b"candidate"
+        assert original.read_bytes(6) == b"source"
+        session.create_file(checkpoint.path / "complete", b"")
+        session.revalidate()
+    assert source.read_bytes() == b"source"
+
+
+def test_native_created_file_and_directory_stay_pinned(tmp_path: Path) -> None:
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path, directory=True)
+        directory = session.create_dir(tmp_path / "owned")
+        file = session.create_file(directory.path / "bytes", b"owned")
+        with pytest.raises(PermissionError):
+            file.path.rename(directory.path / "moved")
+        with pytest.raises(PermissionError):
+            file.path.write_bytes(b"external")
+        with pytest.raises(PermissionError):
+            directory.path.rename(tmp_path / "moved")
+        assert file.read_bytes(5) == b"owned"
+    file.path.write_bytes(b"released")
+    directory.path.rename(tmp_path / "released")
+    with pytest.raises(PathBoundaryError, match="closed"):
+        file.revalidate()
+
+
+def test_created_ownership_never_reopens_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path, directory=True)
+        original_open = session._native.open  # noqa: SLF001
+        created = tmp_path / "owned"
+
+        def forbid_reopen(path: Path) -> int:
+            assert path != created
+            return original_open(path)
+
+        monkeypatch.setattr(session._native, "open", forbid_reopen)  # noqa: SLF001
+        proof = session.create_file(created, b"same handle")
+        assert proof.read_bytes(11) == b"same handle"
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_exclusive_creation_preserves_unregistered_existing_destination(
+    tmp_path: Path,
+    *,
+    directory: bool,
+) -> None:
+    existing = tmp_path / "existing"
+    if directory:
+        existing.mkdir()
+    else:
+        existing.write_bytes(b"existing")
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path, directory=True)
+        if directory:
+            with pytest.raises(PathBoundaryError, match="Exclusive"):
+                session.create_dir(existing)
+        else:
+            with pytest.raises(PathBoundaryError, match="Exclusive"):
+                session.create_file(existing, b"replacement")
+    assert existing.is_dir() if directory else existing.read_bytes() == b"existing"
+
+
+def test_session_refuses_unknown_missing_adoption(tmp_path: Path) -> None:
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path / "unknown", allow_missing=True)
+        (tmp_path / "unknown").mkdir()
+        with pytest.raises(PathBoundaryError, match=r"identity|Unowned"):
+            session.create_dir(tmp_path / "other")
+    assert not (tmp_path / "other").exists()
+
+
+def test_owned_creation_refuses_unrelated_ancestor_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with restore_paths.CreationSession() as session:
+        session.ensure_dir(tmp_path / "private")
+        native = session._native  # noqa: SLF001
+        original_information = native.information
+        ancestor = session._nodes[session._key(tmp_path)].handle  # noqa: SLF001
+        original_create = native.create_child
+        created = False
+
+        def create(parent: int, name: str, *, directory: bool) -> int:
+            nonlocal created
+            handle = original_create(parent, name, directory=directory)
+            created = True
+            return handle
+
+        def changed(handle: int) -> PathIdentity:
+            info = original_information(handle)
+            return (
+                replace(info, modified=info.modified + 1)
+                if created and handle == ancestor
+                else info
+            )
+
+        monkeypatch.setattr(native, "create_child", create)
+        monkeypatch.setattr(native, "information", changed)
+        with pytest.raises(PathBoundaryError, match="identity"):
+            session.create_file(tmp_path / "private" / "partial", b"never written")
+    assert (tmp_path / "private" / "partial").read_bytes() == b""
+
+
+@pytest.mark.parametrize("phase", ["write", "flush", "readback", "interrupt"])
+def test_owned_io_failure_closes_without_deleting_partial_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    session = restore_paths.CreationSession()
+    session.capture(tmp_path, directory=True)
+    native = session._native  # noqa: SLF001
+
+    def write_failed(handle: int, data: bytes) -> None:
+        original_write(handle, data)
+        if phase == "interrupt":
+            raise KeyboardInterrupt("injected cancellation")
+        raise PathBoundaryError("injected write failure")
+
+    def flush_failed(_handle: int) -> None:
+        raise PathBoundaryError("injected flush failure")
+
+    def read_failed(_handle: int, _limit: int) -> bytes:
+        return b"wrong"
+
+    original_write = native.write_chunk
+    if phase in {"write", "interrupt"}:
+        monkeypatch.setattr(native, "write_chunk", write_failed)
+    elif phase == "flush":
+        monkeypatch.setattr(native, "flush", flush_failed)
+    else:
+        monkeypatch.setattr(native, "read_chunk", read_failed)
+    try:
+        with pytest.raises((PathBoundaryError, KeyboardInterrupt)):
+            session.create_file(tmp_path / "partial", b"preserved")
+        with pytest.raises(PathBoundaryError, match="failed"):
+            session.revalidate()
+    finally:
+        session.close()
+    assert (tmp_path / "partial").read_bytes() == b"preserved"
+    (tmp_path / "partial").rename(tmp_path / "orphan")
+
+
+def test_streaming_copy_is_bounded_and_same_handle_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = b"chunked" * 20000
+    source = tmp_path / "source"
+    source.write_bytes(data)
+    with restore_paths.CreationSession() as session:
+        proof = session.capture(source, directory=False)
+        original = session._native.read_chunk  # noqa: SLF001
+        limits: list[int] = []
+
+        def bounded(handle: int, limit: int) -> bytes:
+            limits.append(limit)
+            return original(handle, limit)
+
+        monkeypatch.setattr(session._native, "read_chunk", bounded)  # noqa: SLF001
+        copied = session.copy_file(
+            proof,
+            tmp_path / "copy",
+            max_bytes=4 * 1024 * 1024 * 1024,
+            expected_size=len(data),
+            expected_sha256=hashlib.sha256(data).hexdigest(),
+        )
+        assert copied.read_bytes(len(data)) == data
+        assert limits
+        assert max(limits) <= 65536
+
+
+def test_session_directory_role_and_foreign_proof_refusal(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"source")
+    with restore_paths.CreationSession() as session, pytest.raises(PathBoundaryError, match="type"):
+        session.capture(source, directory=True)
+    with (
+        restore_paths.CreationSession() as session,
+        CheckedPath.capture(source) as foreign,
+        pytest.raises(PathBoundaryError, match="this session"),
+    ):
+        session.read(foreign, 6)
+
+
+def test_session_hardlinks_and_junctions_refuse(tmp_path: Path) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    file = target / "bytes"
+    file.write_bytes(b"bytes")
+    os.link(file, target / "hardlink")
+    with (
+        restore_paths.CreationSession() as session,
+        pytest.raises(PathBoundaryError, match="linked"),
+    ):
+        session.capture(file)
+    junction = tmp_path / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    try:
+        with (
+            restore_paths.CreationSession() as session,
+            pytest.raises(
+                PathBoundaryError,
+                match="Reparse",
+            ),
+        ):
+            session.capture(junction)
+    finally:
+        junction.rmdir()
+
+
+def test_session_unsupported_platform_refuses_before_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected() -> None:
+        pytest.fail("Unsupported platform initialized native creation")
+
+    monkeypatch.setattr(restore_paths.os, "name", "posix")
+    monkeypatch.setattr(restore_paths, "_CreatingWindows", unexpected)
+    with pytest.raises(PathBoundaryError, match="requires Windows"):
+        restore_paths.CreationSession()
+
+
+def test_failed_view_context_never_closes_session_handles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path, directory=True)
+        proof = session.create_file(tmp_path / "owned", b"owned")
+
+        def cancelled() -> None:
+            raise KeyboardInterrupt("view cancelled")
+
+        monkeypatch.setattr(proof, "revalidate", cancelled)
+        with pytest.raises(KeyboardInterrupt, match="view cancelled"):
+            proof.__enter__()
+        session.revalidate()
+        with pytest.raises(PermissionError):
+            proof.path.rename(tmp_path / "replacement")
+        assert session.capture(proof.path).read_bytes(5) == b"owned"
+
+
+def test_native_create_cancellation_closes_returned_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path, directory=True)
+        native = session._native  # noqa: SLF001
+        original = native.ntdll.NtCreateFile
+
+        def cancelled(*arguments: object) -> int:
+            original(*arguments)
+            raise KeyboardInterrupt("native cancelled")
+
+        monkeypatch.setattr(native.ntdll, "NtCreateFile", cancelled)
+        with pytest.raises(KeyboardInterrupt, match="native cancelled"):
+            session.create_dir(tmp_path / "orphan")
+    (tmp_path / "orphan").rename(tmp_path / "released")
+
+
+def test_native_short_write_refuses_and_preserves_created_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path, directory=True)
+
+        def short_write(
+            _handle: int,
+            _buffer: object,
+            _length: int,
+            count: object,
+            _overlapped: object,
+        ) -> int:
+            ctypes.cast(count, ctypes.POINTER(ctypes.c_ulong)).contents.value = 0  # pyright: ignore[reportArgumentType]
+            return 1
+
+        monkeypatch.setattr(session._native.dll, "WriteFile", short_write)  # noqa: SLF001
+        with pytest.raises(PathBoundaryError, match="short"):
+            session.create_file(tmp_path / "partial", b"expected")
+    assert (tmp_path / "partial").read_bytes() == b""
+
+
+def test_owned_parent_identity_change_refuses_without_adoption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with restore_paths.CreationSession() as session:
+        session.capture(tmp_path, directory=True)
+        native = session._native  # noqa: SLF001
+        parent_handle = session._nodes[session._key(tmp_path)].handle  # noqa: SLF001
+        original_information = native.information
+        original_create = native.create_child
+        created = False
+
+        def create(parent: int, name: str, *, directory: bool) -> int:
+            nonlocal created
+            handle = original_create(parent, name, directory=directory)
+            created = True
+            return handle
+
+        def changed(handle: int) -> PathIdentity:
+            info = original_information(handle)
+            return (
+                replace(info, index=info.index + 1) if created and handle == parent_handle else info
+            )
+
+        monkeypatch.setattr(native, "create_child", create)
+        monkeypatch.setattr(native, "information", changed)
+        with pytest.raises(PathBoundaryError, match="identity"):
+            session.create_dir(tmp_path / "orphan")
+    (tmp_path / "orphan").rename(tmp_path / "released")
+
+
+def test_session_refuses_post_read_source_stamp_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"original")
+    with restore_paths.CreationSession() as session:
+        proof = session.capture(source, directory=False)
+        handle = proof._handles[-1][1]  # noqa: SLF001
+        original = session._native.information  # noqa: SLF001
+        checks = 0
+
+        def changed(candidate: int) -> PathIdentity:
+            nonlocal checks
+            info = original(candidate)
+            if candidate == handle:
+                checks += 1
+                if checks > 1:
+                    return replace(info, modified=info.modified + 1)
+            return info
+
+        monkeypatch.setattr(session._native, "information", changed)  # noqa: SLF001
+        with pytest.raises(PathBoundaryError, match="identity"):
+            proof.read_bytes(8)

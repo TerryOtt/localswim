@@ -178,23 +178,62 @@ def test_default_queries_hide_archives_before_applying_limits(board: board_state
     assert board_state.newest_comments(board, 1, include_archived=True)[0].item_id == "hidden"
 
 
+@pytest.mark.parametrize(
+    ("raw_at", "public_at", "unarchived_at"),
+    [
+        ("2026-01-01T12:00:00Z", "2026-01-01T12:00:00Z", "2026-01-01T12:00:01Z"),
+        ("2026-01-01T12:00:00+00:00", "2026-01-01T12:00:00Z", "2026-01-01T12:00:01Z"),
+        (
+            "2026-01-01T08:00:00-04:00",
+            "2026-01-01T08:00:00-04:00",
+            "2026-01-01T08:00:01-04:00",
+        ),
+    ],
+    ids=["utc-z", "utc-numeric-offset", "non-utc-offset"],
+)
 def test_archive_activity_includes_hidden_cards_at_inclusive_bounds(
     board: board_state.Board,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_at: str,
+    public_at: str,
+    unarchived_at: str,
 ) -> None:
+    monkeypatch.setattr(board_state, "now", lambda: "2026-01-01T00:00:00Z")
     board.create("focus", "Private subject", "backlog", "bot")
+    monkeypatch.setattr(board_state, "now", lambda: raw_at)
     board.set_archived("focus", archived=True, by="bot")
-    stamp = dt.datetime.fromisoformat(board.archive_history[0].at)
+    assert board.archive_history[0].at == raw_at
+    stamp = dt.datetime.fromisoformat(raw_at)
+    assert stamp == dt.datetime(2026, 1, 1, 12, tzinfo=dt.UTC)
     events = board_state.activity_events(board, stamp, stamp)
     assert [event.kind for event in events] == ["archived"]
+    assert events[0].at == raw_at
+    assert events[0].instant == stamp
     assert events[0].to_json() == {
         "ticket": 1,
         "id": "focus",
         "kind": "archived",
-        "at": stamp.isoformat(),
+        "at": public_at,
         "by": "bot",
     }
+    later = stamp + dt.timedelta(seconds=1)
+    monkeypatch.setattr(board_state, "now", later.isoformat)
     board.set_archived("focus", archived=False, by="terry")
-    assert [event.kind for event in board_state.activity_events(board, stamp, None)] == [
+    assert board.archive_history[0].at == raw_at
+    assert board.archive_history[1].at == later.isoformat()
+    later_events = board_state.activity_events(board, stamp, None)
+    assert [event.kind for event in later_events] == [
         "archived",
         "unarchived",
+    ]
+    assert [event.instant for event in later_events] == [stamp, later]
+    assert [event.to_json() for event in later_events] == [
+        {"ticket": 1, "id": "focus", "kind": "archived", "at": public_at, "by": "bot"},
+        {
+            "ticket": 1,
+            "id": "focus",
+            "kind": "unarchived",
+            "at": unarchived_at,
+            "by": "terry",
+        },
     ]

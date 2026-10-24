@@ -765,16 +765,20 @@ def test_next_json_uses_shared_total_order_and_returns_focused_details(
     assert report["lanes"] == ["ready_for_work", "backlog"]
     assert report["limit"] == 3
     assert report["order"] == [
-        "blockingDepthDesc",
+        "triageScoreAsc",
         "priority",
         "ticket",
     ]
     items = cast("list[dict[str, Any]]", report["items"])
-    assert [item["id"] for item in items] == ["blocker", "focus", "parent"]
-    assert items[1]["commentCount"] == 1
-    assert items[1]["childCount"] == 1
+    assert [item["id"] for item in items] == ["focus", "blocker", "parent"]
+    assert items[0]["blockedCardCount"] == 0
+    assert items[0]["triageScore"] == 200
+    assert items[1]["blockedCardCount"] == 1
+    assert items[1]["triageScore"] == 299
+    assert items[0]["commentCount"] == 1
+    assert items[0]["childCount"] == 1
     assert "children" not in items[0]
-    assert cast("list[dict[str, Any]]", items[1]["relationships"])[0]["kind"] == "blocked_by"
+    assert cast("list[dict[str, Any]]", items[0]["relationships"])[0]["kind"] == "blocked_by"
     assert "detail" not in items[0]
     assert "comments" not in items[0]
     assert "Private focused detail" not in result.stdout
@@ -810,8 +814,10 @@ def test_next_human_output_exposes_details_and_comments_when_requested(
     )
 
     assert safe.returncode == 0, safe.stderr
-    assert "blocking depth, then priority, then ticket" in safe.stdout
-    assert safe.stdout.index("#0004 blocker") < safe.stdout.index("#0002 focus")
+    assert "triage score, then priority, then ticket" in safe.stdout
+    assert "triage score: 299" in safe.stdout
+    assert "blocked cards: 1" in safe.stdout
+    assert safe.stdout.index("#0002 focus") < safe.stdout.index("#0004 blocker")
     assert "#0002 focus" in safe.stdout
     assert "children: 1" in safe.stdout
     assert "blocked_by: #0004 blocker" in safe.stdout
@@ -902,9 +908,11 @@ def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
     assert report["query"] == "SUBJECT"
     assert report["lanes"] == ["ready_for_work", "backlog"]
     assert report["searchedFields"] == ["id", "ticket", "subject"]
-    assert report["order"] == ["blockingDepthDesc", "priority", "ticket"]
+    assert report["order"] == ["triageScoreAsc", "priority", "ticket"]
     items = cast("list[dict[str, Any]]", report["items"])
-    assert [item["id"] for item in items] == ["blocker", "focus", "parent", "child"]
+    assert [item["id"] for item in items] == ["focus", "blocker", "parent", "child"]
+    assert items[1]["blockedCardCount"] == 1
+    assert items[1]["triageScore"] == 299
     assert all("detail" not in item for item in items)
     assert all("comments" not in item for item in items)
 

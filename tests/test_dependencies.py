@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     import pathlib
 
 
-def test_critical_depth_precedes_priority_and_ticket(board: board_state.Board) -> None:
+def test_triage_score_replaces_depth_before_priority_and_ticket(board: board_state.Board) -> None:
     for name, priority in [("isolated", "P0"), ("leaf", "P2"), ("middle", "P5"), ("root", "P5")]:
         board.create(name, name, "backlog", "bot", priority=priority)
     board.link("middle", "blocks", "leaf", "bot")
@@ -24,7 +24,7 @@ def test_critical_depth_precedes_priority_and_ticket(board: board_state.Board) -
         "middle": 1,
         "root": 2,
     }
-    assert [item.id for item in board.lanes()[0].items] == ["root", "middle", "isolated", "leaf"]
+    assert [item.id for item in board.lanes()[0].items] == ["isolated", "leaf", "root", "middle"]
     assert board.find("root").priority == "P5"
     assert board.find("middle").priority == "P5"
     assert board.find("leaf").priority == "P2"
@@ -32,7 +32,9 @@ def test_critical_depth_precedes_priority_and_ticket(board: board_state.Board) -
     assert board_state.total_order_problems(board) == []
 
 
-def test_branch_depth_uses_longest_path_not_number_of_children(board: board_state.Board) -> None:
+def test_count_orders_wide_before_long_while_depth_retains_longest_path(
+    board: board_state.Board,
+) -> None:
     for name in ["wide", "w1", "w2", "w3", "long", "middle", "leaf"]:
         board.create(name, name, "backlog", "bot", priority="P3")
     for child in ["w1", "w2", "w3"]:
@@ -41,7 +43,9 @@ def test_branch_depth_uses_longest_path_not_number_of_children(board: board_stat
     board.link("middle", "blocks", "leaf", "bot")
     assert board_state.blocking_order(board).depths["wide"] == 1
     assert board_state.blocking_order(board).depths["long"] == 2
-    assert board.lanes()[0].items[0].id == "long"
+    assert board_state.blocking_order(board).blocked_counts["wide"] == 3
+    assert board_state.blocking_order(board).blocked_counts["long"] == 2
+    assert board.lanes()[0].items[0].id == "wide"
 
 
 def test_paths_cross_lanes_and_include_archived_cards(board: board_state.Board) -> None:
@@ -163,7 +167,13 @@ def test_cycles_share_depth_and_priority_without_hanging(board: board_state.Boar
     board.link("b", "blocks", "leaf", "bot")
     board.link("root", "blocks", "a", "bot")
     assert board_state.blocking_order(board).depths == {"a": 1, "b": 1, "leaf": 0, "root": 2}
-    assert [item.id for item in board.lanes()[0].items] == ["root", "a", "b", "leaf"]
+    assert board_state.blocking_order(board).blocked_counts == {
+        "a": 2,
+        "b": 2,
+        "leaf": 0,
+        "root": 3,
+    }
+    assert [item.id for item in board.lanes()[0].items] == ["leaf", "a", "b", "root"]
     assert [board.find(name).priority for name in ("root", "a", "b", "leaf")] == [
         "P4",
         "P2",
@@ -276,7 +286,7 @@ def test_completed_lane_uses_same_order(board: board_state.Board) -> None:
         board.move(name, "completed", "terry")
     board.link("blocker", "blocks", "leaf", "bot")
     completed = next(lane for lane in board.lanes() if lane.state == "completed")
-    assert [item.id for item in completed.items] == ["blocker", "isolated", "leaf"]
+    assert [item.id for item in completed.items] == ["isolated", "leaf", "blocker"]
 
 
 def test_replaced_snapshot_is_reconciled_once(

@@ -1,14 +1,21 @@
 """Repository gate behavior."""
 
-import os
 import subprocess
 import sys
-from types import ModuleType
 lazy import pathlib
 
 import pytest
 
 import check
+
+STAGES = (
+    ("run_line_endings", "line-endings"),
+    ("run_ruff", "ruff"),
+    ("run_format", "ruff-format"),
+    ("run_pyright", "pyright"),
+    ("run_tests", "pytest"),
+    ("run_workflows", "actionlint/shellcheck"),
+)
 
 
 def test_non_lf_tracked_finds_only_text_with_crlf_or_mixed_endings() -> None:
@@ -22,113 +29,73 @@ def test_non_lf_tracked_finds_only_text_with_crlf_or_mixed_endings() -> None:
     assert check.non_lf_tracked(report) == ["windows.py", "mixed.json"]
 
 
-def _stub_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (
-        "run_line_endings",
-        "run_ruff",
-        "run_format",
-        "run_pyright",
-        "run_tests",
-        "run_workflows",
-    ):
-        monkeypatch.setattr(check, name, lambda: True)
+def _stub_stages(monkeypatch: pytest.MonkeyPatch, failures: tuple[str, ...]) -> list[str]:
+    visited: list[str] = []
+
+    def stage(name: str) -> bool:
+        visited.append(name)
+        return name not in failures
+
+    for name, _label in STAGES:
+        monkeypatch.setattr(check, name, lambda name=name: stage(name))
+    monkeypatch.setattr(sys, "argv", ["check.py"])
+    return visited
 
 
-def _stub_other_stages(monkeypatch: pytest.MonkeyPatch, source: pathlib.Path) -> None:
-    def tracked(_suffixes: tuple[str, ...]) -> list[pathlib.Path]:
-        return [source]
-
-    _stub_toolchain(monkeypatch)
-    monkeypatch.setattr(check, "tracked", tracked)
-    monkeypatch.setattr(check, "ROOT", source.parent)
-
-
-def _stub_detector(monkeypatch: pytest.MonkeyPatch, detector: ModuleType) -> None:
-    def load_table(_path: pathlib.Path) -> ModuleType:
-        return detector
-
-    monkeypatch.setattr(check, "load_table", load_table)
-
-
-def test_gate_refuses_explicit_missing_word_table(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    source = tmp_path / "clean.txt"
-    source.write_text("clean input", encoding="utf-8")
-    _stub_other_stages(monkeypatch, source)
-    fallback = tmp_path / "available-table.py"
-    fallback.write_text("", encoding="utf-8")
-    monkeypatch.setenv(check.TABLE_ENV, str(fallback))
-    monkeypatch.setattr(check, "TABLE_GUESSES", (fallback,))
-    missing = tmp_path / "missing-table.py"
-    monkeypatch.setattr(sys, "argv", ["check.py", "--word-table", str(missing)])
-
-    assert check.main() == 1
-    output = capsys.readouterr().out
-    assert "DIRTY-WORDS CHECK DID NOT RUN" in output
-    assert f"Tried, and it is not a file: {missing}" in output
-    assert "GATE FAILED: dirty-words (no word table)" in output
-
-
-@pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
-def test_gate_recognizing_detector_accepts_clean_and_rejects_dirty(
+@pytest.mark.parametrize("table_env", [None, "missing-table.py"])
+def test_gate_needs_no_external_repository_or_environment(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    *,
-    dirty: bool,
+    table_env: str | None,
 ) -> None:
-    source = tmp_path / "sample.txt"
-    marker = "synthetic-vocabulary-marker"
-    source.write_text(marker if dirty else "clean input", encoding="utf-8")
-    _stub_other_stages(monkeypatch, source)
-    table = tmp_path / "table.py"
-    table.write_text("", encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", ["check.py", "--word-table", str(table)])
-    detector = ModuleType("synthetic_detector")
-    examined: list[str] = []
-
-    def hits_in(text: str) -> list[tuple[int, str, str]]:
-        examined.append(text)
-        return [(1, marker, "clean input")] if text in {check.CONTROL, marker} else []
-
-    monkeypatch.setattr(detector, "hits_in", hits_in, raising=False)
-    _stub_detector(monkeypatch, detector)
-
-    assert check.main() == int(dirty)
-    assert examined == [check.CONTROL, source.read_text(encoding="utf-8")]
-    output = capsys.readouterr().out
-    if dirty:
-        assert "FAIL  sample.txt" in output
-        assert "GATE FAILED: dirty-words" in output
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    if table_env is None:
+        monkeypatch.delenv("CLAUDE_WORD_TABLE", raising=False)
     else:
-        assert "Gate clean." in output
+        monkeypatch.setenv("CLAUDE_WORD_TABLE", str(tmp_path / table_env))
+    visited = _stub_stages(monkeypatch, ())
+
+    assert check.main() == 0
+    assert visited == [name for name, _label in STAGES]
+    assert "Gate clean." in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_gate_refuses_inert_detector_before_trusting_clean_input(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "failures",
+    [*((name,) for name, _label in STAGES), tuple(name for name, _label in STAGES)],
+    ids=[*(label for _name, label in STAGES), "all-fail"],
+)
+def test_gate_reports_failures_and_runs_every_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failures: tuple[str, ...],
 ) -> None:
-    source = tmp_path / "clean.txt"
-    source.write_text("clean input", encoding="utf-8")
-    _stub_other_stages(monkeypatch, source)
-    table = tmp_path / "inert-table.py"
-    table.write_text("", encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", ["check.py", "--word-table", str(table)])
-    detector = ModuleType("inert_detector")
-    examined: list[str] = []
-
-    def hits_in(text: str) -> list[tuple[int, str, str]]:
-        examined.append(text)
-        return []
-
-    monkeypatch.setattr(detector, "hits_in", hits_in, raising=False)
-    _stub_detector(monkeypatch, detector)
+    visited = _stub_stages(monkeypatch, failures)
 
     assert check.main() == 1
-    assert examined == [check.CONTROL]
-    output = capsys.readouterr().out
-    assert "the detector found nothing in the poisoned control line" in output
-    assert "GATE FAILED: dirty-words" in output
+    assert visited == [name for name, _label in STAGES]
+    expected = ", ".join(label for name, label in STAGES if name in failures)
+    assert f"GATE FAILED: {expected}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("option", ["--word-table", "--unknown"])
+def test_gate_rejects_unsupported_options_before_running_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+) -> None:
+    visited = _stub_stages(monkeypatch, ())
+    monkeypatch.setattr(sys, "argv", ["check.py", option])
+
+    with pytest.raises(SystemExit) as error:
+        check.main()
+
+    assert error.value.code == 2
+    assert visited == []
+    assert f"unrecognized arguments: {option}" in capsys.readouterr().err
 
 
 def _git(repo: pathlib.Path, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -140,91 +107,68 @@ def _git(repo: pathlib.Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-def _init_repo(repo: pathlib.Path) -> None:
-    _git(repo, "init")
-    _git(repo, "config", "core.quotePath", "true")
-
-
-def test_tracked_preserves_unicode_and_spaces_and_filters_inventory(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _init_repo(tmp_path)
-    included = ["clean.md", "words with spaces.py", "日本語/café.md"]
-    for name in [*included, "excluded.txt", "absent.md"]:
-        path = tmp_path / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("clean input", encoding="utf-8")
-        _git(tmp_path, "add", "--", name)
-    (tmp_path / "absent.md").unlink()
-    (tmp_path / "untracked.md").write_text("scratch input", encoding="utf-8")
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-
-    assert set(check.tracked((".py", ".md"))) == {tmp_path / name for name in included}
-
-
-@pytest.mark.skipif(os.name == "nt", reason="Windows filenames cannot contain tab or newline")
-@pytest.mark.parametrize("name", ["tab\tname.md", "line\nname.md", "byte-\udcff.md"])
-def test_tracked_preserves_supported_non_windows_pathnames(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, name: str
-) -> None:
-    _init_repo(tmp_path)
-    path = tmp_path / name
-    path.write_text("clean input", encoding="utf-8")
-    _git(tmp_path, "add", "--", name)
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-
-    assert check.tracked((".md",)) == [path]
-
-
-def test_vocabulary_stage_rejects_dirty_unicode_working_tree_prose(
+def test_line_endings_checks_tracked_working_tree_text(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _init_repo(tmp_path)
-    clean = tmp_path / "clean.md"
-    dirty = tmp_path / "café prose.md"
-    marker = "synthetic-vocabulary-marker"
-    clean.write_text("clean input", encoding="utf-8")
-    dirty.write_text("clean input", encoding="utf-8")
-    _git(tmp_path, "add", "--", clean.name, dirty.name)
-    dirty.write_text(marker, encoding="utf-8")
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "core.quotePath", "false")
+    _git(tmp_path, "config", "core.autocrlf", "false")
+    (tmp_path / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    tracked = tmp_path / "café prose.md"
+    tracked.write_bytes(b"clean\ninput\n")
+    binary = tmp_path / "binary.dat"
+    binary.write_bytes(b"\x00\r\n")
+    _git(tmp_path, "add", "--", ".gitattributes", tracked.name, binary.name)
     monkeypatch.setattr(check, "ROOT", tmp_path)
-    detector = ModuleType("synthetic_detector")
-    examined: list[str] = []
 
-    def hits_in(text: str) -> list[tuple[int, str, str]]:
-        examined.append(text)
-        return [(1, marker, "clean input")] if text in {check.CONTROL, marker} else []
+    assert check.run_line_endings()
+    tracked.write_bytes(b"changed\r\ninput\r\n")
+    (tmp_path / "untracked.txt").write_bytes(b"scratch\r\n")
 
-    monkeypatch.setattr(detector, "hits_in", hits_in, raising=False)
-    _stub_detector(monkeypatch, detector)
-    files = check.tracked((".md",))
-
-    assert set(files) == {clean, dirty}
-    assert not check.run_words(tmp_path / "table.py", files)
-    assert examined[0] == check.CONTROL
-    assert sorted(examined[1:]) == sorted(["clean input", marker])
-    assert f"FAIL  {dirty.name}" in capsys.readouterr().out
+    assert not check.run_line_endings()
+    output = capsys.readouterr().out
+    assert f"FAIL  {tracked.name}: tracked text must use LF" in output
+    assert "binary.dat: tracked text must use LF" not in output
+    assert "untracked.txt" not in output
 
 
-@pytest.mark.parametrize(
-    "git_available", [False, True], ids=["failed-inventory", "empty-inventory"]
-)
-def test_gate_visibly_refuses_failed_or_empty_inventory(
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    *,
-    git_available: bool,
+def test_line_endings_refuses_failed_git_inventory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    if git_available:
-        _init_repo(tmp_path)
-    table = tmp_path / "table.py"
-    table.write_text("", encoding="utf-8")
     monkeypatch.setattr(check, "ROOT", tmp_path)
-    monkeypatch.setattr(sys, "argv", ["check.py", "--word-table", str(table)])
-    _stub_toolchain(monkeypatch)
+
+    assert not check.run_line_endings()
+    assert "FAIL -- git ls-files --eol did not run" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("missing", ["actionlint", "shellcheck", "both"])
+def test_missing_workflow_tools_fail_the_gate_without_skipping_other_stages(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing: str
+) -> None:
+    run_workflows = check.run_workflows
+    visited = _stub_stages(monkeypatch, ())
+    monkeypatch.setattr(check, "run_workflows", run_workflows)
+
+    def which(name: str) -> str | None:
+        return None if missing in {name, "both"} else name
+
+    monkeypatch.setattr(check.shutil, "which", which)
 
     assert check.main() == 1
+    assert visited == [name for name, _label in STAGES[:-1]]
     output = capsys.readouterr().out
-    assert "FAIL -- git ls-files matched nothing" in output
-    assert "GATE FAILED: dirty-words (no files matched)" in output
+    assert "FAIL -- missing required tool(s):" in output
+    assert "GATE FAILED: actionlint/shellcheck" in output
+
+
+@pytest.mark.parametrize("runner", ["run_ruff", "run_format", "run_pyright", "run_tests"])
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_python_checks_propagate_tool_exit_status(
+    monkeypatch: pytest.MonkeyPatch, runner: str, returncode: int
+) -> None:
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], returncode)
+
+    monkeypatch.setattr(check.subprocess, "run", run)
+
+    assert getattr(check, runner)() is (returncode == 0)

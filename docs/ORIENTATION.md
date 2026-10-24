@@ -90,11 +90,11 @@ domain extraction, new audit rules, a generation protocol or supported backup re
 | `.python-version` / `uv.lock` | Exact development interpreter and cross-platform dependency lock. |
 | `examples/*.example.json` | Generic human-readable initialization inputs and their checked empty schema-5 board. |
 | `examples/*.terry-workflow.json` | Terry's preferred seven-lane workflow inputs and their checked empty schema-5 board. |
-| `check.py` | Complete local/CI gate: line endings, Ruff, formatting, strict Pyright, pytest, workflow/shell linting, and US English vocabulary. |
+| `check.py` | Complete local/CI gate: line endings, Ruff, formatting, strict Pyright, pytest, workflow/shell linting. |
 | `tests/` | Domain, policy, serialization, store, API, CLI, docs, and gate behavior. |
 | `src/localswim/vendor/typefaces/inter/` | Unmodified Inter WOFF2 subsets and their SIL OFL license. |
 | `docs/TOOLING.md` | Development-tool choices, exact pins, exclusions, and Codex uv usage. |
-| `.github/workflows/gate.yml` | Runs the same gate in CI and obtains the public canonical vocabulary table. |
+| `.github/workflows/gate.yml` | Runs the same gate in CI from the localswim checkout. |
 | `.github/workflows/contribution-policy.yml` | Checks non-exempt pull-request source branch names without executing PR code. |
 | `.github/CODEOWNERS` | Makes `TerryOtt` the sole code owner for every repository path. |
 | `.github/rulesets/main.json` | Reproducible recipe for the server-side `main` branch ruleset. |
@@ -399,19 +399,25 @@ Every card has two permanent handles:
   or archived numbers must never be reused.
 
 `nextTicket` is stored rather than derived and must remain above every existing ticket.
-Card order is descending longest downstream blocking-chain depth, ascending priority
-number, then monotonically allocated ticket number. The browser and focused CLI triage
-queries share this comparator. Numeric P IDs compare numerically; named scales retain
-policy order. Only canonical `blocks` edges contribute, across every lane and all stored
-cards. Depths and strongly connected groups use the full stored graph, preserving links
-and cycle ranks. Priority inheritance uses unfinished cards only: stable state ID
+Card order is ascending `((priority_number + 1) * 100) - blocked_card_count`, then
+priority number and monotonically allocated ticket number. The browser and focused
+CLI triage queries share this comparator. Numeric P IDs use their number; named
+scales retain policy rank. Scores may be negative. Count distinct reachable unfinished
+cards through canonical `blocks` edges across all lanes, excluding the card itself.
+Completed cards stop the path; archived unfinished cards still count. Diamond paths
+and cycles never multiply a card's contribution. Compute metrics before filters/limits.
+
+Legacy longest-chain depths still use the full stored graph and remain informational.
+Priority inheritance uses unfinished cards only: stable state ID
 `completed` is exempt regardless of display label, and urgency does not pass through a
 completed intermediate. Archived unfinished cards still inherit; archived completed
 cards are exempt. The condensed DAG is processed without recursive traversal.
 
-`blocking_order()` derives longest downstream depths for sorting from the entire stored
-graph, then traverses in the opposite direction to inherit the highest urgency through
-unfinished cards.
+`blocking_order()` retains full-graph depths, inherits urgency through the unfinished
+graph and derives distinct blocked counts plus triage scores. Iterative strongly
+connected components and compact bitset reachability handle long chains and cycles.
+Internal priority-only callers may omit triage computation; normal lane/API/CLI callers
+receive the full metrics. The API can reuse the same metrics while materializing lanes.
 Relationship mutations and `set_priority()` promote blocked descendants with ordinary
 priority audit entries in the actor's transaction. Requested lower urgency is clamped
 to the upstream requirement before recording changes. A card with no blockers can have
@@ -427,8 +433,10 @@ using `cliUser` for these rule-adoption events. It advances revision only when a
 promotion is needed; subsequent reads and restarts do not fabricate duplicate history.
 Controlled offline lane/policy migrations also reconcile priorities before verification.
 A failed transaction discards relationship changes and their priority cascades together.
-The browser payload adds `blockingDepth` to cards and names the same three-part order;
-CLI next/search JSON names `blockingDepthDesc`, `priority`, and `ticket` explicitly.
+The browser payload retains `blockingDepth` and adds `blockedCardCount` and `triageScore`.
+CLI next/search JSON exposes the same score/count. Shared ordering metadata names
+`triageScoreAsc`, `priority`, and `ticket`. These are derived fields, not snapshot schema
+or audit changes. Relationship-target selectors retain ascending numeric ticket order.
 A priority mutation response includes the committed `priority`, letting the focused
 drawer selector reflect a clamped request immediately without depending on blur.
 
@@ -878,7 +886,7 @@ persisted or REST schema.
 `card next N --lane LANE [--lane LANE ...]` applies those same focused-report
 boundaries to a bounded cross-lane triage query. It validates every lane against the embedded policy,
 refuses audit drift, and orders all candidates with the same comparator as the browser:
-descending blocking depth, ascending priority, then ticket number. Input lane order
+ascending triage score, then priority and ticket number. Input lane order
 is only a filter. JSON names that ordering explicitly and returns selection metadata
 plus compact focused items. A result carries its parent and child count rather than
 expanding a potentially large child subtree; `card show` owns full child expansion.
@@ -888,7 +896,7 @@ Detail and comments still require `--include-comments`.
 case-insensitive substring matching over stable IDs and subjects plus exact matching
 for numeric or `#NNNN` ticket references. It searches every lane by default; repeated
 `--lane` options supply an embedded-policy-validated filter. Results use the same
-blocking-depth, priority, and ticket total order and compact focused-item shape as `card next`.
+triage-score, priority, and ticket total order and compact focused-item shape as `card next`.
 `--include-comments` explicitly expands both the matching surface and returned fields to
 details and comment text. Search refuses audit drift and changes no persisted or REST
 schema.
@@ -1033,7 +1041,8 @@ The suite spans these boundaries:
 | `test_board.py` | Card operations, transitions, history, links, hierarchy, and sorting. |
 | `test_attachments.py` | Browser/API and CLI uploads, removal, cover selection, size bounds, exact Git staging, snapshot rollback, and immutable file reads. |
 | `test_snapshot_publish.py` | Large audited inventories, bounded literal Git paths, unrelated staged-file exclusion, temporary pathspec cleanup, and publication failure/retry. |
-| `test_dependencies.py` | Blocking depth, cross-lane ordering, transitive priority inheritance, cycles, deep chains, and atomic adoption. |
+| `test_dependencies.py` | Legacy blocking depth, scored cross-lane ordering, transitive priority inheritance, cycles, deep chains, and atomic adoption. |
+| `test_triage_scoring.py` | Exact weighted scores, distinct reachability, Completed path cuts, archived work, cycles, large chains and CLI parity. |
 | `test_archiving.py` | Reversible visibility, archive persistence and audit, intact relationships, and filtered queries. |
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |
 | `test_policy.py` | Policy immutability, strict edge parsing, actor matching, isolation, and reload. |
@@ -1047,29 +1056,26 @@ The suite spans these boundaries:
 | `test_workspace_config.py` | Preference validation, atomic cross-process revisions, legacy initialization, and safe storage paths. |
 | `test_cli.py` | CLI-to-service mutations, activity reports, initialization, and offline migrations. |
 | `test_docs.py` | Checked generic and Terry-workflow initialization inputs and generated boards. |
-| `test_check.py` | Gate line-ending parser. |
+| `test_check.py` | Tracked text line endings, gate failure aggregation, and mandatory tool checks. |
 | `conftest.py` | Standard isolated Terry/Bot cast and empty board fixtures. |
 
 Use the exact Codex command from `AGENTS.md` so fixtures and pytest's cache live under
 the authorized external scratch root. The complete project gate is:
 
 ```console
-uv run --frozen python check.py --word-table path/to/claude-dirty-words.py
+uv run --frozen python check.py
 ```
 
 The gate runs LF validation, Ruff `ALL`, Ruff's formatter check, strict Pyright, pytest,
-actionlint with ShellCheck, and the external US English/house vocabulary checker. Ruff
-verifies that annotations exist; Pyright verifies their types. The vocabulary detector
-first runs a known-bad control sentence and fails if the canonical table is missing.
-The checker scans prose-bearing Git-tracked Python, Markdown, JSON, TOML, and YAML files.
-Its NUL-delimited Git inventory preserves Unicode, spaces and other supported pathname
-characters before filtering; it checks current working-tree content. A newly created
-untracked document is not covered until it becomes tracked. Tool
-pins and the rationale for not stacking redundant linters are in `docs/TOOLING.md`.
+and actionlint with ShellCheck. Ruff verifies that annotations exist; Pyright verifies
+their types. Every stage runs even after an earlier failure, and any failed stage or
+missing workflow tool fails the gate. Line-ending validation covers Git-tracked text
+in the working tree, including Unicode and space-bearing paths; untracked files are
+outside that inventory. Tool pins and the rationale for not stacking redundant
+linters are in `docs/TOOLING.md`.
 
-CI obtains the canonical word table from the public `FlickrGroupAddr/backend-api`
-repository instead of copying it here. The local hook is inactive until a developer
-runs `git config core.hooksPath .githooks`.
+CI uses a single localswim checkout and needs no external vocabulary repository.
+The local hook is inactive until a developer runs `git config core.hooksPath .githooks`.
 
 ## Windows/Codex environment notes
 
@@ -1143,8 +1149,8 @@ Keep each fact in the narrowest durable place:
   and license.
 
 When a schema, route, invariant, or workflow changes, update every affected layer in
-the same change. Do not copy the full transition table or vocabulary list into another
-document; link to the authoritative data so it cannot drift.
+the same change. Do not copy the full transition table into another document; link
+to the authoritative data so it cannot drift.
 
 ## Shared monitor ownership
 
@@ -1356,3 +1362,49 @@ No apply/inspect route, checkpoint, byte staging, attachment copying, automatic
 shutdown, extraction, network fetch, target replacement or live rollout is provided.
 All code remains NONWATCHED through later synthetic acceptance and separate
 operational approval.
+
+## Internal restore checkpoint and staging
+
+`restore_storage.prepare_restore(document, expect_plan=..., target=..., staging=...,
+checkpoint=...)` consumes the frozen plan under a caller precondition: the
+existing launch gate, writer lease and transaction lock remain held through
+`PreparedRestore.close()` or the later commit. This module does not acquire or
+authenticate those leases, replace the target snapshot or expose public apply.
+
+Preparation checks the plan and reacquires fresh proofs matching every sealed
+observation. A `restore_paths.CreationSession` coordinates shared ancestor proofs
+and exclusively creates native NTFS children relative to pinned parent handles.
+Only its proven direct-parent metadata changes and owned file writes advance
+their observations; drift in other held ancestors and observed paths, aliases,
+reparse paths and hardlinks refuse. Direct-parent timestamp changes during an
+owned creation cannot distinguish unrelated unregistered sibling activity; this
+is not a directory-wide change detector. Every registered existing/missing role
+still receives its identity, byte or absence checks.
+Created handles remain pinned through bounded writes, flush and same-handle size
+and SHA256 readback. Existing read-only `CheckedPath` semantics are unchanged.
+
+The ordered storage stages are:
+
+1. Check available-space estimates aggregated by volume, expiry, roles and frozen
+   inputs. Staging/checkpoint roots must be new and have existing safe parents.
+2. Stage the exact supplied source, referenced source blobs and proposed snapshot.
+   Create recovery material containing exact current raw bytes or a missing marker,
+   original plan, proposed final bytes and all available referenced current bytes.
+   Preserve readable corrupt bytes with truthful classification; never label
+   raw-only or incomplete recovery as a fully validated recovery point.
+3. Flush and verify recovery files and write their completion marker last.
+4. Append only missing target immutable blobs, reuse identical ones and refuse
+   conflicts without overwriting or remapping them.
+5. Return frozen plan/final/manifest/operation bindings with the live proof session.
+   The eventual commit must use these frozen bytes rather than mutable sources.
+
+Every failure, including interruption, preserves existing and partially created
+checkpoint, staging and orphan bytes. Closing releases handles only: no rollback,
+garbage collection, source deletion or target snapshot replacement occurs. Space
+checks are estimates; actual I/O failures still refuse. File flush/readback supports
+application-interruption recovery, not directory-flush or physical power-loss
+guarantees. Snapshot, attachment, plan and inventory caps remain unchanged.
+
+Qualification uses synthetic Windows files with actual caller-held maintenance
+contexts. Public restore acquisition/commit and synthetic end-to-end acceptance
+remain separate phases; watched rollout still requires separate operational approval.

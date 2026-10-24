@@ -1,20 +1,4 @@
-# The same gate `check.py` runs locally, on every push and pull request.
-#
-# **WHY BOTH THIS AND A PRE-COMMIT HOOK.** They fail in opposite directions and that
-# is the point rather than duplication. The hook is fast and runs before the mistake
-# is recorded -- and it does NOT run until somebody types
-# `git config core.hooksPath .githooks`, which a fresh clone silently skips. This
-# runs on a machine nobody configured, and reports after the push rather than before.
-#
-# **A gate that silently does not run is worse than no gate**, which is the failure
-# this repository already paid for once: it had no gate at all until 2026-08-19, and
-# a British spelling reached `board_state.py` unnoticed.
-#
-# **NO SECRET IS NEEDED, and that decided the design.** The word table lives in
-# `FlickrGroupAddr/backend-api`, which is PUBLIC. The `~/.claude` wrapper would have
-# been the obvious source and lives in `claude-config`, which is PRIVATE -- reaching
-# it from this public repository would mean a personal access token stored as a
-# secret. **A spell-checker is not worth a credential in a public repository.**
+# Run the complete local gate on every push and pull request.
 name: gate
 
 on:
@@ -38,19 +22,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # **The canonical word table, borrowed rather than copied.** A second copy of
-      # that list would drift, and the list is the whole tool.
-      - name: Check out the word table
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: FlickrGroupAddr/backend-api
-          path: .word-table-src
-          persist-credentials: false
-
       - name: Install pinned uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          version: "0.13.1"
+          version: "0.13.5"
           enable-cache: true
           cache-dependency-glob: uv.lock
 
@@ -83,21 +58,15 @@ jobs:
       - name: Synchronize locked project environment
         run: uv sync --locked --extra monitor
 
-      # **The path is passed explicitly rather than guessed.** `check.py`'s fallback
-      # guesses are Terry's machine; CI knows exactly where it put things, and saying
-      # so means a checkout change fails loudly instead of quietly falling through to
-      # a guess that happens to be wrong.
       - name: Run the gate
-        run: >
-          uv run --frozen --extra monitor python check.py
-          --word-table .word-table-src/scripts/claude-dirty-words.py
+        run: uv run --frozen --extra monitor python check.py
 
       - name: Build source and wheel distributions
         run: uv build --no-sources --clear
 
       - name: Smoke-test the built wheel
         run: >
-          uv run --isolated --no-project --python 3.15.0
+          uv run --isolated --no-project --python 3.15.1
           --with ./dist/localswim-*.whl
           python -c
           "import importlib.resources, localswim;

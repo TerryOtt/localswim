@@ -1587,7 +1587,9 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     lane = next(lane for lane in payload["lanes"] if lane["state"] == "backlog")
     assert [item["id"] for item in lane["items"]] == ["root", "middle", "leaf"]
     assert [item["blockingDepth"] for item in lane["items"]] == [2, 1, 0]
-    assert payload["order"] == ["blockingDepthDesc", "priority", "ticket"]
+    assert [item["blockedCardCount"] for item in lane["items"]] == [2, 1, 0]
+    assert [item["triageScore"] for item in lane["items"]] == [98, 99, 100]
+    assert payload["order"] == ["triageScoreAsc", "priority", "ticket"]
     events = len(saved.find("leaf").history)
     code, out = request_json(
         api.base + API + "/cards/leaf/priority",
@@ -1600,6 +1602,71 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert out["priority"] == "P0"
     assert board_state.load(api.path).find("leaf").priority == "P0"
     assert len(board_state.load(api.path).find("leaf").history) == events
+
+
+def test_api_triage_weights_priority_and_breadth_like_cli(
+    api: RunningApi, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cards = [
+        ("deep", "P1"),
+        ("middle", "P3"),
+        ("leaf", "P3"),
+        ("urgent", "P0"),
+        ("broad", "P1"),
+        ("first", "P3"),
+        ("second", "P3"),
+        ("third", "P3"),
+    ]
+    for revision, (name, priority) in enumerate(cards):
+        code, _ = request_json(
+            api.base + API + "/cards",
+            token=api_endpoint.CLI_TOKEN,
+            revision=revision,
+            body={"id": name, "subject": name, "state": "backlog", "priority": priority},
+        )
+        assert code == 200
+    links = [
+        ("deep", "middle"),
+        ("middle", "leaf"),
+        ("broad", "first"),
+        ("broad", "second"),
+        ("broad", "third"),
+    ]
+    for revision, (source, target) in enumerate(links, start=len(cards)):
+        code, _ = request_json(
+            api.base + API + f"/cards/{source}/link",
+            token=api_endpoint.CLI_TOKEN,
+            revision=revision,
+            body={"kind": "blocks", "other": target},
+        )
+        assert code == 200
+    code, payload = request_json(api.base + API + "/board")
+    assert code == 200
+    lane = next(lane for lane in payload["lanes"] if lane["state"] == "backlog")
+    items = lane["items"]
+    assert [item["id"] for item in items] == [
+        "urgent",
+        "broad",
+        "deep",
+        "middle",
+        "leaf",
+        "first",
+        "second",
+        "third",
+    ]
+    assert [item["triageScore"] for item in items] == [100, 197, 198, 199, 200, 200, 200, 200]
+    assert [item["blockedCardCount"] for item in items] == [0, 3, 2, 1, 0, 0, 0, 0]
+    # Legacy depth remains informative but no longer controls display order.
+    assert [item["blockingDepth"] for item in items[:3]] == [0, 1, 2]
+    assert all(item["priority"] == "P1" for item in items[1:])
+    capsys.readouterr()
+    board_state.report_next_items(
+        board_state.load(api.path), ["backlog"], len(cards), as_json=True, include_comments=False
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["order"] == payload["order"]
+    for field in ("id", "triageScore", "blockedCardCount"):
+        assert [item[field] for item in report["items"]] == [item[field] for item in items]
 
 
 @pytest.mark.parametrize("operation", ["add", "replace", "create"])

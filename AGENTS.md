@@ -20,6 +20,8 @@ native board monitoring is an optional extra.
   identity/alias boundary used by restore preflight and later restore phases.
 - `src/localswim/restore_plan.py` owns bounded format-1 plan creation and strict
   frozen-byte verification; it never applies a restore or writes a board.
+- `src/localswim/restore_storage.py` owns internal checkpoint/staging preparation
+  and append-only attachment copies under caller-held maintenance ownership.
 - `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
@@ -125,6 +127,16 @@ native board monitoring is an optional extra.
   board resolution. Never overwrite an artifact, write an active board, copy blobs,
   create recovery checkpoints, apply a restore or shut down services in this phase.
   Plan digests provide integrity, not authentication or operational approval.
+- Internal restore storage requires the caller to hold the existing launch gate,
+  writer lease and transaction lock through the prepared handle's lifetime.
+  Recheck sealed observations with fresh held path proofs. Complete, flush and
+  read back recovery files and their final completion marker before target blob
+  copies. Stage frozen source/final bytes; append missing immutable blobs only,
+  reuse identical bytes and refuse conflicting bytes. Never replace a snapshot,
+  delete partial recovery/staging/orphan bytes, acquire authority from a digest,
+  expose public apply or promise power-loss durability in this phase.
+  Native creation uses pinned exclusive local NTFS handles; unsupported paths
+  fail closed. Preparation and safe handle cleanup do not release caller leases.
 - Preserve the single-writer design, per-process bearer credential, `If-Match`
   revision checks, schema validation, monotonic revisions, flushed temporary writes,
   and atomic snapshot replacement. Acquire the board lifetime OS lease before constructing
@@ -228,18 +240,26 @@ native board monitoring is an optional extra.
   two digits of reserved width, exact larger totals, and accessible count labels.
   Omit zero counts and preserve covers and comment badges.
 
-- Order every lane by descending longest downstream blocking-chain depth, ascending
-  priority number, then ascending ticket number. Blocked cards inherit the highest
+- Order every lane and CLI next/search query by ascending
+  `((priority_number + 1) * 100) - blocked_card_count`, then priority number and ticket.
+  Count distinct unfinished downstream cards once across the entire board; exclude
+  self even in cycles. Completed cards stop paths; archived unfinished cards still
+  participate. Compute scores before visibility/lane/search filters and limits; keep
+  named priority scales' existing ordinal ranks. Do not clamp zero/negative scores.
+  Blocked cards inherit the highest
   urgency among unfinished upstream blockers, with audited promotion in the same
   transaction. Completion is determined by stable state ID `completed`, never its
   display label. Completed cards receive no automatic promotions and do not transmit
   urgency through historical chains; archived unfinished cards still participate.
-  Preserve all stored dependency links and derive depths from the full graph.
+  Preserve all stored dependency links and legacy informational depths from the full
+  graph. Scores use resulting inherited priorities; changing display order must not
+  change the existing direct/transitive priority rule or its atomic audit behavior.
   A card with no blockers may have any priority, regardless of its descendants.
   Both `blocks` and `blocked_by` enforce this ongoing floor without rejecting different
   priorities. Removing links must not silently downgrade priorities. Only blocking
   relationships contribute; hierarchy and other links do not. Keep browser and CLI
-  ordering consistent.
+  ordering consistent. Derived score/count fields are not persisted. Relationship
+  target pickers retain numeric ticket order; they are not triage lists.
 - Explicit batch priority changes use the live writer and one revision-checked store
   transaction. Evaluate all selected overrides together before applying unfinished
   dependency floors; preserve external floors and report effective selected priorities
@@ -417,7 +437,7 @@ fresh per-turn owner approval before any Astra use remain unchanged.
 ## Code conventions
 
 - Target exactly the Python version in `.python-version` for development and CI
-  (currently 3.15.0, verified stable on 2026-10-16). Keep the package contract at
+  (currently 3.15.1, verified stable on 2026-10-24). Keep the package contract at
   `>=3.15,<3.16`; update the pin when a later 3.15 patch is GA, and move the range to
   3.16 only after 3.16 is GA and verified. The original Click 8.4.2 dependency decision
   covered nested command scopes and contextual help; the current pin is 8.5.0. Any
@@ -490,16 +510,14 @@ substantial change:
 
 ```console
 uv run --frozen pytest -q
-uv run --frozen python check.py --word-table path/to/claude-dirty-words.py
+uv run --frozen python check.py
 uv build --no-sources --clear
 ```
 
 `check.py` validates tracked-file line endings, Ruff `ALL`, Ruff formatting, strict
-Pyright, pytest, actionlint with ShellCheck, and the borrowed US English vocabulary
-table. The word table is intentionally not copied here; its absence is a gate failure,
-not a skipped check. If it is available through the `CLAUDE_WORD_TABLE` environment
-variable or a documented neighboring checkout, `uv run --frozen python check.py` is
-sufficient. See `docs/TOOLING.md` for tool choices, pins, installation, and rationale.
+Pyright, pytest, and actionlint with ShellCheck. All stages are mandatory; missing
+workflow tools fail the gate. See `docs/TOOLING.md` for tool choices, pins,
+installation, and rationale.
 
 For a narrow change, run the relevant test module first, but do not describe Ruff alone
 as type-checking or pytest alone as the complete gate.
@@ -524,7 +542,7 @@ directly from `.venv/Scripts`. If the pinned interpreter is absent, install it w
 
 ```console
 $env:UV_CACHE_DIR='C:\Temp\localswim-uv-cache'
-uv python install 3.15.0
+uv python install 3.15.1
 uv sync --locked
 ```
 
