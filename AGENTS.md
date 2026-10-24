@@ -335,7 +335,7 @@ fresh per-turn owner approval before any Astra use remain unchanged.
 ## Code conventions
 
 - Target exactly the Python version in `.python-version` for development and CI
-  (currently 3.15.0, verified stable on 2026-10-16). Keep the package contract at
+  (currently 3.15.1, verified stable on 2026-10-24). Keep the package contract at
   `>=3.15,<3.16`; update the pin when a later 3.15 patch is GA, and move the range to
   3.16 only after 3.16 is GA and verified. The original Click 8.4.2 dependency decision
   covered nested command scopes and contextual help; the current pin is 8.5.0. Any
@@ -440,7 +440,7 @@ directly from `.venv/Scripts`. If the pinned interpreter is absent, install it w
 
 ```console
 $env:UV_CACHE_DIR='C:\Temp\localswim-uv-cache'
-uv python install 3.15.0
+uv python install 3.15.1
 uv sync --locked
 ```
 

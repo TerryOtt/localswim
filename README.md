@@ -9,7 +9,7 @@ beyond Click, the mature command-line parser used for its nested CLI.
 
 Requirements:
 
-- [Python 3.15.0](https://www.python.org/downloads/release/python-3150/) and [uv](https://docs.astral.sh/uv/) 0.13.1, as pinned for development and CI
+- [Python 3.15.1](https://www.python.org/downloads/release/python-3151/) and [uv](https://docs.astral.sh/uv/) 0.13.5, as pinned for development and CI
 - A modern browser
 - Git only if you want build identifiers or opt-in automatic pushes
 
