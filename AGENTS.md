@@ -70,6 +70,16 @@ native board monitoring is an optional extra.
   Preserve the atomic save/outcome boundary and accepted policy/memory on failure;
   use narrow private adapters, not a duplicate Board model, store or HTTP client.
 
+- Prepared browser edits retain their originating generation and board/window/
+  navigation epoch. Polling may update revision only within that generation;
+  credential refresh does not renew intent. Generation changes preserve useful
+  draft text separately while disabling stale submission, drag and queued work.
+  Require explicit fresh review/reattachment and never retarget a missing card.
+  Old asynchronous responses must not publish into a newer generation, close its
+  drawer or clear its draft. Keep normal browser bootstrap inert regardless of
+  supplied metadata; only private test construction selects protocol 2. Verify
+  behavior through the executable Node VM/DOM harness, not string assertions alone.
+
 - Keep the service bound to loopback. Do not add remote exposure, external runtime
   services, or browser network dependencies without an explicit product decision.
 - Preserve the single-writer design, per-process bearer credential, `If-Match`

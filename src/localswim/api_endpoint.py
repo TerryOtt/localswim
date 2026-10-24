@@ -2749,6 +2749,154 @@ move any card whoever owns it. Click to hand it over."></button>
 let API_TOKEN = '%TOKEN%';
 let API_PREFIX = '%API_PREFIX%';
 
+// BEGIN PRIVATE BROWSER INTENT
+function createBrowserIntent(context, invalidate) {
+  const windowIdentity = {};
+  let accepted = null, serial = 0, needsReview = false;
+  function sameContext(left, right) {
+    return left.prefix === right.prefix && left.epoch === right.epoch;
+  }
+  function observe(snapshot) {
+    const token = '"generation-' + snapshot.generation + '-revision-' + snapshot.revision + '"';
+    if (snapshot.writeProtocol !== 2
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+          .test(snapshot.generation)
+        || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0
+        || snapshot.writeToken !== token) throw new Error('Invalid board write state');
+    const next = {...context(), generation: snapshot.generation,
+      revision: snapshot.revision, token};
+    if (accepted && sameContext(accepted, next) && accepted.generation === next.generation
+        && next.revision < accepted.revision) return false;
+    if (accepted && (!sameContext(accepted, next) || accepted.generation !== next.generation)) {
+      serial++;
+      needsReview = true;
+      invalidate();
+    }
+    accepted = next;
+    return true;
+  }
+  function valid(intent) {
+    return !!intent && !!accepted && !needsReview && intent.windowIdentity === windowIdentity
+      && intent.serial === serial && sameContext(intent, context())
+      && sameContext(intent, accepted) && intent.generation === accepted.generation;
+  }
+  return {
+    observe, valid,
+    capture(kind) {
+      if (!accepted || needsReview || !sameContext(accepted, context())) return null;
+      return {...accepted, windowIdentity, serial, kind};
+    },
+    token(intent) {
+      if (!valid(intent)) throw new Error('Review the restored board first');
+      return accepted.token;
+    },
+    blocked: () => needsReview,
+    checkpoint: () => ({...context(), serial}),
+    current: checkpoint => checkpoint.serial === serial && sameContext(checkpoint, context()),
+    review() { serial++; needsReview = false; },
+    suspend() { if (!needsReview) {serial++; needsReview = true; invalidate();} },
+    save: () => ({generation: accepted && accepted.generation, pending: true}),
+    restore(saved) { if (saved && saved.pending) {serial++; needsReview = true; invalidate();} },
+  };
+}
+// END PRIVATE BROWSER INTENT
+
+// Production cannot select the preparation through service metadata or configuration.
+const PRIVATE_BROWSER_PROTOCOL2 = false;
+const browserIntent = PRIVATE_BROWSER_PROTOCOL2 ? createBrowserIntent(
+  () => ({prefix: API_PREFIX, epoch: window.workspaceEpoch}), invalidateBrowserIntent) : null;
+let drawerIntent = null, makeIntent = null, dragIntent = null;
+let drawerSerial = 0, makeSerial = 0;
+let pendingIntentUpload = null;
+let uploadPickerIntent = null;
+let reviewRequestSerial = 0;
+const preservedIntentDrafts = [];
+const RESTORED_BOARD_MESSAGE = 'Board restored. Review the current card before applying this draft';
+
+function renderPreservedIntentDrafts() {
+  const saved = preservedIntentDrafts.filter(entry => entry.prefix === API_PREFIX);
+  document.getElementById('intent-drafts').hidden = saved.length === 0;
+  document.getElementById('intent-draft-text').value = saved.map(entry => [
+    entry.card ? 'Card: ' + entry.card : 'Creation lane: ' + (entry.state || ''),
+    entry.subject && 'Title: ' + entry.subject,
+    entry.detail && 'Description: ' + entry.detail,
+    entry.comment && 'Comment: ' + entry.comment,
+    entry.makeSubject && 'New card title: ' + entry.makeSubject,
+    entry.makeDetail && 'New card description: ' + entry.makeDetail,
+    entry.upload && 'Selected file: ' + entry.upload.name,
+  ].filter(Boolean).join('\\n\\n')).join('\\n\\n--------\\n\\n');
+}
+
+function preserveBrowserIntentDrafts() {
+  for (const [id, comment] of Object.entries(drafts)) {
+    if (id !== openId && comment)
+      preservedIntentDrafts.push({prefix: API_PREFIX, card: id, ticket: draftTickets[id], comment});
+  }
+  preservedIntentDrafts.push({prefix: API_PREFIX, card: openId,
+    ticket: (drawerIntent && drawerIntent.ticket) || draftTickets[openId],
+    editing, state: mkOpen,
+    upload: pendingIntentUpload && {name: pendingIntentUpload.name, size: pendingIntentUpload.size},
+    comment: document.getElementById('say').value,
+    subject: document.getElementById('p-subject-edit').value,
+    detail: document.getElementById('p-detail-text').value,
+    makeSubject: document.getElementById('mk-subject').value,
+    makeDetail: document.getElementById('mk-detail').value});
+  renderPreservedIntentDrafts();
+}
+
+function restoreBrowserIntentState(saved) {
+  if (!browserIntent || !saved) return;
+  for (const [id, comment] of Object.entries(saved.drafts || {})) {
+    preservedIntentDrafts.push({prefix: API_PREFIX, card: id, comment,
+      ticket: (saved.draftTickets || {})[id],
+      editing: id === saved.openId ? saved.editing : null,
+      subject: saved.editing === 'subject' ? saved.editValue : '',
+      detail: saved.editing === 'detail' ? saved.editValue : ''});
+  }
+  if (saved.make) preservedIntentDrafts.push({prefix: API_PREFIX, state: saved.make.state,
+    makeSubject: saved.make.subject, makeDetail: saved.make.detail});
+  browserIntent.restore(saved.browserIntent
+    || ((saved.openId || saved.make) ? {pending: true} : null));
+  renderPreservedIntentDrafts();
+}
+
+function invalidateBrowserIntent() {
+  preserveBrowserIntentDrafts();
+  dragIntent = null;
+  document.getElementById('intent-review').hidden = false;
+  document.getElementById('intent-message').textContent = RESTORED_BOARD_MESSAGE;
+  syncIntentControls();
+  seen = null;
+}
+
+function syncIntentControls() {
+  if (!browserIntent) return;
+  const blocked = browserIntent.blocked();
+  const controls = document.querySelectorAll(
+    '#panel button, #panel select, #mk button, #mk select');
+  for (const control of controls) {
+    if (blocked && !control.disabled) {
+      control.dataset.intentDisabled = 'true'; control.disabled = true;
+    }
+    if (!blocked && control.dataset.intentDisabled) {
+      control.disabled = false; delete control.dataset.intentDisabled;
+    }
+  }
+  for (const card of document.querySelectorAll('.card')) card.draggable = !blocked;
+}
+
+function mutationIntent(path) {
+  if (!browserIntent) return null;
+  if (path.endsWith('/move')) return dragIntent;
+  if (path === API_PREFIX + '/cards') return makeIntent;
+  return drawerIntent;
+}
+
+function intentResponseCurrent(intent, panel, make) {
+  return !browserIntent || (browserIntent.valid(intent)
+    && drawerSerial === panel && makeSerial === make);
+}
+
 async function apiGet(path) {
   const response = await fetch(path, {cache: 'no-store', signal: AbortSignal.timeout(20000)});
   const value = await response.json();
@@ -2758,6 +2906,7 @@ async function apiGet(path) {
 }
 
 async function apiPost(path, body) {
+  if (browserIntent) return intentPost(path, body, mutationIntent(path));
   const epoch = window.workspaceEpoch;
   const prefix = API_PREFIX;
   const response = await fetch(path, {
@@ -2781,7 +2930,51 @@ async function apiPost(path, body) {
   return response;
 }
 
+async function intentPost(path, body, intent) {
+  const panel = drawerSerial, make = makeSerial;
+  const stale = () => ({ok: false, status: 412,
+    json: async () => ({workspaceBoardChanged: true, error: RESTORED_BOARD_MESSAGE})});
+  if (!browserIntent.valid(intent)) return stale();
+  if (intent.target && !itemById(intent.target)) return stale();
+  if (intent.target && itemById(intent.target).ticket !== intent.ticket) return stale();
+  if (intent.state && !data.lanes.some(lane => lane.state === intent.state)) return stale();
+  const targetPath = intent.prefix + '/cards/' + encodeURIComponent(intent.target) + '/';
+  if (intent.target && !path.startsWith(targetPath))
+    return stale();
+  let response;
+  try {
+    response = await fetch(path, {method: 'POST', headers: {
+      'Authorization': 'Bearer ' + API_TOKEN, 'Content-Type': 'application/json',
+      'If-Match': browserIntent.token(intent),
+    }, body: JSON.stringify(body)});
+  } catch (error) {
+    if (!intentResponseCurrent(intent, panel, make)) return stale();
+    throw error;
+  }
+  const read = response.json.bind(response);
+  response.json = async () => {
+    let out;
+    try { out = await read(); }
+    catch (error) {
+      if (!intentResponseCurrent(intent, panel, make)) return {workspaceBoardChanged: true};
+      throw error;
+    }
+    if (!intentResponseCurrent(intent, panel, make)) return {workspaceBoardChanged: true};
+    if (response.status === 412 && out.error === 'state_changed') {
+      browserIntent.suspend();
+      return {workspaceBoardChanged: true};
+    }
+    if (response.ok) {
+      if (!browserIntent.observe(out)) return {workspaceBoardChanged: true};
+      if (!intentResponseCurrent(intent, panel, make)) return {workspaceBoardChanged: true};
+    }
+    return out;
+  };
+  return response;
+}
+
 function acceptRevision(out) {
+  if (browserIntent && out.generation !== data.generation) return;
   if (Number.isInteger(out.revision)) data.revision = out.revision;
 }
 
@@ -2817,6 +3010,64 @@ let drafts = (staleReloadState && staleReloadState.drafts
               && typeof staleReloadState.drafts === 'object')
   ? staleReloadState.drafts : {};
 let data = {lanes: [], edges: [], counts: {}, error: null};
+let draftTickets = (staleReloadState && staleReloadState.draftTickets) || {};
+if (browserIntent) document.getElementById('intent-review-go')
+  .addEventListener('click', async () => {
+  if (!browserIntent) return;
+  const prefix = API_PREFIX, epoch = window.workspaceEpoch;
+  const checkpoint = browserIntent.checkpoint();
+  const panel = drawerSerial, make = makeSerial, request = ++reviewRequestSerial;
+  const stillReviewing = () => prefix === API_PREFIX && epoch === window.workspaceEpoch
+    && browserIntent.current(checkpoint) && panel === drawerSerial && make === makeSerial
+    && request === reviewRequestSerial;
+  try {
+    const snapshot = await apiGet(prefix + '/board');
+    const session = await apiGet(prefix + '/browser-session');
+    if (!stillReviewing()) return;
+    if (!browserIntent.observe(snapshot))
+      throw new Error('The board changed again. Review the refreshed board.');
+    if (!stillReviewing()) return;
+    if (session.writeProtocol !== 2 || session.generation !== snapshot.generation
+        || (session.writeToken !== undefined && session.writeToken !== snapshot.writeToken))
+      throw new Error('The board changed again. Review the refreshed board.');
+    if (typeof session.token !== 'string' || !session.token)
+      throw new Error('Invalid browser session');
+    API_TOKEN = session.token;
+    data = snapshot;
+    preserveBrowserIntentDrafts();
+    closeCard(); closeMake(true); drafts = {}; draftTickets = {};
+    browserIntent.review();
+    drawerIntent = null; makeIntent = null;
+    document.getElementById('intent-review').hidden = true;
+    syncIntentControls();
+    paint();
+    toast('Choose the exact card or creation lane, then reattach your saved text.');
+  } catch (error) {
+    if (stillReviewing()) toast(String(error), true);
+  }
+});
+if (browserIntent) document.getElementById('intent-reattach').addEventListener('click', () => {
+  if (!browserIntent || browserIntent.blocked()) return;
+  const saved = [...preservedIntentDrafts].reverse().find(entry => entry.prefix === API_PREFIX
+    && (mkOpen ? entry.state === mkOpen : entry.card === openId && itemById(openId)
+      && entry.ticket === itemById(openId).ticket));
+  if (!saved) {
+    toast('The original target is unavailable. Copy saved text after reviewing a target.', true);
+    return;
+  }
+  if (mkOpen) {
+    document.getElementById('mk-subject').value = saved.makeSubject;
+    document.getElementById('mk-detail').value = saved.makeDetail;
+  } else {
+    document.getElementById('say').value = saved.comment;
+    if (saved.editing === 'subject') {
+      startSubjectEdit(); document.getElementById('p-subject-edit').value = saved.subject;
+    }
+    if (saved.editing === 'detail') {
+      startDetailEdit(); document.getElementById('p-detail-text').value = saved.detail;
+    }
+  }
+});
 // **Card #0063. Off on every load, which is what "by default" means.** It lives here
 // rather than in localStorage on purpose: a board that remembered being unhidden would
 // need a second decision about when to forget, and Terry asked for a default rather
@@ -2872,6 +3123,7 @@ let editing = null;
 let subjectEdit = null;
 
 function closeEditors(returnFocus = true) {
+  if (browserIntent) drawerSerial++;
   const subject = document.getElementById('p-subject-edit');
   const restore = returnFocus && editing === 'subject'
     && document.activeElement === subject;
@@ -2887,6 +3139,7 @@ function closeEditors(returnFocus = true) {
 function startSubjectEdit() {
   const it = itemById(openId);
   if (!it || editing) return;
+  if (browserIntent) drawerSerial++;
   editing = 'subject';
   subjectEdit = {};
   const box = document.getElementById('p-subject-edit');
@@ -2935,12 +3188,14 @@ async function saveSubject() {
       box.disabled = false;
       if (document.activeElement === document.body) box.focus();
     } else if (subjectEdit === null) box.disabled = false;
+    syncIntentControls();
   }
 }
 
 function startDetailEdit() {
   const it = itemById(openId);
   if (!it || editing) return;
+  if (browserIntent) drawerSerial++;
   editing = 'detail';
   // **`detailRaw`, never `detail`.** The rendered form has been through `inline()` --
   // escaped, with the markdown-ish bits turned into tags -- and editing THAT would
@@ -2971,6 +3226,7 @@ async function saveDetail() {
     toast('Could not reach the board: ' + err, true);
   } finally {
     save.disabled = false;
+    syncIntentControls();
   }
 }
 
@@ -3150,11 +3406,11 @@ function relRow(word, ref) {
   return row;
 }
 
-async function mutateRelationship(source, body, controls) {
+async function mutateRelationship(source, body, controls, intent = drawerIntent) {
   for (const control of controls) control.disabled = true;
   try {
     const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/link';
-    const res = await apiPost(path, body);
+    const res = browserIntent ? await intentPost(path, body, intent) : await apiPost(path, body);
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
@@ -3167,10 +3423,12 @@ async function mutateRelationship(source, body, controls) {
     return false;
   } finally {
     for (const control of controls) control.disabled = false;
+    syncIntentControls();
   }
 }
 
 function editableRelationshipRow(it, ref) {
+  const intent = drawerIntent;
   const row = document.createElement('div');
   row.className = 'rel-edit';
   const kind = relationshipKindSelect(ref.kind);
@@ -3188,6 +3446,7 @@ function editableRelationshipRow(it, ref) {
       it.id,
       {kind: ref.kind, other: ref.id, remove: true},
       [kind, target, remove],
+      intent,
     );
   });
   kind.addEventListener('change', async () => {
@@ -3197,6 +3456,7 @@ function editableRelationshipRow(it, ref) {
       it.id,
       {kind: wanted, other: ref.id, replaces: ref.kind},
       [kind, target, remove],
+      intent,
     );
     if (!changed) kind.value = ref.kind;
     kind.blur();
@@ -3208,6 +3468,7 @@ function editableRelationshipRow(it, ref) {
 let relationshipDraft = null;
 
 function newRelationshipRow(it) {
+  const intent = drawerIntent;
   const target = relationshipTargetSelect(it.id, relationshipDraft.other);
   if (!target) return null;
   const row = document.createElement('div');
@@ -3233,6 +3494,7 @@ function newRelationshipRow(it) {
       it.id,
       {kind: kind.value, other: target.value},
       [kind, target, add, cancel],
+      intent,
     );
     if (added) relationshipDraft = null;
   });
@@ -3284,10 +3546,10 @@ function attachmentImage(file) {
   return ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.mediaType);
 }
 
-async function attachmentCommand(source, action, body) {
+async function attachmentCommand(source, action, body, intent = drawerIntent) {
   try {
     const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/' + action;
-    const res = await apiPost(path, body);
+    const res = browserIntent ? await intentPost(path, body, intent) : await apiPost(path, body);
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
@@ -3305,6 +3567,7 @@ async function attachmentCommand(source, action, body) {
 }
 
 function paintAttachments(it) {
+  const intent = drawerIntent;
   const box = document.getElementById('p-attachments');
   const identity = JSON.stringify([API_PREFIX, window.workspaceEpoch, it.id]);
   const signature = JSON.stringify([it.id, it.attachments || [], it.coverAttachment]);
@@ -3340,8 +3603,9 @@ function paintAttachments(it) {
       cover.textContent = selected ? 'Clear cover' : 'Set cover';
       cover.addEventListener('click', async () => {
         cover.disabled = true;
-        await attachmentCommand(it.id, 'cover', {attachmentId: selected ? null : file.id});
+        await attachmentCommand(it.id, 'cover', {attachmentId: selected ? null : file.id}, intent);
         cover.disabled = false;
+        syncIntentControls();
       });
       actions.append(cover);
     }
@@ -3349,8 +3613,9 @@ function paintAttachments(it) {
     remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove ' + file.name);
     remove.addEventListener('click', async () => {
       remove.disabled = true;
-      await attachmentCommand(it.id, 'attachment', {remove: true, attachmentId: file.id});
+      await attachmentCommand(it.id, 'attachment', {remove: true, attachmentId: file.id}, intent);
       remove.disabled = false;
+      syncIntentControls();
     });
     actions.append(remove); row.append(actions); box.append(row);
   }
@@ -3366,14 +3631,24 @@ function fileBase64(file) {
 }
 
 document.getElementById('p-upload').addEventListener('click', () => {
+  if (browserIntent) {
+    uploadPickerIntent = {source: openId, intent: drawerIntent, panel: drawerSerial};
+    if (!browserIntent.valid(drawerIntent)) return;
+  }
   if (openId) document.getElementById('p-upload-file').click();
 });
 document.getElementById('p-upload-file').addEventListener('change', async (ev) => {
-  const source = openId;
+  const source = browserIntent ? uploadPickerIntent && uploadPickerIntent.source : openId;
   const epoch = window.workspaceEpoch;
+  const intent = browserIntent ? uploadPickerIntent && uploadPickerIntent.intent : drawerIntent;
+  const panel = browserIntent ? uploadPickerIntent && uploadPickerIntent.panel : drawerSerial;
   const file = ev.target.files[0];
   const upload = document.getElementById('p-upload');
   if (!source || !file) return;
+  if (browserIntent) pendingIntentUpload = file;
+  if (browserIntent && (!browserIntent.valid(intent) || panel !== drawerSerial)) {
+    preserveBrowserIntentDrafts(); return;
+  }
   const limit = data.attachmentMaxBytes || 10485760;
   if (file.size > limit) {
     attachmentRefusal(file.name + ' is too large. The maximum is 10 MiB per file for Git storage.');
@@ -3383,9 +3658,19 @@ document.getElementById('p-upload-file').addEventListener('change', async (ev) =
   try {
     const bytes = await fileBase64(file);
     if (epoch !== window.workspaceEpoch) return;
-    await attachmentCommand(source, 'attachment', {name: file.name, data: bytes});
-  } catch (err) { attachmentRefusal(String(err)); }
-  finally { upload.disabled = false; ev.target.value = ''; }
+    if (browserIntent && (!browserIntent.valid(intent) || panel !== drawerSerial)) return;
+    await attachmentCommand(source, 'attachment', {name: file.name, data: bytes}, intent);
+  } catch (err) {
+    if (!browserIntent || (browserIntent.valid(intent) && panel === drawerSerial))
+      attachmentRefusal(String(err));
+  }
+  finally {
+    upload.disabled = false;
+    if (!browserIntent || browserIntent.valid(intent)) {
+      ev.target.value = ''; pendingIntentUpload = null;
+    }
+    syncIntentControls();
+  }
 });
 
 // ---- the detail panel ----------------------------------------------------
@@ -3431,6 +3716,7 @@ async function approveReview() {
   } finally {
     pendingApprovals.delete(key);
     if (stillHere()) renderApproval(itemById(id));
+    syncIntentControls();
   }
 }
 
@@ -3446,6 +3732,18 @@ function openCard(id) {
   // The comparison MUST happen BEFORE openId is reassigned, or every call looks like
   // a refresh and a genuinely new card inherits the previous card's text.
   const opening = openId !== id;
+  if (browserIntent && opening) {
+    if (drafts[id] && draftTickets[id] !== it.ticket) {
+      preservedIntentDrafts.push({prefix: API_PREFIX, card: id,
+        ticket: draftTickets[id], comment: drafts[id]});
+      delete drafts[id];
+      renderPreservedIntentDrafts();
+    }
+    drawerIntent = browserIntent.capture('drawer');
+    if (drawerIntent) {drawerIntent.target = id; drawerIntent.ticket = it.ticket;}
+    if (!drafts[id]) draftTickets[id] = it.ticket;
+    drawerSerial++;
+  }
   if (opening) {
     const box = document.getElementById('say');
     if (openId) drafts[openId] = box.value;
@@ -3589,6 +3887,7 @@ function openCard(id) {
 }
 
 function closeCard() {
+  if (browserIntent) {drawerSerial++; drawerIntent = null;}
   // **Escape is one keypress away at all times.** Dropping the draft on close is the
   // same defect as dropping it on repaint, just slower to notice.
   if (openId) drafts[openId] = document.getElementById('say').value;
@@ -3718,6 +4017,7 @@ document.getElementById('p-owner').addEventListener('click', async () => {
     toast('Could not reach the board: ' + err, true);
   } finally {
     own.disabled = false;
+    syncIntentControls();
   }
 });
 
@@ -3771,6 +4071,7 @@ document.getElementById('p-pri').addEventListener('change', async (ev) => {
     if (it) pri.value = it.priority;
   } finally {
     pri.disabled = false;
+    syncIntentControls();
   }
 });
 
@@ -3816,6 +4117,11 @@ function mkDirty() {
 }
 
 function openMake(lane) {
+  if (browserIntent) {
+    makeIntent = browserIntent.capture('create');
+    if (makeIntent) makeIntent.state = lane.state;
+    makeSerial++;
+  }
   mkOpen = lane.state;
   document.getElementById('mk-where').textContent =
     'It will be created in ' + lane.label + ', by ' + userLabel(data.browserUser) + '.';
@@ -3858,6 +4164,7 @@ function closeMake(force) {
     return;
   }
   mkOpen = null;
+  if (browserIntent) {makeSerial++; makeIntent = null;}
   document.getElementById('mk-subject').value = '';
   document.getElementById('mk-detail').value = '';
   document.getElementById('mk-relations').replaceChildren();
@@ -3917,6 +4224,7 @@ async function submitMake() {
     toast('Could not reach the board: ' + err, true);
   } finally {
     go.disabled = false;
+    syncIntentControls();
   }
 }
 
@@ -3988,10 +4296,18 @@ function card(item) {
     if (!dragged && !independentControl(ev.target)) openCard(item.id);
   });
   d.addEventListener('dragstart', ev => {
+    if (browserIntent) {
+      dragIntent = browserIntent.capture('drag');
+      if (!dragIntent) {ev.preventDefault(); return;}
+      dragIntent.target = item.id;
+      dragIntent.ticket = item.ticket;
+      dragIntent.dragKey = crypto.randomUUID();
+    }
     if (independentControl(ev.target)) { ev.preventDefault(); return; }
     dragged = true;
     ev.dataTransfer.setData('text/plain',
-      JSON.stringify({id: item.id, from: item.state}));
+      JSON.stringify({id: item.id, from: item.state,
+        ...(browserIntent ? {dragKey: dragIntent.dragKey} : {})}));
     ev.dataTransfer.effectAllowed = 'move';
     d.classList.add('dragging');
   });
@@ -4092,6 +4408,8 @@ function laneEl(lane) {
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)
           || typeof payload.id !== 'string' || !payload.id
           || typeof payload.from !== 'string' || !payload.from) return;
+      if (browserIntent && (!browserIntent.valid(dragIntent)
+          || payload.dragKey !== dragIntent.dragKey)) return;
       if (!allowed(payload.from, lane.state)) {
         toast('Not yours to drop there: ' + payload.from + ' \\u2192 ' + lane.state, true);
         return;
@@ -4493,6 +4811,7 @@ function paint() {
   // Repaint the drawer too, so a comment posted a moment ago appears without the
   // card having to be reopened.
   if (openId) openCard(openId);
+  syncIntentControls();
 }
 
 // ---- proof of life -------------------------------------------------------
@@ -4586,6 +4905,8 @@ function saveStaleReloadState() {
     query: query,
     unhideOld: unhideOld,
   };
+  if (browserIntent) saved.browserIntent = browserIntent.save();
+  if (browserIntent) saved.draftTickets = {...draftTickets};
   if (editing === 'subject') {
     saved.editValue = document.getElementById('p-subject-edit').value;
   } else if (editing === 'detail') {
@@ -4633,6 +4954,7 @@ function restoreStaleReloadState() {
       document.getElementById('mk-owner').value = saved.make.owner || '';
     }
   }
+  restoreBrowserIntentState(saved);
 }
 
 function reloadForServerBuild(build) {
@@ -4828,9 +5150,11 @@ async function tick() {
   if (pollingEpoch === epoch) return;
   pollingEpoch = epoch;
   const prefix = API_PREFIX;
+  const checkpoint = browserIntent && browserIntent.checkpoint();
   try {
     const meta = await apiGet(prefix + '/status');
     if (epoch !== window.workspaceEpoch) return;
+    if (browserIntent && !browserIntent.current(checkpoint)) return;
     if (meta.error && window.WorkspaceUI) throw new Error(meta.error);
     // **Captured before the ok check**, because a stale tab and an unreadable board
     // are independent failures and either can be true while the other is.
@@ -4853,10 +5177,12 @@ async function tick() {
       renderLive(); return;
     }
     fileMs = meta.mtime * 1000;
-    if (meta.mtime !== seen) {
+    if (meta.mtime !== seen || (browserIntent && meta.generation !== data.generation)) {
       const snapshot = await apiGet(prefix + '/board');
       if (epoch !== window.workspaceEpoch) return;
+      if (browserIntent && !browserIntent.current(checkpoint)) return;
       if (snapshot.error && !(snapshot.lanes || []).length) throw new Error(snapshot.error);
+      if (browserIntent && !browserIntent.observe(snapshot)) return;
       data = snapshot;
       // **The search cache MUST die with the data that filled it.** Card #0061. A card
       // that gains a comment keeps its id, so a cache keyed on the id alone would go on
@@ -4873,7 +5199,8 @@ async function tick() {
     lastOk = Date.now();
   } catch (e) {
     // Superseded requests cannot replace another board's content or recovery state.
-    if (epoch === window.workspaceEpoch && window.WorkspaceUI) {
+    if (epoch === window.workspaceEpoch && window.WorkspaceUI
+        && (!browserIntent || browserIntent.current(checkpoint))) {
       const message = e.name === 'TimeoutError' || e.name === 'AbortError'
         ? 'The board service did not respond in time. Retry when it is available.'
         : e instanceof TypeError
@@ -4885,7 +5212,8 @@ async function tick() {
   } finally {
     if (pollingEpoch === epoch) pollingEpoch = null;
   }
-  if (epoch === window.workspaceEpoch) renderLive();
+  if (epoch === window.workspaceEpoch
+      && (!browserIntent || browserIntent.current(checkpoint))) renderLive();
 }
 tick();
 setInterval(tick, %POLL%);
@@ -4898,6 +5226,24 @@ setInterval(renderLive, 500);
 </body>
 </html>
 """
+
+
+def _private_protocol2_page() -> str:  # pyright: ignore[reportUnusedFunction]
+    """Build the unreachable browser preparation for isolated synthetic tests."""
+    return PAGE.replace(
+        "const PRIVATE_BROWSER_PROTOCOL2 = false;", "const PRIVATE_BROWSER_PROTOCOL2 = true;"
+    ).replace(
+        "%WORKSPACE%",
+        """<div id="intent-review" hidden role="status"><span id="intent-message"></span>
+  <button id="intent-review-go" type="button">
+    I reviewed the board; choose a card to reattach</button>
+</div>
+<div id="intent-drafts" hidden><p>Saved text from before the board changed</p>
+  <textarea id="intent-draft-text" readonly aria-label="Saved draft text"></textarea>
+  <button id="intent-reattach" type="button">Reattach to the same card or creation lane</button>
+</div>
+%WORKSPACE%""",
+    )
 
 
 def _report_rule_gaps(policy: board_state.TransitionPolicy) -> None:

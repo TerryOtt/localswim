@@ -1266,6 +1266,27 @@ the actual descriptor/session validation and proxy. This does not claim public
 schema-5 catalog support; coordinated activation remains responsible for it.
 
 These are isolated preparation contracts, not a migration or deployment guide.
-Browser preparation and coordinated isolated activation still follow separately.
+Coordinated isolated activation still follows separately.
 Live adoption requires a concrete all-consumer quiescence/rollback preflight and
 explicit operational approval; accepting a code handoff does not grant it.
+
+## Private browser intent preparation
+
+The prepared browser uses one edit-session boundary for all mutation controls.
+It binds the originating generation to the board/window/navigation context when
+the user opens a drawer or starts an action. Polling can advance a revision within
+that generation; authentication refresh and workspace restart cannot renew old
+intent. A generation change disables stale submission, drag and queued actions,
+retains useful draft text separately, and requires explicit review of the fresh
+board before reattachment. Missing cards are never replaced by a guessed target.
+
+Request completion is bound to the captured context. An older success or failure
+cannot update a newer board, close another drawer, or clear its draft. Fresh edits
+send the exact complete token for the accepted generation. Saved workspace state
+retains origin information rather than turning restored form text into new intent.
+
+Production bootstrap remains protocol 1 regardless of response metadata. Only
+private page/test construction enables the prepared protocol-2 path, pending
+coordinated activation. The executable Node VM/DOM harness covers state and
+control behavior with delayed responses and separate board/window fixtures.
+It does not certify native browser layout, IME input or screen-reader speech.

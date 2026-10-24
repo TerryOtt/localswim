@@ -116,6 +116,8 @@
     if (openId) drafts[openId] = document.getElementById('say').value;
     const saved = {drafts: {...drafts}, openId, editing, query, unhideOld, relationshipDraft,
       scroll: Object.fromEntries([...board.querySelectorAll('.lane')].map(lane => [lane.dataset.lane, lane.querySelector('.cards').scrollTop]))};
+    if (browserIntent) saved.browserIntent = browserIntent.save();
+    if (browserIntent) saved.draftTickets = {...draftTickets};
     if (editing) saved.editValue = document.getElementById(editing === 'subject' ? 'p-subject-edit' : 'p-detail-text').value;
     if (mkOpen) saved.make = {state: mkOpen, subject: document.getElementById('mk-subject').value,
       detail: document.getElementById('mk-detail').value, priority: document.getElementById('mk-priority').value,
@@ -166,6 +168,7 @@
     }
     restoreScroll(saved.scroll || {});
     const drawer = document.querySelector('#panel .body'); if (drawer) drawer.scrollTop = saved.drawerScroll || 0;
+    restoreBrowserIntentState(saved);
     pending = null;
   }
   function error(message, recover = false) {
@@ -195,6 +198,7 @@
     const entry = catalog.find(entry => entry.key === key);
     pending = state.records[key] || {};
     drafts = {...(pending.drafts || {})}; query = pending.query || ''; unhideOld = !!pending.unhideOld;
+    if (browserIntent) draftTickets = {...(pending.draftTickets || {})};
     staleReloadState = null; HAY.clear(); seen = null; lastOk = 0; lastCta = null;
     data = {lanes: [], edges: [], counts: {}, actors: [], revision: 0};
     codeStale = false; restarting = false; restartProblem = null;

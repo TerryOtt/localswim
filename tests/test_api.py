@@ -8,7 +8,9 @@ import http.client
 import json
 import pathlib
 import re
+import shutil
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -27,6 +29,33 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 API = api_endpoint.API_PREFIX
+
+
+def test_private_browser_intent_executable(tmp_path: pathlib.Path) -> None:
+    """Execute the actual embedded controls in a deterministic Node DOM fixture."""
+    node = shutil.which("node")
+    assert node, "Node.js is required for the executable browser intent safety tests"
+    page = tmp_path / "browser.html"
+    page.write_text(
+        api_endpoint._private_protocol2_page().replace("%POLL%", "400"), encoding="utf-8"
+    )
+    result = subprocess.run(
+        [
+            node,
+            str(pathlib.Path(__file__).with_name("browser_intent.cjs")),
+            str(page),
+            str(pathlib.Path(api_endpoint.__file__).with_name("workspace.js")),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["passed"] is True
+    assert summary["scenarioCount"] >= 40
+    assert "const PRIVATE_BROWSER_PROTOCOL2 = false;" in api_endpoint.PAGE
 
 
 @pytest.mark.parametrize(

@@ -47,6 +47,12 @@ function section(source,start,end) {
   if(a<0||b<0)throw Error('Production helper boundary not found: '+start);
   return source.slice(a,b);
 }
+function loadInertBrowserHelpers(target) {
+  // Partial-script fixtures need the same disabled preparation declarations as PAGE.
+  vm.runInContext(section(input.page,'// BEGIN PRIVATE BROWSER INTENT',
+    'async function apiGet('),target);
+}
+loadInertBrowserHelpers(context);
 if(input.mode==='card-focus'){
   const assert=require('assert/strict');let opened=[],cards=[],rendered=[];
   function node(tag){
@@ -339,6 +345,7 @@ if(input.mode==='card-focus'){
     sessionStorage:{getItem(key){storageCalls.push(['get',key]);
       return input.emptyStored?null:stored.saved},
       removeItem(key){storageCalls.push(['remove',key])}}});
+  loadInertBrowserHelpers(fresh);
   vm.runInContext(section(input.page,"const STALE_RELOAD_STATE_KEY =",
     '// **Card #0072.'),fresh);
   vm.runInContext(section(input.page,'let query =','const HAY ='),fresh);

@@ -111,6 +111,8 @@ for (const id of ['scrim', 'panel']) {
 }
 const ctx = vm.createContext({input, button, events, say, JSON, Set, encodeURIComponent,
   document});
+// Partial-script approval fixtures retain PAGE's actual disabled preparation helpers.
+vm.runInContext(section('// BEGIN PRIVATE BROWSER INTENT', 'async function apiGet('), ctx);
 vm.runInContext(`
 let API_PREFIX = '/alpha', API_TOKEN = 'synthetic', openId = 'review', seen = 'fresh';
 let data = {revision: 4, browserUser: 'terry', actors: [{id:'terry', class:'human'}],

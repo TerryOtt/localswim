@@ -61,6 +61,24 @@ candidate only if it demonstrates actionable diagnostics beyond an upstream-stri
 zero-error Pyright run. Astral's ty remains pre-1.0 and is not a required gate while its
 diagnostic and configuration contracts are still changing.
 
+## Executable browser intent checks
+
+The development gate also requires Node.js on `PATH` for the deterministic browser
+intent harness (verified locally with Node.js 24.20.0). It uses built-in JavaScript
+execution and assertions; no npm packages or application runtime dependency are
+added. The Python test wrapper runs this harness as part of pytest and fails
+clearly if Node is unavailable. Static HTML/string assertions are not a substitute.
+
+Run the focused wrapper with:
+
+```console
+uv run --frozen pytest -q tests/test_api.py::test_private_browser_intent_executable
+```
+
+The harness exercises the embedded browser preparation with controlled DOM state,
+fetch completion and navigation events. Its results qualify the tested state
+transitions, not browser layout, native input methods or screen-reader speech.
+
 ## Workflow and shell analysis
 
 | Tool | Pin | Job |
