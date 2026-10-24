@@ -104,7 +104,7 @@ def test_mixed_cycle_keeps_full_graph_depth_without_crossing_completed(
     assert board.find("b").priority == "P5"
     assert board.find("a").priority == "P0"
     assert len(board.links) == 5
-    assert [item.id for item in board.lanes()[0].items] == ["root", "a", "b", "leaf"]
+    assert [item.id for item in board.lanes()[0].items] == ["a", "leaf", "root", "b"]
     assert board.verify() == []
 
 

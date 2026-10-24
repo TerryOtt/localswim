@@ -1592,10 +1592,46 @@ def _blocking_components(graph: Mapping[str, set[str]]) -> list[set[str]]:
 
 @dataclass(frozen=True)
 class BlockingOrder:
-    """Derived depths and inherited priorities; no extra persisted graph state."""
+    """Derived depth, priority targets and triage metrics; no persisted graph state."""
 
     depths: dict[str, int]
     priorities: dict[str, str]
+    blocked_counts: dict[str, int]
+    triage_scores: dict[str, int]
+
+
+TRIAGE_ORDER_FIELDS = ("triageScoreAsc", "priority", "ticket")
+
+
+def _blocking_counts(graph: Mapping[str, set[str]]) -> dict[str, int]:
+    """Count distinct reachable cards, excluding self, with compact SCC bitsets.
+
+    The caller chooses the graph's participating cards and edges. Collapsing cycles
+    makes traversal finite; integer bitsets deduplicate diamonds without allocating
+    a Python set of descendants for every card. Traversal is iterative throughout.
+    """
+    groups = _blocking_components(graph)
+    group_by_id = {node: index for index, group in enumerate(groups) for node in group}
+    dependencies: dict[int, set[int]] = {index: set() for index in range(len(groups))}
+    for parent, children in graph.items():
+        source = group_by_id[parent]
+        dependencies[source].update(
+            group_by_id[child] for child in children if group_by_id[child] != source
+        )
+    group_bits = dict.fromkeys(range(len(groups)), 0)
+    for index, node in enumerate(graph):
+        group_bits[group_by_id[node]] |= 1 << index
+    reachable: dict[int, int] = {}
+    counts: dict[int, int] = {}
+    # One bit per card lets native integer operations count even large SCCs.
+    sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter(dependencies)
+    for group_id in sorter.static_order():
+        bits = 0
+        for child in dependencies[group_id]:
+            bits |= reachable[child] | group_bits[child]
+        reachable[group_id] = bits
+        counts[group_id] = bits.bit_count() + len(groups[group_id]) - 1
+    return {node: counts[group_by_id[node]] for node in graph}
 
 
 def _blocking_priorities(
@@ -1631,14 +1667,21 @@ def _blocking_priorities(
 def blocking_order(
     board: Board,
     priority_overrides: Mapping[str, str] | None = None,
+    *,
+    include_triage: bool = True,
 ) -> BlockingOrder:
-    """Longest downstream blocks-chain and highest urgency among upstream blockers.
+    """Legacy depth, inherited urgency and distinct unfinished-descendant triage.
 
     All stored cards participate in depth, regardless of lane or archive state.
     Priority inheritance uses only edges between unfinished cards: the stable state
     ID ``completed`` neither receives nor transmits urgency, even inside a cycle.
     Archived unfinished cards still participate. Other relationship kinds and
     parent/child hierarchy do not create blocking edges.
+
+    Triage counts distinct unfinished descendants using that same unfinished
+    graph: completed cards stop a path and cycles exclude the starting card.
+    Scores are ((inherited priority rank + 1) * 100) - descendant count. Callers
+    checking only priority targets can skip the reachability calculation.
     """
     graph: dict[str, set[str]] = {item.id: set() for item in board.items}
     for link in board.links:
@@ -1665,22 +1708,30 @@ def blocking_order(
         node: children & unfinished if node in unfinished else set()
         for node, children in graph.items()
     }
+    blocked_counts = _blocking_counts(priority_graph) if include_triage else {}
+    inherited_priorities = _blocking_priorities(priority_graph, priorities, ranks)
     return BlockingOrder(
         depths={node: depths[group_by_id[node]] for node in graph},
-        priorities=_blocking_priorities(priority_graph, priorities, ranks),
+        priorities=inherited_priorities,
+        blocked_counts=blocked_counts,
+        triage_scores={
+            node: ((ranks[inherited_priorities[node]] + 1) * 100) - count
+            for node, count in blocked_counts.items()
+        },
     )
 
 
 def item_order_key(
     item: Item,
     policy: TransitionPolicy,
-    depths: Mapping[str, int] | None = None,
+    scores: Mapping[str, int] | None = None,
 ) -> tuple[int, int, int]:
-    """Descending blocking depth, ascending priority number, then ascending ticket."""
+    """Ascending triage score, existing priority rank, then ascending ticket."""
     ranks = priority_ranks(policy)
+    rank = ranks.get(item.priority, max(ranks.values()) + 1)
     return (
-        -(depths or {}).get(item.id, 0),
-        ranks.get(item.priority, max(ranks.values()) + 1),
+        (scores or {}).get(item.id, (rank + 1) * 100),
+        rank,
         item.ticket,
     )
 
@@ -1756,9 +1807,10 @@ def total_order_problems(board: Board) -> list[str]:
     """
     problems: list[str] = []
 
-    depths = blocking_order(board).depths
-    for lane in board.lanes():
-        keys = [item_order_key(item, board.policy, depths) for item in lane.items]
+    order = blocking_order(board)
+    scores = order.triage_scores
+    for lane in board.lanes(order=order):
+        keys = [item_order_key(item, board.policy, scores) for item in lane.items]
         problems.extend(
             f"{lane.label}: #{before[2]:04d} and #{after[2]:04d} do not order"
             for before, after in itertools.pairwise(keys)
@@ -2737,15 +2789,17 @@ class Board:
 
         raise BoardError(f"no item with id {ref!r}")
 
-    def lanes(self, *, include_archived: bool = False) -> list[Lane]:
-        """Return lanes using the shared blocking-depth, priority, and ticket order.
+    def lanes(
+        self, *, include_archived: bool = False, order: BlockingOrder | None = None
+    ) -> list[Lane]:
+        """Return lanes using the shared triage-score, priority, and ticket order.
 
-        Descending blocking depth is primary, then ascending priority number and
-        monotonically allocated ticket number. Depths include dependencies in other
-        lanes, and the same comparator is shared with CLI triage.
+        Ascending triage score is primary, then ascending priority number and
+        monotonically allocated ticket number. Counts include unfinished dependencies
+        in other lanes, and the same comparator is shared with CLI triage.
         """
 
-        depths = blocking_order(self).depths
+        scores = (order or blocking_order(self)).triage_scores
         buckets: dict[str, list[Item]] = {state: [] for state in self.policy.states}
         for item in self.items:
             if item.archived and not include_archived:
@@ -2759,7 +2813,7 @@ class Board:
                 lane_owner_label(state, self.policy),
                 sorted(
                     buckets.get(state, []),
-                    key=lambda item: item_order_key(item, self.policy, depths),
+                    key=lambda item: item_order_key(item, self.policy, scores),
                 ),
             )
             for state, label in self.policy.lanes
@@ -3075,14 +3129,16 @@ class Board:
 
     def dependency_priority_promotions(self) -> dict[str, str]:
         """Unfinished cards inherit higher urgency; completed cards are exempt."""
-        targets = blocking_order(self).priorities
+        targets = blocking_order(self, include_triage=False).priorities
         return {
             item.id: targets[item.id] for item in self.items if item.priority != targets[item.id]
         }
 
     def enforce_dependency_priorities(self, by: Actor) -> tuple[str, ...]:
         """Promote through unfinished cards without demotions or changed links."""
-        return self._apply_priority_targets(blocking_order(self).priorities, by)
+        return self._apply_priority_targets(
+            blocking_order(self, include_triage=False).priorities, by
+        )
 
     def set_priority(self, item_id: str, priority: str, by: Actor) -> str:
         """Apply the requested priority subject to upstream blocker urgency, with audit."""
@@ -3092,7 +3148,7 @@ class Board:
             )
         item = self.find(item_id)
         was = item.priority
-        targets = blocking_order(self, {item.id: priority}).priorities
+        targets = blocking_order(self, {item.id: priority}, include_triage=False).priorities
         changed = self._apply_priority_targets(targets, by)
         effective = item.priority
         result = (
@@ -3128,7 +3184,9 @@ class Board:
             if item.state == "completed":
                 raise BoardError(f"{item.label} is Completed; select only unfinished cards")
             selected[item.id] = item
-        targets = blocking_order(self, dict.fromkeys(selected, priority)).priorities
+        targets = blocking_order(
+            self, dict.fromkeys(selected, priority), include_triage=False
+        ).priorities
         previous = [(item, item.priority, list(item.history)) for item in self.items]
         try:
             changed = self._apply_priority_targets(targets, by)
@@ -5270,11 +5328,16 @@ class ItemInspection:
     archive_history: tuple[ArchiveChange, ...] = ()
     detail: str | None = None
     comments: tuple[Comment, ...] | None = None
+    blocked_card_count: int | None = None
+    triage_score: int | None = None
 
     def to_json(self) -> JsonObject:
         """Return a composable focused report without implicit prose exposure."""
         out = self.item.to_json()
         out["commentCount"] = self.comment_count
+        if self.triage_score is not None:
+            out["triageScore"] = self.triage_score
+            out["blockedCardCount"] = self.blocked_card_count
         out["parent"] = (
             cast("JsonValue", self.parent.to_json()) if self.parent is not None else None
         )
@@ -5295,6 +5358,9 @@ def _next_item_json(inspection: ItemInspection) -> JsonObject:
     """Return compact triage JSON without expanding a large child subtree."""
     out = inspection.item.to_json()
     out["commentCount"] = inspection.comment_count
+    if inspection.triage_score is not None:
+        out["triageScore"] = inspection.triage_score
+        out["blockedCardCount"] = inspection.blocked_card_count
     out["parent"] = (
         cast("JsonValue", inspection.parent.to_json()) if inspection.parent is not None else None
     )
@@ -5365,7 +5431,8 @@ def inspect_next_items(
             f"{', '.join(unknown)}; want one or more of {', '.join(board.policy.states)}"
         )
 
-    depths = blocking_order(board).depths
+    order = blocking_order(board)
+    scores = order.triage_scores
     selected = frozenset(lanes)
     items = sorted(
         (
@@ -5373,9 +5440,16 @@ def inspect_next_items(
             for item in board.items
             if item.state in selected and (include_archived or not item.archived)
         ),
-        key=lambda item: item_order_key(item, board.policy, depths),
+        key=lambda item: item_order_key(item, board.policy, scores),
     )[:limit]
-    return tuple(inspect_item(board, item.id, include_comments=include_comments) for item in items)
+    return tuple(
+        replace(
+            inspect_item(board, item.id, include_comments=include_comments),
+            blocked_card_count=order.blocked_counts[item.id],
+            triage_score=order.triage_scores[item.id],
+        )
+        for item in items
+    )
 
 
 def _item_matches_search(
@@ -5428,7 +5502,8 @@ def inspect_search_items(
             ticket_query = int(ticket_text)
         except ValueError:
             raise BoardError("card search ticket requires a supported decimal number") from None
-    depths = blocking_order(board).depths
+    order = blocking_order(board)
+    scores = order.triage_scores
     selected = frozenset(selected_lanes)
     items = sorted(
         (
@@ -5443,9 +5518,16 @@ def inspect_search_items(
                 include_comments=include_comments,
             )
         ),
-        key=lambda item: item_order_key(item, board.policy, depths),
+        key=lambda item: item_order_key(item, board.policy, scores),
     )
-    return tuple(inspect_item(board, item.id, include_comments=include_comments) for item in items)
+    return tuple(
+        replace(
+            inspect_item(board, item.id, include_comments=include_comments),
+            blocked_card_count=order.blocked_counts[item.id],
+            triage_score=order.triage_scores[item.id],
+        )
+        for item in items
+    )
 
 
 def _detail_text(args: argparse.Namespace) -> str:
@@ -5903,6 +5985,9 @@ def _print_item_inspection(
     if item.archived:
         print("  archived: yes")
     print(f"  priority: {item.priority}")
+    if inspection.triage_score is not None:
+        print(f"  triage score: {inspection.triage_score}")
+        print(f"  blocked cards: {inspection.blocked_card_count}")
     print(f"  owner: {item.owner}")
     print(f"  comments: {inspection.comment_count}")
     parent = inspection.parent.describe() if inspection.parent is not None else "none"
@@ -5959,7 +6044,7 @@ def _report_next_items(  # noqa: PLR0913 -- explicit selection and output option
         payload: JsonObject = {
             "lanes": list(selected_lanes),
             "limit": limit,
-            "order": ["blockingDepthDesc", "priority", "ticket"],
+            "order": list(TRIAGE_ORDER_FIELDS),
             "items": [cast("JsonValue", _next_item_json(inspection)) for inspection in inspections],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -5970,7 +6055,7 @@ def _report_next_items(  # noqa: PLR0913 -- explicit selection and output option
 
     print(
         f"Next {len(inspections)} card(s) from {', '.join(selected_lanes)} "
-        "(blocking depth, then priority, then ticket):"
+        "(triage score, then priority, then ticket):"
     )
     for inspection in inspections:
         print()
@@ -6010,7 +6095,7 @@ def _report_search_items(  # noqa: PLR0913 -- explicit selection and output opti
             "query": query,
             "lanes": list(selected_lanes),
             "searchedFields": fields,
-            "order": ["blockingDepthDesc", "priority", "ticket"],
+            "order": list(TRIAGE_ORDER_FIELDS),
             "items": [cast("JsonValue", _next_item_json(inspection)) for inspection in inspections],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -6021,7 +6106,7 @@ def _report_search_items(  # noqa: PLR0913 -- explicit selection and output opti
 
     print(
         f"Search matched {len(inspections)} card(s) for {query!r} in "
-        f"{', '.join(selected_lanes)} (blocking depth, then priority, then ticket):"
+        f"{', '.join(selected_lanes)} (triage score, then priority, then ticket):"
     )
     for inspection in inspections:
         print()

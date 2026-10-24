@@ -399,19 +399,25 @@ Every card has two permanent handles:
   or archived numbers must never be reused.
 
 `nextTicket` is stored rather than derived and must remain above every existing ticket.
-Card order is descending longest downstream blocking-chain depth, ascending priority
-number, then monotonically allocated ticket number. The browser and focused CLI triage
-queries share this comparator. Numeric P IDs compare numerically; named scales retain
-policy order. Only canonical `blocks` edges contribute, across every lane and all stored
-cards. Depths and strongly connected groups use the full stored graph, preserving links
-and cycle ranks. Priority inheritance uses unfinished cards only: stable state ID
+Card order is ascending `((priority_number + 1) * 100) - blocked_card_count`, then
+priority number and monotonically allocated ticket number. The browser and focused
+CLI triage queries share this comparator. Numeric P IDs use their number; named
+scales retain policy rank. Scores may be negative. Count distinct reachable unfinished
+cards through canonical `blocks` edges across all lanes, excluding the card itself.
+Completed cards stop the path; archived unfinished cards still count. Diamond paths
+and cycles never multiply a card's contribution. Compute metrics before filters/limits.
+
+Legacy longest-chain depths still use the full stored graph and remain informational.
+Priority inheritance uses unfinished cards only: stable state ID
 `completed` is exempt regardless of display label, and urgency does not pass through a
 completed intermediate. Archived unfinished cards still inherit; archived completed
 cards are exempt. The condensed DAG is processed without recursive traversal.
 
-`blocking_order()` derives longest downstream depths for sorting from the entire stored
-graph, then traverses in the opposite direction to inherit the highest urgency through
-unfinished cards.
+`blocking_order()` retains full-graph depths, inherits urgency through the unfinished
+graph and derives distinct blocked counts plus triage scores. Iterative strongly
+connected components and compact bitset reachability handle long chains and cycles.
+Internal priority-only callers may omit triage computation; normal lane/API/CLI callers
+receive the full metrics. The API can reuse the same metrics while materializing lanes.
 Relationship mutations and `set_priority()` promote blocked descendants with ordinary
 priority audit entries in the actor's transaction. Requested lower urgency is clamped
 to the upstream requirement before recording changes. A card with no blockers can have
@@ -427,8 +433,10 @@ using `cliUser` for these rule-adoption events. It advances revision only when a
 promotion is needed; subsequent reads and restarts do not fabricate duplicate history.
 Controlled offline lane/policy migrations also reconcile priorities before verification.
 A failed transaction discards relationship changes and their priority cascades together.
-The browser payload adds `blockingDepth` to cards and names the same three-part order;
-CLI next/search JSON names `blockingDepthDesc`, `priority`, and `ticket` explicitly.
+The browser payload retains `blockingDepth` and adds `blockedCardCount` and `triageScore`.
+CLI next/search JSON exposes the same score/count. Shared ordering metadata names
+`triageScoreAsc`, `priority`, and `ticket`. These are derived fields, not snapshot schema
+or audit changes. Relationship-target selectors retain ascending numeric ticket order.
 A priority mutation response includes the committed `priority`, letting the focused
 drawer selector reflect a clamped request immediately without depending on blur.
 
@@ -859,7 +867,7 @@ persisted or REST schema.
 `card next N --lane LANE [--lane LANE ...]` applies those same focused-report
 boundaries to a bounded cross-lane triage query. It validates every lane against the embedded policy,
 refuses audit drift, and orders all candidates with the same comparator as the browser:
-descending blocking depth, ascending priority, then ticket number. Input lane order
+ascending triage score, then priority and ticket number. Input lane order
 is only a filter. JSON names that ordering explicitly and returns selection metadata
 plus compact focused items. A result carries its parent and child count rather than
 expanding a potentially large child subtree; `card show` owns full child expansion.
@@ -869,7 +877,7 @@ Detail and comments still require `--include-comments`.
 case-insensitive substring matching over stable IDs and subjects plus exact matching
 for numeric or `#NNNN` ticket references. It searches every lane by default; repeated
 `--lane` options supply an embedded-policy-validated filter. Results use the same
-blocking-depth, priority, and ticket total order and compact focused-item shape as `card next`.
+triage-score, priority, and ticket total order and compact focused-item shape as `card next`.
 `--include-comments` explicitly expands both the matching surface and returned fields to
 details and comment text. Search refuses audit drift and changes no persisted or REST
 schema.
@@ -1014,7 +1022,8 @@ The suite spans these boundaries:
 | `test_board.py` | Card operations, transitions, history, links, hierarchy, and sorting. |
 | `test_attachments.py` | Browser/API and CLI uploads, removal, cover selection, size bounds, exact Git staging, snapshot rollback, and immutable file reads. |
 | `test_snapshot_publish.py` | Large audited inventories, bounded literal Git paths, unrelated staged-file exclusion, temporary pathspec cleanup, and publication failure/retry. |
-| `test_dependencies.py` | Blocking depth, cross-lane ordering, transitive priority inheritance, cycles, deep chains, and atomic adoption. |
+| `test_dependencies.py` | Legacy blocking depth, scored cross-lane ordering, transitive priority inheritance, cycles, deep chains, and atomic adoption. |
+| `test_triage_scoring.py` | Exact weighted scores, distinct reachability, Completed path cuts, archived work, cycles, large chains and CLI parity. |
 | `test_archiving.py` | Reversible visibility, archive persistence and audit, intact relationships, and filtered queries. |
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |
 | `test_policy.py` | Policy immutability, strict edge parsing, actor matching, isolation, and reload. |

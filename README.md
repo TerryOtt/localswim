@@ -296,13 +296,26 @@ uv run --frozen localswim-cli boards/my-project.json card next 5 --lane needs_te
 uv run --frozen localswim-cli boards/my-project.json card next 10 --lane ready_for_work --lane needs_terry_action --json
 ~~~
 
-Every lane and focused query uses **descending blocking depth, ascending priority
-number, then ascending ticket number**. Blocking depth is the longest downstream chain
-of `blocks` relationships across the whole board: A blocks B blocks C gives depths
-A=2, B=1, C=0. A card with no downstream blockers has depth 0. Ticket number is the
-unique tie-breaker. Lane order only filters candidates; it never changes the ranking. Each result includes focused identity and status, its parent, child count,
-and directional relationships. Use `card show` when the full child list is useful. Detail
-and comments remain absent unless `--include-comments` is supplied explicitly.
+Every lane and focused query uses **ascending triage score**, then ascending priority
+number and ticket number for ties:
+
+```text
+triageScore = ((priority number + 1) * 100) - blockedCardCount
+```
+
+P0 with no blocked cards scores 100; P1 blocking five cards scores 195. Count each
+distinct unfinished downstream card once, across the whole board. Multiple paths
+do not multiply the count, and cycles never count the card itself. Completed cards
+stop the path and do not count; archived unfinished cards still participate.
+Only `blocks` relationships contribute. A score can be zero or negative; it is not
+clamped. Named priority scales use their existing policy rank in place of a P number.
+
+Existing priority inheritance remains direct and transitive: a P1 blocker promotes
+its P3 child to P1, and scoring uses that resulting priority. Lane/search/visibility
+filters and result limits do not change the global scores. Each result includes its
+score, blocked-card count, focused identity/status, parent, child count and directional
+relationships. Use `card show` for the full child list. Detail and comments remain
+absent unless `--include-comments` is supplied explicitly.
 
 Find an existing card by concept without exporting the whole board:
 
@@ -316,7 +329,7 @@ Search is case-insensitive. Stable IDs and subjects use substring matching; a nu
 or `#NNNN` query matches that exact ticket number. All lanes are searched unless a
 repeatable `--lane` option filters them. Default matching and output exclude details and comments;
 `--include-comments` explicitly adds both to the search surface and the results. Matches
-use the same embedded-policy blocking-depth, priority, and ticket ordering as `card next`.
+use the same embedded-policy triage-score, priority, and ticket ordering as `card next`.
 
 Card lookup checks exact stable IDs before ticket conversion, including IDs made entirely
 of digits. Search retains its numeric ticket-query behavior. Numeric references retain
