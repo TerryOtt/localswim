@@ -406,16 +406,14 @@ substantial change:
 
 ```console
 uv run --frozen pytest -q
-uv run --frozen python check.py --word-table path/to/claude-dirty-words.py
+uv run --frozen python check.py
 uv build --no-sources --clear
 ```
 
 `check.py` validates tracked-file line endings, Ruff `ALL`, Ruff formatting, strict
-Pyright, pytest, actionlint with ShellCheck, and the borrowed US English vocabulary
-table. The word table is intentionally not copied here; its absence is a gate failure,
-not a skipped check. If it is available through the `CLAUDE_WORD_TABLE` environment
-variable or a documented neighboring checkout, `uv run --frozen python check.py` is
-sufficient. See `docs/TOOLING.md` for tool choices, pins, installation, and rationale.
+Pyright, pytest, and actionlint with ShellCheck. All stages are mandatory; missing
+workflow tools fail the gate. See `docs/TOOLING.md` for tool choices, pins,
+installation, and rationale.
 
 For a narrow change, run the relevant test module first, but do not describe Ruff alone
 as type-checking or pytest alone as the complete gate.

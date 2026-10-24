@@ -906,11 +906,9 @@ uv run --frozen python check.py
 ~~~
 
 The gate runs LF line-ending validation, Ruff `ALL`, Ruff formatting, strict Pyright,
-pytest, actionlint with ShellCheck, and the project's US English vocabulary check. The
-vocabulary table comes from the public FlickrGroupAddr/backend-api repository; pass its
-path with **--word-table path/to/claude-dirty-words.py** if it is not in a neighboring
-checkout. actionlint 1.7.12 and ShellCheck 0.11.0 must be on `PATH`; installation details
-are in [docs/TOOLING.md](docs/TOOLING.md). Sidebar ordering regression tests execute
+pytest, and actionlint with ShellCheck. Every stage is mandatory, and no external
+repository is required. actionlint 1.7.12 and ShellCheck 0.11.0 must be on `PATH`;
+installation details are in [docs/TOOLING.md](docs/TOOLING.md). Sidebar ordering tests execute
 the production JavaScript helpers with Node.js when it is available on `PATH`; those
 tests skip when Node.js is absent. Node.js is optional test tooling, not a runtime
 dependency.

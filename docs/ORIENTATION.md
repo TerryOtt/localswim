@@ -90,11 +90,11 @@ domain extraction, new audit rules, a generation protocol or supported backup re
 | `.python-version` / `uv.lock` | Exact development interpreter and cross-platform dependency lock. |
 | `examples/*.example.json` | Generic human-readable initialization inputs and their checked empty schema-4 board. |
 | `examples/*.terry-workflow.json` | Terry's preferred seven-lane workflow inputs and their checked empty schema-4 board. |
-| `check.py` | Complete local/CI gate: line endings, Ruff, formatting, strict Pyright, pytest, workflow/shell linting, and US English vocabulary. |
+| `check.py` | Complete local/CI gate: line endings, Ruff, formatting, strict Pyright, pytest, workflow/shell linting. |
 | `tests/` | Domain, policy, serialization, store, API, CLI, docs, and gate behavior. |
 | `src/localswim/vendor/typefaces/inter/` | Unmodified Inter WOFF2 subsets and their SIL OFL license. |
 | `docs/TOOLING.md` | Development-tool choices, exact pins, exclusions, and Codex uv usage. |
-| `.github/workflows/gate.yml` | Runs the same gate in CI and obtains the public canonical vocabulary table. |
+| `.github/workflows/gate.yml` | Runs the same gate in CI from the localswim checkout. |
 | `.github/workflows/contribution-policy.yml` | Checks non-exempt pull-request source branch names without executing PR code. |
 | `.github/CODEOWNERS` | Makes `TerryOtt` the sole code owner for every repository path. |
 | `.github/rulesets/main.json` | Reproducible recipe for the server-side `main` branch ruleset. |
@@ -1028,29 +1028,26 @@ The suite spans these boundaries:
 | `test_workspace_config.py` | Preference validation, atomic cross-process revisions, legacy initialization, and safe storage paths. |
 | `test_cli.py` | CLI-to-service mutations, activity reports, initialization, and offline migrations. |
 | `test_docs.py` | Checked generic and Terry-workflow initialization inputs and generated boards. |
-| `test_check.py` | Gate line-ending parser. |
+| `test_check.py` | Tracked text line endings, gate failure aggregation, and mandatory tool checks. |
 | `conftest.py` | Standard isolated Terry/Bot cast and empty board fixtures. |
 
 Use the exact Codex command from `AGENTS.md` so fixtures and pytest's cache live under
 the authorized external scratch root. The complete project gate is:
 
 ```console
-uv run --frozen python check.py --word-table path/to/claude-dirty-words.py
+uv run --frozen python check.py
 ```
 
 The gate runs LF validation, Ruff `ALL`, Ruff's formatter check, strict Pyright, pytest,
-actionlint with ShellCheck, and the external US English/house vocabulary checker. Ruff
-verifies that annotations exist; Pyright verifies their types. The vocabulary detector
-first runs a known-bad control sentence and fails if the canonical table is missing.
-The checker scans prose-bearing Git-tracked Python, Markdown, JSON, TOML, and YAML files.
-Its NUL-delimited Git inventory preserves Unicode, spaces and other supported pathname
-characters before filtering; it checks current working-tree content. A newly created
-untracked document is not covered until it becomes tracked. Tool
-pins and the rationale for not stacking redundant linters are in `docs/TOOLING.md`.
+and actionlint with ShellCheck. Ruff verifies that annotations exist; Pyright verifies
+their types. Every stage runs even after an earlier failure, and any failed stage or
+missing workflow tool fails the gate. Line-ending validation covers Git-tracked text
+in the working tree, including Unicode and space-bearing paths; untracked files are
+outside that inventory. Tool pins and the rationale for not stacking redundant
+linters are in `docs/TOOLING.md`.
 
-CI obtains the canonical word table from the public `FlickrGroupAddr/backend-api`
-repository instead of copying it here. The local hook is inactive until a developer
-runs `git config core.hooksPath .githooks`.
+CI uses a single localswim checkout and needs no external vocabulary repository.
+The local hook is inactive until a developer runs `git config core.hooksPath .githooks`.
 
 ## Windows/Codex environment notes
 
@@ -1124,8 +1121,8 @@ Keep each fact in the narrowest durable place:
   and license.
 
 When a schema, route, invariant, or workflow changes, update every affected layer in
-the same change. Do not copy the full transition table or vocabulary list into another
-document; link to the authoritative data so it cannot drift.
+the same change. Do not copy the full transition table into another document; link
+to the authoritative data so it cannot drift.
 
 ## Shared monitor ownership
 
