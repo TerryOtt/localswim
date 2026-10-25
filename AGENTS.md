@@ -72,6 +72,10 @@ native board monitoring is an optional extra.
 - Automatic board commits and pushes are opt-in. Do not enable `--autopush` or
   configure remotes unless the user explicitly asks. Source commits and pushes follow
   Terry's standing authorization in the branch and publishing policy below.
+  Board and gateway publishers share the persistent Git common-directory lock.
+  Acquire its OS lock without initializing or rewriting bytes first: Windows locks
+  beyond an empty file's EOF, and a pre-acquisition write can hit a held byte lock.
+  Never unlink that lock path; preserve bounded waiting and descriptor cleanup.
 - Treat each schema-4 board's embedded policy as executable permission data, not UI
   decoration. Initialization resolves lane and actor display names once into stable
   IDs; runtime authorization uses only those persisted IDs.

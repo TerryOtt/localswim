@@ -839,8 +839,7 @@ def _repository_push_locked(cwd: pathlib.Path) -> Generator[None]:
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     acquired = False
     try:
-        if os.fstat(fd).st_size == 0:
-            os.write(fd, b"\0")
+        # Both platforms lock empty files; writing byte zero here races a Windows holder.
         deadline = time.monotonic() + _PUSH_LOCK_WAIT_S
         while not try_process_lock(fd):
             if time.monotonic() >= deadline:

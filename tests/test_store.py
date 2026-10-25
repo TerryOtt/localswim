@@ -638,8 +638,14 @@ def test_concurrent_board_pushes_serialize_for_one_repository(tmp_path: pathlib.
     assert tracked == ["alpha/board.json", "beta/board.json"]
 
 
-def test_repository_push_lock_serializes_separate_processes(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize("initial_lock", [None, b"", b"persistent lock\n"])
+def test_repository_push_lock_serializes_separate_processes(
+    tmp_path: pathlib.Path, initial_lock: bytes | None
+) -> None:
     _remote, repo = initialize_autopush_repository(tmp_path)
+    lock_path = repo / ".git" / "localswim-autopush.lock"
+    if initial_lock is not None:
+        lock_path.write_bytes(initial_lock)
     first_ready = tmp_path / "first-ready"
     release_first = tmp_path / "release-first"
     second_ready = tmp_path / "second-ready"
@@ -717,6 +723,7 @@ with api_endpoint._repository_push_locked(repo):
     assert (first.returncode, first_stdout, first_stderr) == (0, "", "")
     assert (second.returncode, second_stdout, second_stderr) == (0, "", "")
     assert second_ready.read_text(encoding="utf-8") == "ready"
+    assert lock_path.read_bytes() == (initial_lock or b"")
 
 
 def test_clean_board_reconciles_an_already_committed_push_failure(tmp_path: pathlib.Path) -> None:

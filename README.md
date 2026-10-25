@@ -163,7 +163,8 @@ setting even when the flag is omitted. The setting publishes the gateway configu
 and enables automatic board publishing for newly started children. Existing board
 services keep their own publishing policy. Gateway commits include only the configuration
 file, with the same repository lock used by board publishers. Unrelated staged files
-are excluded.
+are excluded. Publishers wait for that lock even on simultaneous first use; the
+persistent lock file may be empty and must remain in place after publishing.
 
 ## Board configuration
 

@@ -732,6 +732,12 @@ the committed metadata and references stay consistent; network push releases thi
 pause. The existing repository lock still serializes multiple board services. No
 unrelated or unaudited attachment-directory files may join the commit.
 
+Board and gateway publishers lock the persistent `localswim-autopush.lock` in the Git
+common directory, including across linked worktrees. Acquisition never initializes
+or rewrites the file: both OS implementations lock an empty file, while writing byte
+zero before acquisition can fail against a Windows contender that already holds it.
+Keep the existing wait deadline, polling and release/close cleanup; never unlink the path.
+
 The publisher bounds status command arguments and supplies add/commit paths through
 literal NUL-delimited temporary pathspec files, avoiding Windows command-line overflow
 as the attachment audit grows. Every status batch must succeed before staging starts.
@@ -1028,6 +1034,7 @@ The suite spans these boundaries:
 | `test_serialization.py` | JSON validation, duplicate keys/IDs/tickets, atomic save, and locking. |
 | `test_policy.py` | Policy immutability, strict edge parsing, actor matching, isolation, and reload. |
 | `test_store.py` | Verified startup/read/reload admission, invalid-audit refusal, accepted actor context, policy diagnostics, transactionality, revision races, board placement, and autopush integration. |
+| `test_repository_push_lock.py` | Deterministic Windows first-use contention, bounded polling, native process timeout, persistent lock files, failure cleanup, and reacquisition. |
 | `test_api.py` | Real threaded loopback routes, auth, revisions, redirects, and code restart. |
 | `test_workspace.py` | Gateway discovery/proxying, child publishing policy, and workspace UI contracts. |
 | `test_service_ownership.py` | Exclusive lifetime leases, offline maintenance admission and startup exclusion, one-use launch handoff, real restart port preservation, shutdown precedence, and failed replacement cleanup. |
