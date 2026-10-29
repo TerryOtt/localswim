@@ -631,3 +631,16 @@ active, refresh its planned worker assignments before ending every turn.
   remaining-turn count simply because a conversation turn ended.
 - Preserve history and superseded assignments as evidence, clearly identify
   the current assignment set, and state missing inputs or owner decisions.
+
+## Fresh-eyes review exception
+
+Terry clarified on 2026-10-29 that a fresh-eyes subagent review of work authored
+by the parent is always permitted, even when no useful work can overlap. An
+independent audit without the parent's preconceived conclusions is a useful
+use of credits; parallel work is not a prerequisite for this review.
+
+This supersedes earlier parallel-only delegation restrictions for that review.
+It does not require fixed reviewer pairs or idle staffing. Keep other purely
+serial work in the parent, provide evidence without prescribing a verdict, and
+describe actual independence truthfully. Preserve task authorization, required
+verification and explicit model/effort, depth and concurrency limits.
