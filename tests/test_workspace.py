@@ -1657,11 +1657,18 @@ def test_catalog_recency_is_unknown_for_malformed_board(tmp_path: pathlib.Path) 
     assert "error" in row
 
 
-def test_cold_deep_link_serves_app_without_loading_wrong_board(gateway: RunningWorkspace) -> None:
-    for key in ("alpha/board", "beta/board"):
-        with urllib.request.urlopen(
-            gateway.base + "/board/" + urllib.parse.quote(key, safe=""), timeout=5
-        ) as response:
+def test_cold_deep_link_serves_app_without_loading_wrong_board(
+    gateway: RunningWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fresh gateway process has never installed a board's global users.
+    monkeypatch.setattr(board_state, "USERS", ())
+    monkeypatch.setattr(board_state, "BROWSER_USER", "")
+    routes = ["/", "/index.html"] + [
+        "/board/" + urllib.parse.quote(key, safe="")
+        for key in ("alpha/board", "beta/board", "missing/board")
+    ]
+    for route in routes:
+        with urllib.request.urlopen(gateway.base + route, timeout=5) as response:
             assert response.status == 200
             assert response.headers["Content-Type"].startswith("text/html")
             assert "workspace" in response.read().decode("utf-8").lower()

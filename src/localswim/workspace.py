@@ -795,7 +795,9 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             .replace("%TOKEN%", self.workspace.token)
             .replace("%API_PREFIX%", board_state.API_PREFIX)
             .replace("%BRANDURI%", api_endpoint.brand_data_uri())
-            .replace("%USERCSS%", api_endpoint.user_css())
+            # The workspace has no board policy at startup. Board-specific colors
+            # arrive through the selected board's browser session.
+            .replace("%USERCSS%", "")
             .replace("%TITLE%", html.escape(title))
             .replace(
                 "%WORKSPACE%",
