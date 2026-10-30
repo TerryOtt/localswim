@@ -3,8 +3,8 @@
 The optional MIT-licensed ``watchfiles`` package supplies filesystem notifications.
 This command never reads or logs board content. It records only file signatures
 and timestamps in explicitly configured runtime paths, coalesces related writes across a
-quiet window, then queues a bounded ``localswim-cli`` activity query for the target
-thread's next turn.
+quiet window, then queries bounded ``localswim-cli`` activity metadata and queues a
+compact date range and changed card numbers for the target thread's next turn.
 """
 
 from __future__ import annotations
@@ -270,11 +270,11 @@ def handle_idle_cycle(
         raise RuntimeError(message)
 
 
-def bot_only_activity(config: Config, pending: PendingAlert) -> bool:
-    """Suppress nonempty automation-only activity, independent of filesystem counts."""
+def read_activity(config: Config, pending: PendingAlert) -> list[object] | None:
+    """Read sanitized activity once; preserve uncertainty on query failure."""
     cli = shutil.which("localswim-cli")
     if cli is None:
-        return False
+        return None
     try:
         completed = subprocess.run(  # noqa: S603 -- resolved executable, fixed CLI operation
             [
@@ -294,25 +294,35 @@ def bot_only_activity(config: Config, pending: PendingAlert) -> bool:
             check=False,
         )
         if completed.returncode != 0:
-            return False
+            return None
         events = cast("object", json.loads(completed.stdout))
     except OSError, subprocess.TimeoutExpired, ValueError:
-        return False
+        return None
     if not isinstance(events, list):
-        return False
-    activity = cast("list[object]", events)
+        return None
+    return cast("list[object]", events)
+
+
+def bot_only_events(activity: list[object] | None, actor: str) -> bool:
+    """Suppress only nonempty activity entirely attributed to the automation actor."""
     # Filesystem signatures and durable activity events are not one-to-one.
     # A nonempty complete CLI result owns actor attribution, not write_count.
     if not activity:
         return False
     return all(
-        isinstance(event, dict)
-        and cast("dict[str, object]", event).get("by") == config.automation_actor
+        isinstance(event, dict) and cast("dict[str, object]", event).get("by") == actor
         for event in activity
     )
 
 
-def queue_alert(config: Config, codex: str, pending: PendingAlert) -> None:
+def bot_only_activity(config: Config, pending: PendingAlert) -> bool:
+    """Suppress nonempty automation-only activity, independent of filesystem counts."""
+    return bot_only_events(read_activity(config, pending), config.automation_actor)
+
+
+def queue_alert(
+    config: Config, codex: str, pending: PendingAlert, activity: list[object] | None = None
+) -> None:
     """Queue a sanitized next-turn alert to the registered Codex thread."""
 
     target = read_json(config.target_path)
@@ -323,26 +333,27 @@ def queue_alert(config: Config, codex: str, pending: PendingAlert) -> None:
     except ValueError as exc:
         raise ValueError("the monitor target thread ID is invalid") from exc
 
-    write_summary = (
-        "1 board write was observed"
-        if pending.write_count == 1
-        else f"{pending.write_count} board writes were coalesced"
-    )
+    tickets: set[int] = set()
+    incomplete = not activity
+    for event in activity or []:
+        if not isinstance(event, dict):
+            incomplete = True
+            continue
+        metadata = cast("dict[str, object]", event)
+        for key in ("ticket", "otherTicket", "parentFromTicket", "parentToTicket"):
+            ticket = metadata.get(key)
+            if key != "ticket" and ticket is None:
+                continue
+            if type(ticket) is int and ticket > 0:
+                tickets.add(ticket)
+            else:
+                incomplete = True
+    lines = [f"- #{ticket:04d}" for ticket in sorted(tickets)]
+    if incomplete:
+        lines.append("- Card numbers unavailable; inspect activity metadata.")
     activity_start = activity_query_bound(pending.activity_started_at)
     activity_end = activity_query_bound(pending.last_observed_at)
-    message = (
-        f"{config.board_label} next-turn board-write alert. {write_summary} after a "
-        f"{config.quiet_seconds:g}-second quiet window. This notification was queued "
-        "for the next Codex turn; it does not acknowledge delivery to the turn that "
-        "was active when the write occurred. First inspect only sanitized activity metadata "
-        "through localswim-cli. If every recorded event is by the configured automation "
-        f"actor {config.automation_actor}, take no further action. Otherwise inspect "
-        "cards as needed. Do not edit the JSON directly. Use activity between "
-        f"{activity_start} {activity_end}; those bounds enclose the change interval "
-        "at the board event log's precision. "
-        f"First observed at {pending.first_observed_at}; last observed at "
-        f"{pending.last_observed_at}."
-    )
+    message = f"{config.board_label}: {activity_start} → {activity_end}\n\n" + "\n".join(lines)
     completed = subprocess.run(  # noqa: S603 -- resolved executable, fixed arguments
         [codex, "queue", "--thread", thread_id, "--message", message],
         capture_output=True,
@@ -358,11 +369,12 @@ def queue_alert(config: Config, codex: str, pending: PendingAlert) -> None:
 
 def flush_pending_alert(config: Config, codex: str, pending: PendingAlert) -> str | None:
     """Queue uncertain activity; return None for proven automation-only events."""
-    if bot_only_activity(config, pending):
+    activity = read_activity(config, pending)
+    if bot_only_events(activity, config.automation_actor):
         print(f"Suppressed {pending.write_count} automation-only board write(s).", flush=True)
         return None
 
-    queue_alert(config, codex, pending)
+    queue_alert(config, codex, pending, activity)
     alerted_at = now()
     print(
         f"Queued one next-turn alert for {pending.write_count} board write(s) ending at "

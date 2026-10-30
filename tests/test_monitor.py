@@ -153,7 +153,9 @@ def test_flush_dispatches_fail_open_activity_once(
     assert order == (["queue", "timestamp"] if expected_queues else [])
     assert result == ("success-time" if expected_queues else None)
     if expected_queues:
-        queue.assert_called_once_with(config, "mock-codex", pending)
+        queue.assert_called_once_with(
+            config, "mock-codex", pending, json.loads(output) if exit_code == 0 else None
+        )
 
 
 def test_flush_failed_queue_cannot_record_success(
@@ -162,14 +164,14 @@ def test_flush_failed_queue_cannot_record_success(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(watcher, "bot_only_activity", Mock(return_value=False))
+    monkeypatch.setattr(watcher, "read_activity", Mock(return_value=None))
     queue = Mock(side_effect=RuntimeError("queue unavailable"))
     timestamp = Mock()
     monkeypatch.setattr(watcher, "queue_alert", queue)
     monkeypatch.setattr(watcher, "now", timestamp)
     with pytest.raises(RuntimeError, match="queue unavailable"):
         watcher.flush_pending_alert(config, "mock-codex", pending)
-    queue.assert_called_once_with(config, "mock-codex", pending)
+    queue.assert_called_once_with(config, "mock-codex", pending, None)
     timestamp.assert_not_called()
     assert "Queued" not in capsys.readouterr().out
 
@@ -206,14 +208,54 @@ def test_queue_alert_targets_registered_thread_and_sanitizes_payload(
     arguments = transport.call_args.args[0]
     assert arguments[:5] == ["mock-codex", "queue", "--thread", target_thread, "--message"]
     message = arguments[5]
-    assert "activity between 2026-10-16T10:34:46.990571-04:00 " in message
-    assert "2026-10-16T10:37:13.308249-04:00" in message
-    assert "5 board writes were coalesced" in message
-    assert config.board_label in message
-    assert "automation actor bot" in message
+    assert message == (
+        "test board: 2026-10-16T10:34:46.990571-04:00 → "
+        "2026-10-16T10:37:13.308249-04:00\n\n"
+        "- Card numbers unavailable; inspect activity metadata."
+    )
     captured = capsys.readouterr()
     for private_marker in (prose, credential):
         assert private_marker not in message + captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    ("activity", "bullets"),
+    [
+        (
+            [{"ticket": 201, "by": "terry"}, {"ticket": 9}, {"ticket": 201}],
+            "- #0009\n- #0201",
+        ),
+        (
+            [{"ticket": 201}, {"ticket": True}, {"ticket": "PRIVATE_PROSE"}, None],
+            "- #0201\n- Card numbers unavailable; inspect activity metadata.",
+        ),
+        ([], "- Card numbers unavailable; inspect activity metadata."),
+        (
+            [
+                {"ticket": 201, "otherTicket": 9},
+                {"ticket": 201, "parentFromTicket": None, "parentToTicket": 12},
+            ],
+            "- #0009\n- #0012\n- #0201",
+        ),
+    ],
+)
+def test_alert_lists_unique_sorted_tickets_only(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    activity: list[object],
+    bullets: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        watcher, "read_json", Mock(return_value={"schema": 1, "threadId": config.thread_id})
+    )
+    transport = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+    monkeypatch.setattr(watcher.subprocess, "run", transport)
+    watcher.queue_alert(config, "mock-codex", pending, activity)
+    message = transport.call_args.args[0][5]
+    assert message == (
+        f"test board: {pending.activity_started_at} → {pending.last_observed_at}\n\n{bullets}"
+    )
 
 
 def test_quiet_window_is_trailing_edge(pending: watcher.PendingAlert) -> None:
@@ -597,7 +639,7 @@ def test_ordinary_restart_retries_failed_queue_without_board_write(
     watcher.write_atomic_json(config.status_path, saved_status(config, pending))
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
     monkeypatch.setattr(watcher, "service_is_healthy", Mock(return_value=True))
-    monkeypatch.setattr(watcher, "bot_only_activity", Mock(return_value=False))
+    monkeypatch.setattr(watcher, "read_activity", Mock(return_value=None))
     monkeypatch.setattr(watcher.time, "monotonic", Mock(side_effect=[100.0, 115.0] * 2))
     queue = Mock(side_effect=[RuntimeError("queue unavailable"), None])
     monkeypatch.setattr(watcher, "queue_alert", queue)

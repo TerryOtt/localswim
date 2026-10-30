@@ -972,6 +972,10 @@ suppressed only when every event belongs to the configured automation actor.
 Human, mixed, unknown, empty, malformed and failed results queue an alert.
 Filesystem signatures and activity-event counts differ and are never compared.
 No board prose or service credentials enter monitor logs or status files.
+Queued alerts contain the board label, one activity datetime range, and a sorted,
+deduplicated bullet list of changed card numbers from that same metadata query.
+If card numbers are unavailable, a short fallback requests metadata inspection;
+uncertain queries still alert.
 An already queued alert should first inspect only its bounded activity metadata;
 proven automation-only activity needs no card inspection or work resumption.
 
