@@ -1,5 +1,5 @@
 [build-system]
-requires = ["uv_build>=0.13.5,<0.14"]
+requires = ["uv_build>=0.13.7,<0.14"]
 build-backend = "uv_build"
 
 [project]
@@ -38,12 +38,12 @@ localswim-monitor = "localswim.monitor:main"
 [dependency-groups]
 dev = [
     "pyright==1.1.414",
-    "pytest==9.1.1",
-    "ruff==0.17.2",
+    "pytest==9.2.0",
+    "ruff==0.17.3",
 ]
 
 [tool.uv]
-required-version = "==0.13.5"
+required-version = "==0.13.7"
 
 [tool.uv.build-backend]
 source-include = [

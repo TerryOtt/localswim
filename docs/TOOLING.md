@@ -6,15 +6,15 @@ no duplicate checker added merely for quantity.
 
 ## Runtime, environment, and build
 
-- **Python 3.15.1** is pinned in `.python-version`, the current stable release verified
-  on 2026-10-24. `pyproject.toml` accepts `>=3.15,<3.16`; development and CI use the
+- **Python 3.15.2** is pinned in `.python-version`, the current stable release verified
+  on 2026-11-04. `pyproject.toml` accepts `>=3.15,<3.16`; development and CI use the
   exact pin. Update the patch pin when a later 3.15 release is GA. Move the range to
   3.16 only after Python 3.16 is GA and the complete gate passes there.
-- **uv 0.13.5** installs Python, creates the environment, resolves and locks development
+- **uv 0.13.7** installs Python, creates the environment, resolves and locks development
   dependencies, runs commands, and builds distributions. `[tool.uv].required-version`
   refuses silent behavior changes from a different uv release.
 - **uv_build** is the native build backend, bounded to its current compatible minor
-  (`>=0.13.5,<0.14`). The package uses the standard `src/localswim` layout, publishes a
+  (`>=0.13.7,<0.14`). The package uses the standard `src/localswim` layout, publishes a
   `py.typed` marker, and includes `rules.json` plus the bundled Inter assets.
 - **Click 8.5.0** is the sole core runtime dependency. Its BSD-3-Clause license is compatible
   with localswim's MIT license, and its established nested-command and contextual-help
@@ -39,9 +39,9 @@ developer-only uv source override.
 
 | Tool | Pin | Job |
 |---|---:|---|
-| Ruff | 0.17.2 | Lint every stable rule (`select = ["ALL"]`) and own formatting/import order. |
+| Ruff | 0.17.3 | Lint every stable rule (`select = ["ALL"]`) and own formatting/import order. |
 | Pyright | 1.1.414 | Strict static typing, including unknown-type flow and unused symbols. |
-| pytest | 9.1.1 | Runtime behavior and regression coverage. |
+| pytest | 9.2.0 | Runtime behavior and regression coverage. |
 
 The Ruff exclusions are documented beside the configuration in `pyproject.toml`. They
 cover formatter conflicts, project-wide prose policy, intentional CLI output, and
