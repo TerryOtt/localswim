@@ -4212,15 +4212,34 @@ def _policy_document(raw: JsonObject, target: pathlib.Path) -> JsonObject:
     return policy
 
 
-def add_lane(
+def _lane_insertion_index(lanes: list[JsonValue], before: str | None, after: str | None) -> int:
+    """Resolve a single stable lane anchor without changing the policy."""
+    if before is not None and after is not None:
+        raise BoardError("lane addition accepts only one of before or after")
+    anchor = before if before is not None else after
+    if anchor is None:
+        return len(lanes)
+    matches = [
+        index
+        for index, lane in enumerate(lanes)
+        if isinstance(lane, dict) and lane.get("id") == anchor
+    ]
+    if len(matches) != 1:
+        raise BoardError(f"policy has no unique lane id {anchor!r}")
+    return matches[0] + (after is not None)
+
+
+def add_lane(  # noqa: PLR0913 -- explicit optional maintenance settings
     path: pathlib.Path,
     label: str,
     *,
     create_for: tuple[str, ...] = (),
     connect_for: tuple[str, ...] = (),
     note: str = "",
+    before: str | None = None,
+    after: str | None = None,
 ) -> str:
-    """Add one lane and explicit creation and bidirectional move permissions offline."""
+    """Add one lane offline, optionally beside an existing stable lane ID."""
     target = path.resolve()
     label = label.strip()
     lane_id = lane_slug(label)
@@ -4254,7 +4273,7 @@ def add_lane(
         }
         if note:
             new_lane["note"] = note
-        lanes.append(new_lane)
+        lanes.insert(_lane_insertion_index(lanes, before, after), new_lane)
         for actor in dict.fromkeys(connect_for):
             actor_edges = edges.get(actor)
             if not isinstance(actor_edges, list):

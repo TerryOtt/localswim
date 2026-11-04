@@ -643,6 +643,10 @@ in reverse order on success or failure. The lazy ownership import avoids the exi
 board-model/ownership module cycle; initialization and live mutation interfaces do not
 change.
 
+Lane addition appends unless `--before` or `--after` names one unique existing
+stable lane ID. These mutually exclusive placement options change only policy lane
+order; existing lane identities, cards, histories and permissions are preserved.
+
 A service's held lease excludes maintenance even during a listener gap or when its
 actual port differs from the configured snapshot port. Maintenance holding admission
 excludes direct and workspace startup before writer construction. A restart's launch

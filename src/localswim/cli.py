@@ -202,19 +202,29 @@ def lane_commands() -> None:
     "--connect-for", multiple=True, help="Actor ID allowed to move both ways with existing lanes."
 )
 @click.option("--note", default="", help="Description of the new lane.")
+@click.option("--before", help="Insert before this existing stable lane ID.")
+@click.option("--after", help="Insert after this existing stable lane ID.")
 @click.pass_obj
-def lane_add(
+def lane_add(  # noqa: PLR0913 -- Click binds each explicit maintenance option separately
     context: CliContext,
     label: str,
     *,
     create_for: tuple[str, ...],
     connect_for: tuple[str, ...],
     note: str,
+    before: str | None,
+    after: str | None,
 ) -> None:
     """Add a lane to a stopped board without changing existing cards."""
     result = _board_call(
         lambda: board_state.add_lane(
-            context.board, label, create_for=create_for, connect_for=connect_for, note=note
+            context.board,
+            label,
+            create_for=create_for,
+            connect_for=connect_for,
+            note=note,
+            before=before,
+            after=after,
         )
     )
     click.echo(f"  {result}")

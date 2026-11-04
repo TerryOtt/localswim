@@ -1783,7 +1783,21 @@ def test_cli_renames_label_without_changing_lane_identity(tmp_path: pathlib.Path
     assert board.revision == 1
 
 
-def test_cli_adds_lane_without_changing_existing_card(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    ("position", "anchor"),
+    [
+        (None, None),
+        ("--before", "backlog"),
+        ("--after", "backlog"),
+        ("--before", "in_progress"),
+        ("--after", "in_progress"),
+        ("--before", "completed"),
+        ("--after", "completed"),
+    ],
+)
+def test_cli_adds_lane_without_changing_existing_card(
+    tmp_path: pathlib.Path, position: str | None, anchor: str | None
+) -> None:
     path = tmp_path / "board.json"
     description, permissions = initialization_inputs(tmp_path)
     assert_cli(path, "board", "init", str(description), str(permissions))
@@ -1805,11 +1819,17 @@ def test_cli_adds_lane_without_changing_existing_card(tmp_path: pathlib.Path) ->
         "terry",
         "--connect-for",
         "bot",
+        *([position, anchor] if position is not None and anchor is not None else []),
     )
 
     assert result.returncode == 0, result.stderr
     changed = board_state.load(path)
-    assert changed.policy.states[-1] == "dev_equipment"
+    expected_order = list(board.policy.states)
+    insertion = len(expected_order)
+    if anchor is not None:
+        insertion = expected_order.index(anchor) + (position == "--after")
+    expected_order.insert(insertion, "dev_equipment")
+    assert list(changed.policy.states) == expected_order
     assert changed.policy.lane_label["dev_equipment"] == "Dev Equipment"
     assert changed.find("alpha").to_json() == original
     assert changed.policy.may_move("terry", "backlog", "dev_equipment")
@@ -2026,3 +2046,37 @@ def test_generic_mutation_valid_revision_posts_once(tmp_path: pathlib.Path, revi
     assert result == "changed"
     assert transport.call_count == 2
     assert transport.call_args.kwargs == {"body": {"subject": "Synthetic"}, "revision": revision}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("--before", "missing"),
+        ("--after", "missing"),
+        ("--before", "Backlog"),
+        ("--before", ""),
+        ("--before", "backlog", "--after", "completed"),
+    ],
+)
+def test_cli_lane_placement_refusal_preserves_snapshot(
+    tmp_path: pathlib.Path, arguments: tuple[str, ...]
+) -> None:
+    path = tmp_path / "board.json"
+    description, permissions = initialization_inputs(tmp_path)
+    assert_cli(path, "board", "init", str(description), str(permissions))
+    original = path.read_bytes()
+
+    result = run_cli(path, "lane", "add", "Reference", *arguments)
+
+    assert result.returncode != 0
+    assert path.read_bytes() == original
+
+
+def test_add_lane_rejects_both_positions_without_save(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "board.json"
+    description, permissions = initialization_inputs(tmp_path)
+    board_state.initialize_board(path, description, permissions)
+    original = path.read_bytes()
+    with pytest.raises(board_state.BoardError, match="only one"):
+        board_state.add_lane(path, "Reference", before="backlog", after="completed")
+    assert path.read_bytes() == original

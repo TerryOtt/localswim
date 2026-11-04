@@ -430,6 +430,21 @@ Existing cards and their history remain in place:
 uv run --frozen localswim-cli boards/my-project.json lane add "New Lane" --create-for terry --create-for bot --connect-for terry --connect-for bot
 ~~~
 
+Lane additions append by default. Supply exactly one of `--before LANE_ID` or
+`--after LANE_ID` to insert beside an existing stable lane ID; display labels are
+not accepted as anchors. Unknown anchors or both options refuse without a save.
+For a reference lane at the far left, use the current first lane's ID:
+
+~~~console
+uv run --frozen localswim-cli boards/my-project.json lane add "Architecture Decisions" --before backlog --create-for terry --create-for bot
+~~~
+
+Use the supported `board shutdown` command for the specific board before offline
+maintenance, wait for its writer to exit, and restart with its existing launcher and
+configuration afterward. Do not delete locks or force-stop a writer. Preserve any
+workspace ownership and monitor target; a shared monitor upgrade uses cooperative
+`--reload`, separately from the board restart. Inspect an uncertain save before retrying.
+
 Display renames and identity migrations are deliberately different operations:
 
 ~~~console
