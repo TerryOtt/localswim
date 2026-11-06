@@ -135,11 +135,11 @@ def test_batch_proxy_reports_effective_floor_and_unselected_cascade(
     gateway: RunningWorkspace,
 ) -> None:
     board = board_state.load(gateway.first)
-    for card in ("floor", "selected", "downstream"):
+    for card in ("upstream", "selected", "floor"):
         board.create(card, card, "backlog", "terry", priority="P3")
     board.set_priority("floor", "P2", "terry")
-    board.link("floor", "blocks", "selected", "terry")
-    board.link("selected", "blocks", "downstream", "terry")
+    board.link("upstream", "blocks", "selected", "terry")
+    board.link("selected", "blocks", "floor", "terry")
     board_state.save(board, gateway.first)
     route = board_route(gateway.base, "alpha/board", "cards/priorities")
     status, payload = request_json(
@@ -162,11 +162,11 @@ def test_batch_proxy_reports_effective_floor_and_unselected_cascade(
     assert payload["revision"] == 2
     assert payload["priorities"] == {"selected": "P1"}
     assert payload["changes"] == [
+        {"id": "upstream", "from": "P2", "to": "P1"},
         {"id": "selected", "from": "P2", "to": "P1"},
-        {"id": "downstream", "from": "P2", "to": "P1"},
     ]
     after = board_state.load(gateway.first)
     assert after.find("floor").priority == "P2"
     assert after.find("selected").history[-1].by == "terry"
-    assert after.find("downstream").history[-1].by == "terry"
+    assert after.find("upstream").history[-1].by == "terry"
     assert board_state.load(gateway.second).revision == 0

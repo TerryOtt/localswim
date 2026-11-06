@@ -1639,20 +1639,20 @@ def _blocking_priorities(
     priorities: Mapping[str, str],
     ranks: Mapping[str, int],
 ) -> dict[str, str]:
-    """Propagate urgency through the unfinished graph, with cycles collapsed."""
+    """Propagate blocked-card urgency to unfinished blockers, collapsing cycles."""
     groups = _blocking_components(graph)
     group_by_id = {node: index for index, group in enumerate(groups) for node in group}
-    blockers: dict[int, set[int]] = {index: set() for index in range(len(groups))}
+    blocked: dict[int, set[int]] = {index: set() for index in range(len(groups))}
     for parent, children in graph.items():
         source = group_by_id[parent]
-        for child in children:
-            if group_by_id[child] != source:
-                blockers[group_by_id[child]].add(source)
+        blocked[source].update(
+            group_by_id[child] for child in children if group_by_id[child] != source
+        )
     inherited: dict[int, str] = {}
-    sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter(blockers)
+    sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter(blocked)
     for group_id in sorter.static_order():
         candidates = [priorities[node] for node in groups[group_id]]
-        candidates.extend(inherited[parent] for parent in blockers[group_id])
+        candidates.extend(inherited[child] for child in blocked[group_id])
         inherited[group_id] = min(
             candidates, key=lambda priority: (ranks[priority], len(priority), priority)
         )
@@ -1673,7 +1673,7 @@ def blocking_order(
     """Legacy depth, inherited urgency and distinct unfinished-descendant triage.
 
     All stored cards participate in depth, regardless of lane or archive state.
-    Priority inheritance uses only edges between unfinished cards: the stable state
+    Blockers inherit urgency from the unfinished cards they block. The stable state
     ID ``completed`` neither receives nor transmits urgency, even inside a cycle.
     Archived unfinished cards still participate. Other relationship kinds and
     parent/child hierarchy do not create blocking edges.
@@ -2908,7 +2908,7 @@ class Board:
                 )
             )
         problems.extend(
-            f"{item_id}: blocked card priority is below required {priority}; "
+            f"{item_id}: blocker priority is below required {priority}; "
             "start the board service to reconcile dependency priorities"
             for item_id, priority in self.dependency_priority_promotions().items()
         )
@@ -3128,7 +3128,7 @@ class Board:
         return tuple(changed)
 
     def dependency_priority_promotions(self) -> dict[str, str]:
-        """Unfinished cards inherit higher urgency; completed cards are exempt."""
+        """Unfinished blockers inherit higher urgency from unfinished blocked cards."""
         targets = blocking_order(self, include_triage=False).priorities
         return {
             item.id: targets[item.id] for item in self.items if item.priority != targets[item.id]
@@ -3141,7 +3141,7 @@ class Board:
         )
 
     def set_priority(self, item_id: str, priority: str, by: Actor) -> str:
-        """Apply the requested priority subject to upstream blocker urgency, with audit."""
+        """Apply the requested priority subject to blocked-card urgency, with audit."""
         if priority not in self.policy.priorities:
             raise BoardError(
                 f"unknown priority {priority!r}; want one of {', '.join(self.policy.priorities)}"
@@ -3157,14 +3157,14 @@ class Board:
             else f"{item.label} priority: {was} -> {effective} (by {by})"
         )
         if effective != priority:
-            result += f"; requested {priority}, using {effective} for blocking dependencies"
-        downstream = len(changed) - int(item.id in changed)
-        if downstream:
-            result += f"; promoted {downstream} blocked card(s)"
+            result += f"; requested {priority}, using {effective} for blocked cards"
+        promoted = len(changed) - int(item.id in changed)
+        if promoted:
+            result += f"; promoted {promoted} blocker(s)"
         return result
 
     def set_priorities(self, references: Sequence[str], priority: str, by: Actor) -> str:
-        """Apply one explicit unfinished selection together, then inherit blocker floors."""
+        """Apply one explicit unfinished selection together, then enforce blocked-card floors."""
         if not isinstance(cast("object", priority), str) or priority not in self.policy.priorities:
             raise BoardError(f"unknown priority {priority!r}")
         if not isinstance(cast("object", by), str) or by not in {user.id for user in self.users}:
@@ -3206,7 +3206,7 @@ class Board:
         ]
         if clamped:
             effective = ", ".join(f"{item.label}={item.priority}" for item in clamped)
-            result += f"; clamped by blocking dependencies: {effective}"
+            result += f"; clamped by blocked cards: {effective}"
         return result
 
     # ---- relationships, card #0028 -------------------------------------------

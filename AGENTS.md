@@ -156,17 +156,18 @@ native board monitoring is an optional extra.
   self even in cycles. Completed cards stop paths; archived unfinished cards still
   participate. Compute scores before visibility/lane/search filters and limits; keep
   named priority scales' existing ordinal ranks. Do not clamp zero/negative scores.
-  Blocked cards inherit the highest
-  urgency among unfinished upstream blockers, with audited promotion in the same
+  Blockers inherit the highest
+  urgency among unfinished cards they block, with audited promotion in the same
   transaction. Completion is determined by stable state ID `completed`, never its
   display label. Completed cards receive no automatic promotions and do not transmit
   urgency through historical chains; archived unfinished cards still participate.
   Preserve all stored dependency links and legacy informational depths from the full
   graph. Scores use resulting inherited priorities; changing display order must not
   change the existing direct/transitive priority rule or its atomic audit behavior.
-  A card with no blockers may have any priority, regardless of its descendants.
+  Explicit demotions respect the highest urgency of unfinished blocked descendants.
   Both `blocks` and `blocked_by` enforce this ongoing floor without rejecting different
-  priorities. Removing links must not silently downgrade priorities. Only blocking
+  priorities. Lowering blocked cards or removing links leaves stored blocker priorities
+  in place. Only blocking
   relationships contribute; hierarchy and other links do not. Keep browser and CLI
   ordering consistent. Derived score/count fields are not persisted. Relationship
   target pickers retain numeric ticket order; they are not triage lists.

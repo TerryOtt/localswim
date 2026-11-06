@@ -249,16 +249,16 @@ def test_migration_adopts_priority_once_before_single_revision_bump(
     board: board_state.Board,
 ) -> None:
     board.create("urgent", "Urgent", "backlog", "bot", priority="P0")
-    board.create("blocked", "Blocked", "backlog", "bot", priority="P5")
-    board.links.append(board_state.Link("urgent", "blocks", "blocked"))
+    board.create("blocker", "Blocker", "backlog", "bot", priority="P5")
+    board.links.append(board_state.Link("blocker", "blocks", "urgent"))
     original = board.to_json()
     prepared = protocol._prepare_migration_schema5(
         original, "priority adoption", allocate_generation=lambda: GENERATION
     )
     assert prepared.board.revision == board.revision + 1
-    assert prepared.board.find("blocked").priority == "P0"
-    assert len(prepared.board.find("blocked").history) == len(board.find("blocked").history) + 1
-    event = prepared.board.find("blocked").history[-1]
+    assert prepared.board.find("blocker").priority == "P0"
+    assert len(prepared.board.find("blocker").history) == len(board.find("blocker").history) + 1
+    event = prepared.board.find("blocker").history[-1]
     assert (event.by, event.priority_frm, event.priority_to) == ("bot", "P5", "P0")
     encoded = protocol._serialize_schema5(prepared)
     assert protocol._serialize_schema5(protocol._parse_schema5(encoded, "again")) == encoded

@@ -87,8 +87,8 @@ def test_external_unfinished_floor_clamps_entire_selection(
 ) -> None:
     add_cards(board, "outside", priority="P1")
     add_cards(board, "a", "b", priority="P2")
-    board.link("outside", "blocks", "a", "bot")
     board.link("a", "blocks", "b", "bot")
+    board.link("b", "blocks", "outside", "bot")
     if cycle:
         board.link("b", "blocks", "a", "bot")
     before = board.to_json()
@@ -230,12 +230,12 @@ def test_api_reports_canonical_selection_and_every_cascade_in_ticket_order(
     board.link("middle", "blocks", "leaf", "bot")
     seed_api(api, board)
 
-    code, response = batch(api, {"cards": ["#0002", "root"], "priority": "P1"})
+    code, response = batch(api, {"cards": ["#0002", "leaf"], "priority": "P1"})
 
     assert code == 200
     assert set(response) == {"result", "revision", "priorities", "changes"}
     assert response["revision"] == 1
-    assert response["priorities"] == {"root": "P1", "middle": "P1"}
+    assert response["priorities"] == {"middle": "P1", "leaf": "P1"}
     assert response["changes"] == [
         {"id": name, "from": "P4", "to": "P1"} for name in ["root", "middle", "leaf"]
     ]
@@ -243,7 +243,7 @@ def test_api_reports_canonical_selection_and_every_cascade_in_ticket_order(
     assert saved.revision == 1
     assert all(item.history[-1].by == "bot" for item in saved.items)
     histories = [item.to_json() for item in saved.items]
-    code, response = batch(api, {"cards": ["root", "middle"], "priority": "P1"}, revision=1)
+    code, response = batch(api, {"cards": ["middle", "leaf"], "priority": "P1"}, revision=1)
     assert code == 200
     assert response["revision"] == 2
     assert response["changes"] == []

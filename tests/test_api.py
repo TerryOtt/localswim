@@ -1520,7 +1520,7 @@ def test_retired_mutation_route_returns_404(api: RunningApi) -> None:
 
 
 def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningApi) -> None:
-    for revision, (name, priority) in enumerate([("root", "P1"), ("middle", "P4"), ("leaf", "P5")]):
+    for revision, (name, priority) in enumerate([("root", "P3"), ("middle", "P3"), ("leaf", "P4")]):
         code, _ = request_json(
             api.base + API + "/cards",
             token=api_endpoint.CLI_TOKEN,
@@ -1537,7 +1537,7 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
         )
         assert code == 200
     code, out = request_json(
-        api.base + API + "/cards/root/priority",
+        api.base + API + "/cards/leaf/priority",
         token=api_endpoint.BROWSER_TOKEN,
         revision=5,
         body={"priority": "P0"},
@@ -1555,9 +1555,9 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert [item["blockedCardCount"] for item in lane["items"]] == [2, 1, 0]
     assert [item["triageScore"] for item in lane["items"]] == [98, 99, 100]
     assert payload["order"] == ["triageScoreAsc", "priority", "ticket"]
-    events = len(saved.find("leaf").history)
+    events = len(saved.find("root").history)
     code, out = request_json(
-        api.base + API + "/cards/leaf/priority",
+        api.base + API + "/cards/root/priority",
         token=api_endpoint.CLI_TOKEN,
         revision=6,
         body={"priority": "P5"},
@@ -1565,20 +1565,20 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert code == 200
     assert "using P0" in out["result"]
     assert out["priority"] == "P0"
-    assert board_state.load(api.path).find("leaf").priority == "P0"
-    assert len(board_state.load(api.path).find("leaf").history) == events
+    assert board_state.load(api.path).find("root").priority == "P0"
+    assert len(board_state.load(api.path).find("root").history) == events
 
 
 def test_api_triage_weights_priority_and_breadth_like_cli(
     api: RunningApi, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cards = [
-        ("deep", "P1"),
+        ("deep", "P3"),
         ("middle", "P3"),
-        ("leaf", "P3"),
+        ("leaf", "P1"),
         ("urgent", "P0"),
-        ("broad", "P1"),
-        ("first", "P3"),
+        ("broad", "P3"),
+        ("first", "P1"),
         ("second", "P3"),
         ("third", "P3"),
     ]
@@ -1619,11 +1619,11 @@ def test_api_triage_weights_priority_and_breadth_like_cli(
         "second",
         "third",
     ]
-    assert [item["triageScore"] for item in items] == [100, 197, 198, 199, 200, 200, 200, 200]
+    assert [item["triageScore"] for item in items] == [100, 197, 198, 199, 200, 200, 400, 400]
     assert [item["blockedCardCount"] for item in items] == [0, 3, 2, 1, 0, 0, 0, 0]
     # Legacy depth remains informative but no longer controls display order.
     assert [item["blockingDepth"] for item in items[:3]] == [0, 1, 2]
-    assert all(item["priority"] == "P1" for item in items[1:])
+    assert [item["priority"] for item in items] == ["P0", *["P1"] * 5, "P3", "P3"]
     capsys.readouterr()
     board_state.report_next_items(
         board_state.load(api.path), ["backlog"], len(cards), as_json=True, include_comments=False
@@ -1635,14 +1635,14 @@ def test_api_triage_weights_priority_and_breadth_like_cli(
 
 
 @pytest.mark.parametrize("operation", ["add", "replace", "create"])
-def test_browser_blocked_by_accepts_and_promotes_current_card_atomically(
+def test_browser_blocked_by_accepts_and_promotes_blocker_atomically(
     api: RunningApi, operation: str
 ) -> None:
     code, _ = request_json(
         api.base + API + "/cards",
         token=api_endpoint.CLI_TOKEN,
         revision=0,
-        body={"id": "blocker", "subject": "Blocker", "state": "backlog", "priority": "P1"},
+        body={"id": "blocker", "subject": "Blocker", "state": "backlog", "priority": "P5"},
     )
     assert code == 200
     revision = 1
@@ -1653,7 +1653,7 @@ def test_browser_blocked_by_accepts_and_promotes_current_card_atomically(
             "id": "current",
             "subject": "Current",
             "state": "backlog",
-            "priority": "P5",
+            "priority": "P1",
             "links": [{"kind": "blocked_by", "other": "blocker"}],
         }
     else:
@@ -1661,7 +1661,7 @@ def test_browser_blocked_by_accepts_and_promotes_current_card_atomically(
             api.base + API + "/cards",
             token=api_endpoint.CLI_TOKEN,
             revision=revision,
-            body={"id": "current", "subject": "Current", "state": "backlog", "priority": "P5"},
+            body={"id": "current", "subject": "Current", "state": "backlog", "priority": "P1"},
         )
         assert code == 200
         revision += 1
@@ -1688,22 +1688,23 @@ def test_browser_blocked_by_accepts_and_promotes_current_card_atomically(
     saved = board_state.load(api.path)
     assert saved.revision == revision + 1
     assert saved.find_link("blocker", "blocks", "current") is not None
-    current = saved.find("current")
-    assert current.priority == "P1"
-    assert len(current.history) == 2
-    assert current.history[-1].by == "terry"
-    assert current.history[-1].priority_frm == "P5"
-    assert current.history[-1].priority_to == "P1"
-    assert len(saved.find("blocker").history) == 1
+    blocker = saved.find("blocker")
+    assert blocker.priority == "P1"
+    assert len(blocker.history) == 2
+    assert blocker.history[-1].by == "terry"
+    assert blocker.history[-1].priority_frm == "P5"
+    assert blocker.history[-1].priority_to == "P1"
+    assert saved.find("current").priority == "P1"
+    assert len(saved.find("current").history) == 1
     assert saved.verify() == []
     code, payload = request_json(api.base + API + "/board")
     assert code == 200
     cards = [item for lane in payload["lanes"] for item in lane["items"]]
-    assert next(item for item in cards if item["id"] == "current")["priority"] == "P1"
+    assert next(item for item in cards if item["id"] == "blocker")["priority"] == "P1"
 
 
-@pytest.mark.parametrize(("blocker_priority", "current_priority"), [("P0", "P5"), ("P1", "P5")])
-def test_failed_create_rolls_back_blocked_card_promotion(
+@pytest.mark.parametrize(("blocker_priority", "current_priority"), [("P5", "P0"), ("P5", "P1")])
+def test_failed_create_rolls_back_blocker_promotion(
     api: RunningApi, blocker_priority: str, current_priority: str
 ) -> None:
     code, _ = request_json(
@@ -1738,7 +1739,7 @@ def test_failed_create_rolls_back_blocked_card_promotion(
     assert api.path.read_bytes() == before
 
 
-def test_browser_root_priority_is_free_and_descendant_floor_is_ongoing(api: RunningApi) -> None:
+def test_browser_blocker_respects_ongoing_descendant_floor(api: RunningApi) -> None:
     for revision, (name, priority) in enumerate([("root", "P5"), ("leaf", "P0")]):
         code, _ = request_json(
             api.base + API + "/cards",
@@ -1754,9 +1755,9 @@ def test_browser_root_priority_is_free_and_descendant_floor_is_ongoing(api: Runn
         body={"kind": "blocks", "other": "leaf"},
     )
     assert code == 200
-    assert board_state.load(api.path).find("root").priority == "P5"
+    assert board_state.load(api.path).find("root").priority == "P0"
     for revision, (ref, requested, expected) in enumerate(
-        [("root", "P3", "P3"), ("leaf", "P5", "P3"), ("root", "P1", "P1"), ("leaf", "P5", "P1")],
+        [("root", "P3", "P0"), ("leaf", "P5", "P5"), ("root", "P3", "P3"), ("leaf", "P1", "P1")],
         start=3,
     ):
         code, out = request_json(

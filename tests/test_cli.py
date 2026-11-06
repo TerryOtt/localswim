@@ -534,7 +534,7 @@ def activity_board(path: pathlib.Path) -> None:
     alpha.history[-1].at = "2026-08-23T10:03:00Z"
     board.comment("alpha", "private board words", "bot")
     alpha.comments[-1].at = "2026-08-23T10:04:00Z"
-    board.create("beta", "Later private subject", "backlog", "bot")
+    board.create("beta", "Later private subject", "backlog", "bot", priority="P1")
     board.find("beta").history[-1].at = "2026-08-23T10:06:00Z"
     board.link("alpha", "blocked_by", "beta", "bot")
     board.relationship_history[-1].at = "2026-08-23T10:07:00Z"
@@ -622,7 +622,7 @@ def test_show_json_resolves_ticket_and_relationships_without_private_text(
                 "ticket": 4,
                 "subject": "Blocker subject",
                 "state": "ready_for_work",
-                "priority": "P2",
+                "priority": "P1",
                 "owner": "bot",
             },
         }
@@ -724,17 +724,18 @@ def test_next_json_uses_shared_total_order_and_returns_focused_details(
         "ticket",
     ]
     items = cast("list[dict[str, Any]]", report["items"])
-    assert [item["id"] for item in items] == ["focus", "blocker", "parent"]
-    assert items[0]["blockedCardCount"] == 0
-    assert items[0]["triageScore"] == 200
-    assert items[1]["blockedCardCount"] == 1
-    assert items[1]["triageScore"] == 299
-    assert items[0]["commentCount"] == 1
-    assert items[0]["childCount"] == 1
-    assert "children" not in items[0]
-    assert cast("list[dict[str, Any]]", items[0]["relationships"])[0]["kind"] == "blocked_by"
-    assert "detail" not in items[0]
-    assert "comments" not in items[0]
+    assert [item["id"] for item in items] == ["blocker", "focus", "parent"]
+    blocker, focus = items[:2]
+    assert blocker["blockedCardCount"] == 1
+    assert blocker["triageScore"] == 199
+    assert focus["blockedCardCount"] == 0
+    assert focus["triageScore"] == 200
+    assert focus["commentCount"] == 1
+    assert focus["childCount"] == 1
+    assert "children" not in focus
+    assert cast("list[dict[str, Any]]", focus["relationships"])[0]["kind"] == "blocked_by"
+    assert "detail" not in focus
+    assert "comments" not in focus
     assert "Private focused detail" not in result.stdout
     assert "Private focused comment" not in result.stdout
 
@@ -769,9 +770,9 @@ def test_next_human_output_exposes_details_and_comments_when_requested(
 
     assert safe.returncode == 0, safe.stderr
     assert "triage score, then priority, then ticket" in safe.stdout
-    assert "triage score: 299" in safe.stdout
+    assert "triage score: 199" in safe.stdout
     assert "blocked cards: 1" in safe.stdout
-    assert safe.stdout.index("#0002 focus") < safe.stdout.index("#0004 blocker")
+    assert safe.stdout.index("#0004 blocker") < safe.stdout.index("#0002 focus")
     assert "#0002 focus" in safe.stdout
     assert "children: 1" in safe.stdout
     assert "blocked_by: #0004 blocker" in safe.stdout
@@ -864,9 +865,9 @@ def test_search_json_matches_ids_tickets_and_subjects_in_shared_total_order(
     assert report["searchedFields"] == ["id", "ticket", "subject"]
     assert report["order"] == ["triageScoreAsc", "priority", "ticket"]
     items = cast("list[dict[str, Any]]", report["items"])
-    assert [item["id"] for item in items] == ["focus", "blocker", "parent", "child"]
-    assert items[1]["blockedCardCount"] == 1
-    assert items[1]["triageScore"] == 299
+    assert [item["id"] for item in items] == ["blocker", "focus", "parent", "child"]
+    assert items[0]["blockedCardCount"] == 1
+    assert items[0]["triageScore"] == 199
     assert all("detail" not in item for item in items)
     assert all("comments" not in item for item in items)
 

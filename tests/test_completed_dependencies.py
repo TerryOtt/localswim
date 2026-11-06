@@ -57,20 +57,22 @@ def test_completed_links_preserve_card_and_allow_unfinished_priority_edits(
 def test_completed_card_does_not_receive_promotions_or_transmit_them(
     board: board_state.Board,
 ) -> None:
-    board.create("root", "Urgent", "backlog", "bot", priority="P0")
+    board.create("root", "Urgent", "backlog", "bot", priority="P5")
     board.create("done", "Accepted", "ready_for_work", "bot", priority="P2")
     complete(board, "done")
-    board.create("leaf", "Remaining", "backlog", "bot", priority="P3")
+    board.create("leaf", "Remaining", "backlog", "bot", priority="P0")
     accepted = board.find("done").to_json()
     board.link("root", "blocks", "done", "terry")
     board.link("done", "blocks", "leaf", "terry")
     assert board.find("done").to_json() == accepted
-    assert board.find("leaf").priority == "P3"
+    assert board.find("leaf").priority == "P0"
+    assert board.find("root").priority == "P5"
     board.set_priority("done", "P5", "terry")
     assert board.find("done").priority == "P5"
     assert board.find("done").history[-1].priority_frm == "P2"
     assert board.find("done").history[-1].by == "terry"
-    assert board.find("leaf").priority == "P3"
+    assert board.find("leaf").priority == "P0"
+    assert board.find("root").priority == "P5"
     assert board_state.blocking_order(board).depths == {"root": 2, "done": 1, "leaf": 0}
     assert board.verify() == []
 
@@ -93,41 +95,41 @@ def test_mixed_cycle_keeps_full_graph_depth_without_crossing_completed(
         "leaf": 0,
     }
     assert [board.find(name).priority for name in ("root", "a", "done", "b", "leaf")] == [
-        "P4",
-        "P0",
+        "P3",
+        "P3",
         "P2",
         "P0",
-        "P0",
+        "P5",
     ]
     assert board.find("done").to_json() == accepted
     board.set_priority("b", "P5", "terry")
-    assert board.find("b").priority == "P5"
-    assert board.find("a").priority == "P0"
+    assert board.find("b").priority == "P3"
+    assert board.find("a").priority == "P3"
     assert len(board.links) == 5
-    assert [item.id for item in board.lanes()[0].items] == ["a", "leaf", "root", "b"]
+    assert [item.id for item in board.lanes()[0].items] == ["root", "b", "a", "leaf"]
     assert board.verify() == []
 
 
-def test_archived_unfinished_blocker_still_promotes_open_work(board: board_state.Board) -> None:
-    board.create("root", "Archived prerequisite", "backlog", "bot", priority="P1")
+def test_archived_unfinished_blocker_still_inherits_urgency(board: board_state.Board) -> None:
+    board.create("root", "Archived prerequisite", "backlog", "bot", priority="P5")
     board.set_archived("root", archived=True, by="bot")
     board.create("leaf", "Remaining", "backlog", "bot", priority="P3")
     board.link("root", "blocks", "leaf", "terry")
-    assert board.find("leaf").priority == "P1"
-    assert board.find("leaf").history[-1].by == "terry"
+    assert board.find("root").priority == "P3"
+    assert board.find("root").history[-1].by == "terry"
     assert board_state.blocking_order(board).depths == {"root": 1, "leaf": 0}
     assert board.verify() == []
 
 
-def test_completion_does_not_demote_existing_descendants(board: board_state.Board) -> None:
-    board.create("root", "Prerequisite", "ready_for_work", "bot", priority="P1")
-    board.create("leaf", "Remaining", "backlog", "bot", priority="P3")
+def test_completion_does_not_demote_existing_blockers(board: board_state.Board) -> None:
+    board.create("root", "Prerequisite", "backlog", "bot", priority="P5")
+    board.create("leaf", "Remaining", "ready_for_work", "bot", priority="P3")
     board.link("root", "blocks", "leaf", "bot")
-    leaf = board.find("leaf").to_json()
-    complete(board, "root")
-    assert board.find("leaf").to_json() == leaf
+    root = board.find("root").to_json()
+    complete(board, "leaf")
+    assert board.find("root").to_json() == root
     assert not board.enforce_dependency_priorities("bot")
-    assert board.find("leaf").to_json() == leaf
+    assert board.find("root").to_json() == root
     assert board.verify() == []
 
 
@@ -158,12 +160,12 @@ def test_completed_identity_ignores_label_and_other_lanes_without_outbound_edges
     board = board_state.Board.from_json(raw, "renamed lanes and terminal backlog")
     board.create("done", "Accepted", "ready_for_work", "bot", priority="P0")
     complete(board, "done")
-    board.create("root", "Unfinished", "backlog", "bot", priority="P1")
+    board.create("root", "Unfinished", "backlog", "bot", priority="P5")
     board.create("leaf", "Remaining", "backlog", "bot", priority="P3")
     board.link("done", "blocks", "root", "bot")
     board.link("root", "blocks", "leaf", "bot")
-    assert board.find("root").priority == "P1"
-    assert board.find("leaf").priority == "P1"
+    assert board.find("root").priority == "P3"
+    assert board.find("leaf").priority == "P3"
     assert board.verify() == []
 
 
@@ -174,7 +176,7 @@ def test_startup_reconciliation_preserves_completed_objects_and_is_idempotent(
         board.create(name, name, "ready_for_work", "bot", priority=priority)
         complete(board, name)
     board.set_archived("bridge", archived=True, by="bot")
-    for name, priority in [("root", "P0"), ("child", "P3"), ("leaf", "P3")]:
+    for name, priority in [("root", "P5"), ("child", "P3"), ("leaf", "P3")]:
         board.create(name, name, "backlog", "bot", priority=priority)
     board.links.extend(
         [
@@ -193,8 +195,8 @@ def test_startup_reconciliation_preserves_completed_objects_and_is_idempotent(
     repaired = store.snapshot()
     assert repaired.revision == 8
     assert repaired.find("child").priority == "P3"
-    assert repaired.find("leaf").priority == "P0"
-    assert repaired.find("leaf").history[-1].by == "bot"
+    assert repaired.find("root").priority == "P3"
+    assert repaired.find("root").history[-1].by == "bot"
     assert {name: repaired.find(name).to_json() for name in accepted} == accepted
     assert repaired.links == board.links
     assert board_state.blocking_order(repaired).depths == {
@@ -215,13 +217,13 @@ def test_reopening_resumes_audited_inheritance_in_one_transaction(
     board: board_state.Board, tmp_path: pathlib.Path
 ) -> None:
     board = reopening_policy(board)
-    board.create("root", "Prerequisite", "backlog", "bot", priority="P1")
+    board.create("root", "Prerequisite", "backlog", "bot", priority="P5")
     board.create("done", "Accepted", "ready_for_work", "bot", priority="P3")
     complete(board, "done")
-    board.create("leaf", "Remaining", "backlog", "bot", priority="P5")
+    board.create("leaf", "Remaining", "backlog", "bot", priority="P1")
     board.link("root", "blocks", "done", "bot")
     board.link("done", "blocks", "leaf", "bot")
-    before = {name: len(board.find(name).history) for name in ("done", "leaf")}
+    before = {name: len(board.find(name).history) for name in ("done", "root")}
     path = tmp_path / "reopen.json"
     board_state.save(board, path)
     store = api_endpoint.BoardStore(path)
@@ -231,10 +233,10 @@ def test_reopening_resumes_audited_inheritance_in_one_transaction(
     saved = store.snapshot()
     assert revision == saved.revision == 1
     assert saved.find("done").state == "ready_for_work"
-    assert saved.find("done").priority == saved.find("leaf").priority == "P1"
+    assert saved.find("done").priority == saved.find("root").priority == "P1"
     assert len(saved.find("done").history) == before["done"] + 2
-    assert len(saved.find("leaf").history) == before["leaf"] + 1
-    for name in ("done", "leaf"):
+    assert len(saved.find("root").history) == before["root"] + 1
+    for name in ("done", "root"):
         assert saved.find(name).history[-1].by == "terry"
         assert saved.find(name).history[-1].priority_to == "P1"
     assert saved.verify() == []
@@ -244,10 +246,10 @@ def test_reopening_and_cascade_roll_back_when_snapshot_save_fails(
     board: board_state.Board, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     board = reopening_policy(board)
-    board.create("root", "Prerequisite", "backlog", "bot", priority="P0")
+    board.create("root", "Prerequisite", "backlog", "bot", priority="P5")
     board.create("done", "Accepted", "ready_for_work", "bot", priority="P3")
     complete(board, "done")
-    board.create("leaf", "Remaining", "backlog", "bot", priority="P5")
+    board.create("leaf", "Remaining", "backlog", "bot", priority="P0")
     board.link("root", "blocks", "done", "bot")
     board.link("done", "blocks", "leaf", "bot")
     path = tmp_path / "rollback.json"
@@ -257,7 +259,7 @@ def test_reopening_and_cascade_roll_back_when_snapshot_save_fails(
 
     def refuse_save(candidate: board_state.Board, target: pathlib.Path) -> None:
         assert candidate.find("done").state == "ready_for_work"
-        assert candidate.find("done").priority == candidate.find("leaf").priority == "P0"
+        assert candidate.find("done").priority == candidate.find("root").priority == "P0"
         assert target == path
         raise OSError("injected save failure")
 
@@ -273,11 +275,11 @@ def test_direct_reopening_restores_all_cards_when_verification_fails(
     board: board_state.Board, monkeypatch: pytest.MonkeyPatch, *, raises: bool
 ) -> None:
     board = reopening_policy(board)
-    board.create("root", "Prerequisite", "backlog", "bot", priority="P0")
+    board.create("root", "Prerequisite", "backlog", "bot", priority="P5")
     board.create("done", "Accepted", "ready_for_work", "bot", priority="P3")
     complete(board, "done")
     for name in ("a", "b", "branch"):
-        board.create(name, name, "backlog", "bot", priority="P5")
+        board.create(name, name, "backlog", "bot", priority="P0" if name == "branch" else "P5")
     for source, target in [
         ("root", "done"),
         ("done", "a"),
@@ -290,7 +292,7 @@ def test_direct_reopening_restores_all_cards_when_verification_fails(
 
     def refuse_verification(candidate: board_state.Board) -> list[str]:
         assert candidate.find("done").state == "ready_for_work"
-        assert all(candidate.find(name).priority == "P0" for name in ("done", "a", "b", "branch"))
+        assert all(candidate.find(name).priority == "P0" for name in ("root", "done", "branch"))
         if raises:
             raise board_state.BoardError("injected verification failure")
         return ["done: injected verification failure"]
@@ -304,7 +306,7 @@ def test_direct_reopening_restores_all_cards_when_verification_fails(
 def test_offline_policy_embedding_preserves_completed_history(
     board: board_state.Board, tmp_path: pathlib.Path
 ) -> None:
-    board.create("root", "Urgent", "backlog", "bot", priority="P0")
+    board.create("root", "Urgent", "backlog", "bot", priority="P5")
     board.create("done", "Accepted", "ready_for_work", "bot", priority="P2")
     complete(board, "done")
     for name in ("child", "leaf"):
@@ -331,8 +333,8 @@ def test_offline_policy_embedding_preserves_completed_history(
     migrated = board_state.load(path)
     assert migrated.find("done").to_json() == accepted
     assert migrated.find("child").priority == "P3"
-    assert migrated.find("leaf").priority == "P0"
-    assert migrated.find("leaf").history[-1].by == "bot"
+    assert migrated.find("root").priority == "P3"
+    assert migrated.find("root").history[-1].by == "bot"
     assert migrated.links == board.links
     assert migrated.revision == 1
     assert migrated.verify() == []

@@ -107,8 +107,8 @@ def test_admission_rejects_audit_defect_without_repair_or_publication(
     policy_doc["defaultPriority"] = "P4"
     candidate.policy = board_state.TransitionPolicy.from_json(policy_doc, "candidate")
     if floor:
-        candidate.create("urgent", "Urgent", "backlog", "bot", priority="P5")
-        candidate.find("alpha").priority = "P0"
+        candidate.create("urgent", "Urgent", "backlog", "bot", priority="P0")
+        candidate.set_priority("alpha", "P5", "bot")
         candidate.links.append(board_state.Link("alpha", "blocks", "urgent"))
     corrupt_admission_audit(candidate, defect)
     board_state.save(candidate, path)
@@ -162,8 +162,8 @@ def test_admission_rechecks_changed_disk_inside_reconciliation_transaction(
     path = tmp_path / "board.json"
     store = make_store(path)
     candidate = store.snapshot()
-    candidate.create("alpha", "Alpha", "backlog", "bot", priority="P0")
-    candidate.create("urgent", "Urgent", "backlog", "bot", priority="P5")
+    candidate.create("alpha", "Alpha", "backlog", "bot", priority="P5")
+    candidate.create("urgent", "Urgent", "backlog", "bot", priority="P0")
     candidate.links.append(board_state.Link("alpha", "blocks", "urgent"))
     board_state.save(candidate, path)
     original_edit = board_state.edit
@@ -194,13 +194,13 @@ def test_admission_rechecks_changed_disk_inside_reconciliation_transaction(
         with pytest.raises(board_state.BoardError, match="disk snapshot rejected"):
             store.snapshot()
         assert board_state.load(path).revision == 0
-        assert board_state.load(path).find("urgent").priority == "P5"
+        assert board_state.load(path).find("alpha").priority == "P5"
     else:
         result = store.snapshot()
         assert result.project == "Concurrent valid change"
         assert result.revision == 2
-        assert result.find("urgent").priority == "P0"
-        assert result.find("urgent").history[-1].by == "bot"
+        assert result.find("alpha").priority == "P0"
+        assert result.find("alpha").history[-1].by == "bot"
         assert result.verify() == []
         assert store.snapshot().revision == 2
 
@@ -229,8 +229,8 @@ def test_admission_promotion_save_failure_preserves_disk_and_accepted_state(
     store = make_store(path)
     accepted = store.snapshot()
     candidate = store.snapshot()
-    candidate.create("alpha", "Alpha", "backlog", "bot", priority="P0")
-    candidate.create("urgent", "Urgent", "backlog", "bot", priority="P5")
+    candidate.create("alpha", "Alpha", "backlog", "bot", priority="P5")
+    candidate.create("urgent", "Urgent", "backlog", "bot", priority="P0")
     candidate.links.append(board_state.Link("alpha", "blocks", "urgent"))
     board_state.save(candidate, path)
     before = path.read_bytes()
@@ -258,8 +258,8 @@ def test_admission_promotes_once_and_accepts_valid_legacy_history(
     path = tmp_path / "board.json"
     store = make_store(path)
     candidate = store.snapshot()
-    candidate.create("alpha", "Alpha", "backlog", "bot", priority="P0")
-    candidate.create("urgent", "Urgent", "backlog", "bot", priority="P5")
+    candidate.create("alpha", "Alpha", "backlog", "bot", priority="P5")
+    candidate.create("urgent", "Urgent", "backlog", "bot", priority="P0")
     candidate.links.append(board_state.Link("alpha", "blocks", "urgent"))
     candidate.find("alpha").history.clear()
     candidate.find("urgent").history.clear()
@@ -270,10 +270,10 @@ def test_admission_promotes_once_and_accepts_valid_legacy_history(
         assert store.reload_policy_if_changed() is None
     result = store.snapshot()
     assert result.revision == 1
-    assert result.find("alpha").history == []
-    assert len(result.find("urgent").history) == 1
-    assert result.find("urgent").history[-1].kind == "priority"
-    assert result.find("urgent").priority == "P0"
+    assert result.find("urgent").history == []
+    assert len(result.find("alpha").history) == 1
+    assert result.find("alpha").history[-1].kind == "priority"
+    assert result.find("alpha").priority == "P0"
     assert result.verify() == []
     before = path.read_bytes()
     assert store.snapshot().revision == 1

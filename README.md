@@ -311,8 +311,8 @@ stop the path and do not count; archived unfinished cards still participate.
 Only `blocks` relationships contribute. A score can be zero or negative; it is not
 clamped. Named priority scales use their existing policy rank in place of a P number.
 
-Existing priority inheritance remains direct and transitive: a P1 blocker promotes
-its P3 child to P1, and scoring uses that resulting priority. Lane/search/visibility
+Blockers inherit urgency from the cards they block, directly and transitively.
+A P3 blocker of a P1 card becomes P1, and scoring uses that priority. Lane/search/visibility
 filters and result limits do not change the global scores. Each result includes its
 score, blocked-card count, focused identity/status, parent, child count and directional
 relationships. Use `card show` for the full child list. Detail and comments remain
@@ -548,34 +548,33 @@ including HTML/SVG, are forced to download rather than execute in the board orig
 
 ## Dependency priority inheritance
 
-A blocked unfinished card must have at least the urgency of every unfinished blocker
-upstream of it. Completion is determined by the stable state ID `completed`, regardless
-of its display label. Completed cards receive no automatic promotions and do not
-transmit urgency through historical chains. Archived unfinished cards still inherit
-priority; archived completed cards are exempt too.
-A card with no blockers can have any priority, regardless of the cards it blocks.
-For example, a P5 blocker may block a P0 card and stay P5. A P1 blocker linked to a
-P5 card promotes the blocked card to P1. If the blocker later becomes P0, all blocked
-descendants are promoted to P0 too.
+An unfinished blocker must be at least as urgent as every unfinished card it blocks.
+If it blocks P3, P4, and P5 cards, its priority must be P3 or higher. Raising the P3
+card to P1 promotes any less urgent blockers up the chain to P1. A blocker may be
+more urgent than the cards it blocks.
+
+Completion is determined by the stable state ID `completed`, regardless of its display
+label. Completed cards are exempt from promotions and stop urgency propagation.
+Archived unfinished cards participate.
 
 Both `blocks` and `blocked_by` enforce the same ongoing rule. Adding or changing a
-relationship accepts different priorities and promotes blocked cards as needed;
+relationship accepts different priorities and promotes blockers as needed;
 priority differences never prevent adding a relationship. Other relationship kinds
 and parent/child hierarchy do not affect blocking order or priority inheritance.
 
 Promotions are persisted with ordinary priority-history entries, attributed to the
 actor who made the relationship or priority change, inside the same atomic revision.
-A requested priority below an upstream blocker's urgency is clamped to that requirement,
-and the command result explains the effective priority. Removing a link or lowering
-a blocker's priority never silently demotes its descendants; a later explicit priority
-change can lower a card if its remaining blockers permit that change.
+A request to lower a blocker is clamped to the highest urgency among the unfinished
+cards it blocks, and the command result explains the effective priority. Lowering a
+blocked card or removing a link leaves its blockers' stored priorities in place.
+A later explicit change may lower those blockers within their remaining requirements.
 
 Depths include all stored cards, including completed and archived cards, and all stored
 links remain intact. Priority propagation excludes completed cards, so it stops across
 completed intermediates even in cycles. Open members of a cycle continue to inherit
-urgency from unfinished blockers in that group or upstream. The graph is traversed
-iteratively, so long chains do not depend on Python's recursion limit. Completion never
-demotes descendants, and reconciliation does not change completed priority or history.
+urgency from unfinished cards in that group or downstream. The graph is traversed
+iteratively, so long chains do not depend on Python's recursion limit. Completion leaves
+stored priorities in place, and reconciliation preserves completed priority and history.
 If custom policy permits reopening a completed card, unfinished priority inheritance
 resumes with audited promotions in the same transaction.
 
@@ -584,8 +583,8 @@ REFERENCES...` applies one exact policy priority ID to 1–1000 selected card re
 in a single revision-checked operation. Canonical duplicate references and selected
 Completed cards are rejected; archived unfinished cards are allowed. The operation
 evaluates all selected overrides together before applying dependency floors, so a
-selected unfinished cycle can be lowered as a group. Unfinished blockers outside the
-selection still impose their floors, and selected cards may therefore finish at a more
+selected unfinished cycle can be lowered as a group. Unfinished cards blocked by
+the selection still impose their floors, and selected cards may therefore finish at a more
 urgent effective priority than requested. The result reports each selected card's
 effective priority and every actual change, including promotions to unselected cards.
 Audit entries are written once per changed card, in ticket order, under the real
@@ -599,7 +598,7 @@ not replay the mutation automatically. `--json` prints the structured result.
 The live service reconciles older boards on startup, and reconciles valid externally
 replaced snapshots when reading them, through audited, revision-checked transactions
 attributed to `cliUser`. Offline CLI reads never rewrite the snapshot. If verification
-finds an older blocked card below its required priority, start the service to reconcile it.
+finds an older blocker below its required priority, start the service to reconcile it.
 Controlled offline lane/policy migrations also reconcile dependency priorities in
 their existing transaction. No new persisted fields or schema migration are required. When priorities use IDs
 such as P0 through P5, their numeric values define urgency; named priority scales use
@@ -736,7 +735,7 @@ returns `result`, committed `revision`, selected-card `priorities` (effective va
 and ordered `changes` entries `{id, from, to}` for all actual changes, including
 cascades. It rejects duplicate canonical aliases and any selected Completed card;
 archived unfinished cards remain eligible. The combined selected overrides are
-evaluated before floors are applied, while unfinished blockers outside the selection
+evaluated before floors are applied, while unfinished cards blocked by the selection
 can clamp effective priorities. The request uses the ordinary bearer credential and
 `If-Match` revision boundary.
 

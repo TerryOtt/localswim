@@ -58,7 +58,7 @@ def test_cli_batch_lowers_an_entire_cycle(served_board: pathlib.Path) -> None:
 def test_cli_batch_reports_effective_clamps(served_board: pathlib.Path) -> None:
     create_card(served_board, "external", "P1")
     create_card(served_board, "selected")
-    assert_cli(served_board, "card", "link", "external", "blocks", "selected")
+    assert_cli(served_board, "card", "link", "selected", "blocks", "external")
     result = run_cli(served_board, "card", "set-priorities", "P3", "selected")
     assert result.returncode == 0, result.stderr
     assert "Selected 1 card(s); 0 actual priority change(s)" in result.stdout
@@ -73,10 +73,10 @@ def test_cli_batch_json_includes_cascades(served_board: pathlib.Path) -> None:
     create_card(served_board, "first", "P3")
     create_card(served_board, "second", "P3")
     assert_cli(served_board, "card", "link", "first", "blocks", "second")
-    result = run_cli(served_board, "card", "set-priorities", "P1", "first", "--json")
+    result = run_cli(served_board, "card", "set-priorities", "P1", "second", "--json")
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["priorities"] == {"first": "P1"}
+    assert payload["priorities"] == {"second": "P1"}
     assert payload["changes"] == [
         {"id": "first", "from": "P3", "to": "P1"},
         {"id": "second", "from": "P3", "to": "P1"},

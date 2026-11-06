@@ -44,16 +44,18 @@ def test_reachability_handles_chains_beyond_recursion_limit() -> None:
 def test_formula_uses_audited_direct_and_indirect_priority_inheritance(
     board: board_state.Board,
 ) -> None:
-    for name, priority in [("root", "P1"), ("child", "P3"), ("leaf", "P5")]:
+    for name, priority in [("root", "P5"), ("child", "P3"), ("leaf", "P1")]:
         board.create(name, name, "backlog", "bot", priority=priority)
-    board.link("child", "blocks", "leaf", "bot")
-    board.link("root", "blocks", "child", "terry")
+    board.link("root", "blocks", "child", "bot")
+    leaf_before = board.find("leaf").to_json()
+    board.link("child", "blocks", "leaf", "terry")
     order = board_state.blocking_order(board)
     assert [board.find(name).priority for name in ("root", "child", "leaf")] == ["P1"] * 3
     assert order.blocked_counts == {"root": 2, "child": 1, "leaf": 0}
     assert order.triage_scores == {"root": 198, "child": 199, "leaf": 200}
+    assert board.find("root").history[-1].by == "terry"
     assert board.find("child").history[-1].by == "terry"
-    assert board.find("leaf").history[-1].by == "terry"
+    assert board.find("leaf").to_json() == leaf_before
     assert board.verify() == []
 
 
