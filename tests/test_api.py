@@ -2072,7 +2072,7 @@ def assert_scalar_result(
 
 
 @pytest.mark.parametrize(("route", "field", "ordinary", "codes"), SCALAR_ROWS)
-def test_http_scalar_contract_matrix(  # noqa: PLR0912, PLR0913, PLR0917 -- explicit frozen matrix
+def test_http_scalar_contract_matrix(  # explicit frozen matrix
     api: RunningApi,
     monkeypatch: pytest.MonkeyPatch,
     route: str,

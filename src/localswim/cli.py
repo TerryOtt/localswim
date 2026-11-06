@@ -205,7 +205,7 @@ def lane_commands() -> None:
 @click.option("--before", help="Insert before this existing stable lane ID.")
 @click.option("--after", help="Insert after this existing stable lane ID.")
 @click.pass_obj
-def lane_add(  # noqa: PLR0913 -- Click binds each explicit maintenance option separately
+def lane_add(  # Click binds each explicit maintenance option separately
     context: CliContext,
     label: str,
     *,
@@ -338,7 +338,7 @@ def card_show(
     help="Search and return detail and comment text too.",
 )
 @click.pass_obj
-def card_search(  # noqa: PLR0913 -- Click binds each explicit query option separately
+def card_search(  # Click binds each explicit query option separately
     context: CliContext,
     query: str,
     lanes: tuple[str, ...],
@@ -378,7 +378,7 @@ def card_search(  # noqa: PLR0913 -- Click binds each explicit query option sepa
     help="Include detail and comment text in focused results.",
 )
 @click.pass_obj
-def card_next(  # noqa: PLR0913 -- Click binds each explicit query option separately
+def card_next(  # Click binds each explicit query option separately
     context: CliContext,
     count: int,
     lanes: tuple[str, ...],
@@ -413,7 +413,7 @@ def card_next(  # noqa: PLR0913 -- Click binds each explicit query option separa
     help="Read the description from a UTF-8 file.",
 )
 @click.pass_obj
-def card_create(  # noqa: PLR0913
+def card_create(
     context: CliContext,
     card_id: str,
     subject: str,

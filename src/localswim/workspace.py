@@ -554,7 +554,7 @@ class Workspace:
         try:
             raw = service_ownership.read_service_metadata(path)
             if not isinstance(raw, dict):
-                raise ValueError("invalid service metadata")  # noqa: TRY004, TRY301 -- cleanup fallback
+                raise ValueError("invalid service metadata")  # cleanup fallback
             if raw.get("workspaceLaunch") == launch_id:
                 raw = service_ownership.service_descriptor(path, require_cli_token=True)
             port, token = raw.get("port"), raw.get("token")

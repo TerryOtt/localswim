@@ -11,9 +11,9 @@ import pytest
 
 from localswim import api_endpoint, board_state
 from tests.test_api import API, RunningApi, request_json
-from tests.test_api import api as api  # noqa: PLC0414 -- pytest fixture re-export
+from tests.test_api import api as api  # pytest fixture re-export
 from tests.test_workspace import RunningWorkspace, board_route
-from tests.test_workspace import gateway as gateway  # noqa: PLC0414 -- pytest fixture re-export
+from tests.test_workspace import gateway as gateway  # pytest fixture re-export
 
 if TYPE_CHECKING:
     import pathlib

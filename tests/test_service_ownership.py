@@ -778,11 +778,11 @@ def test_failed_replacement_cleanup_rejects_bounded_bad_metadata(
 
 @pytest.mark.parametrize("mode", ["shutdown", "restart"])
 @pytest.mark.parametrize("send_failure", [False, True])
-def test_admitted_command_retains_lease_and_gate_until_worker_join(  # noqa: PLR0915 -- synchronized lifecycle phases and cleanup
+def test_admitted_command_retains_lease_and_gate_until_worker_join(  # synchronized lifecycle phases and cleanup
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
-    send_failure: bool,  # noqa: FBT001 -- parameterized failure control
+    send_failure: bool,  # parameterized failure control
 ) -> None:
     """The transport budget cannot release a writer still able to save."""
     board = tmp_path / "board.json"

@@ -939,8 +939,8 @@ Run the complete gate:
 uv run --frozen python check.py
 ~~~
 
-The gate runs LF line-ending validation, Ruff `ALL`, Ruff formatting, strict Pyright,
-pytest, and actionlint with ShellCheck. Every stage is mandatory, and no external
+The gate runs LF line-ending validation, curated Ruff lint, Ruff formatting,
+strict Pyright, pytest, and actionlint with ShellCheck. Every stage is mandatory, and no external
 repository is required. actionlint 1.7.12 and ShellCheck 0.11.0 must be on `PATH`;
 installation details are in [docs/TOOLING.md](docs/TOOLING.md). Sidebar ordering tests execute
 the production JavaScript helpers with Node.js when it is available on `PATH`; those

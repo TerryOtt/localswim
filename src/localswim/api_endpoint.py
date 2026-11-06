@@ -1,3 +1,5 @@
+# Process build and board state are updated at runtime.
+# pyright: reportConstantRedefinition=false
 """A live, draggable swimlane board over one board JSON, served on loopback.
 
     uv run --frozen localswim path/to/board.json
@@ -241,7 +243,7 @@ def refresh_build_id_if_clean() -> str:
     but it closes ordinary commit races and never blesses source bytes this process did
     not load.
     """
-    global BUILD, _next_build_refresh_at  # noqa: PLW0603 -- process build metadata
+    global BUILD, _next_build_refresh_at  # process build metadata
 
     if not BUILD.endswith("-dirty"):
         return BUILD
@@ -358,7 +360,7 @@ def request_code_restart(
     server: socketserver.BaseServer,
 ) -> tuple[bool, str | None]:
     """Schedule one graceful re-exec for changed, syntax-valid Python source."""
-    global _restart_scheduled, _restart_problem  # noqa: PLW0603
+    global _restart_scheduled, _restart_problem
 
     current = _code_stamp()
     with _restart_lock:
@@ -370,8 +372,8 @@ def request_code_restart(
         _restart_problem = None
 
     def restart_when_stable() -> None:
-        global _restart_scheduled, _restart_refused_stamp  # noqa: PLW0603
-        global _restart_problem  # noqa: PLW0603
+        global _restart_scheduled, _restart_refused_stamp
+        global _restart_problem
 
         latest = current
         while True:
@@ -654,7 +656,7 @@ def _handoff_board(
             return
         gate = _restart_gate
         if gate is None:
-            raise OSError("board restart has no reserved launch gate")  # noqa: TRY301 -- owned cleanup
+            raise OSError("board restart has no reserved launch gate")  # owned cleanup
         environment = {**os.environ, **gate.child_environment()}
         arguments = service_ownership.python_child_command(
             ["-m", "localswim.api_endpoint", str(BOARD_PATH), "--port", str(port)], environment
@@ -676,7 +678,7 @@ def _handoff_board(
                 print(f"Board service restarted on {HOST}:{port}.", flush=True)
                 return
             time.sleep(service_ownership.POLL_SECONDS)
-        raise OSError("replacement board service did not become healthy")  # noqa: TRY301 -- owned cleanup
+        raise OSError("replacement board service did not become healthy")  # owned cleanup
     except (OSError, subprocess.SubprocessError) as exc:
         try:
             if child is not None:
@@ -793,7 +795,7 @@ def try_process_lock(fd: int) -> bool:
     """Try one non-blocking, process-scoped operating-system file lock."""
     os.lseek(fd, 0, os.SEEK_SET)
     if os.name == "nt":
-        import msvcrt  # noqa: PLC0415 -- platform module must not import on POSIX
+        import msvcrt  # platform module must not import on POSIX
 
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
@@ -803,7 +805,7 @@ def try_process_lock(fd: int) -> bool:
             raise
         return True
 
-    import fcntl  # noqa: PLC0415 -- platform module must not import on Windows
+    import fcntl  # platform module must not import on Windows
 
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -816,12 +818,12 @@ def release_process_lock(fd: int) -> None:
     """Release the platform lock; closing the descriptor remains the crash fallback."""
     os.lseek(fd, 0, os.SEEK_SET)
     if os.name == "nt":
-        import msvcrt  # noqa: PLC0415 -- platform module must not import on POSIX
+        import msvcrt  # platform module must not import on POSIX
 
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         return
 
-    import fcntl  # noqa: PLC0415 -- platform module must not import on Windows
+    import fcntl  # platform module must not import on Windows
 
     fcntl.flock(fd, fcntl.LOCK_UN)
 
@@ -1069,7 +1071,7 @@ def start_autopush(
     enabled: bool,
 ) -> threading.Thread | None:
     """Start the optional publisher, or publish an explicit disabled status."""
-    global _autopush_enabled  # noqa: PLW0603 -- one service owns one autopush mode
+    global _autopush_enabled  # one service owns one autopush mode
     _autopush_enabled = enabled
     _push_stop.clear()
     if not enabled:
@@ -5128,7 +5130,7 @@ def _single_priority_id(board: board_state.Board, priority: str) -> str:
     return priority
 
 
-def _apply_http_command(  # noqa: PLR0911, PLR0912 -- one explicit branch per REST action
+def _apply_http_command(  # one explicit branch per REST action
     board: board_state.Board,
     command_parts: list[str],
     body: board_state.JsonObject,
@@ -5597,7 +5599,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._json({"result": "board service shutdown scheduled", "push": detail})
 
-    def do_POST(self) -> None:  # noqa: PLR0911, PLR0912 -- explicit REST dispatch
+    def do_POST(self) -> None:  # explicit REST dispatch
         """Execute one authenticated, revision-checked domain command."""
         route = self.path.partition("?")[0]
         if route == API_PREFIX + "/shutdown":
@@ -5717,7 +5719,7 @@ def _serve_board(args: argparse.Namespace) -> None:
 
 
 def _serve_owned_board(args: argparse.Namespace, lease: service_ownership.WriterLease) -> None:
-    global BOARD_PATH, STORE  # noqa: PLW0603 -- one process serves one board
+    global BOARD_PATH, STORE  # one process serves one board
     _shutdown_requested.clear()
     BOARD_PATH = args.board.resolve()
 
@@ -5798,7 +5800,7 @@ def main() -> None:
     """Dispatch the board file or directory workspace entry point."""
     args = parse_args()
     if args.board.is_dir():
-        from . import workspace  # noqa: PLC0415 -- workspace entry point is optional
+        from . import workspace  # workspace entry point is optional
 
         workspace.serve(
             args.board,

@@ -1,8 +1,7 @@
 # Development toolchain
 
-localswim uses a deliberately small, strict toolchain. The standard is the highest
-pedantry that still produces actionable findings, with one owner for each concern and
-no duplicate checker added merely for quantity.
+localswim uses a deliberately small, strict toolchain. Each check should save more work than it costs. Prefer actionable diagnostics
+and give each concern one owner.
 
 ## Runtime, environment, and build
 
@@ -16,7 +15,7 @@ no duplicate checker added merely for quantity.
 - **uv_build** is the native build backend, bounded to its current compatible minor
   (`>=0.13.7,<0.14`). The package uses the standard `src/localswim` layout, publishes a
   `py.typed` marker, and includes `rules.json` plus the bundled Inter assets.
-- **Click 8.5.0** is the sole core runtime dependency. Its BSD-3-Clause license is compatible
+- **Click 8.5.1** is the sole core runtime dependency. Its BSD-3-Clause license is compatible
   with localswim's MIT license, and its established nested-command and contextual-help
   model replaces the increasingly brittle flat `argparse` option matrix. Terry
   explicitly accepted this dependency tradeoff on 2026-08-25.
@@ -39,20 +38,21 @@ developer-only uv source override.
 
 | Tool | Pin | Job |
 |---|---:|---|
-| Ruff | 0.17.3 | Lint every stable rule (`select = ["ALL"]`) and own formatting/import order. |
+| Ruff | 0.17.4 | Lint selected stable rules and own formatting/import order. |
 | Pyright | 1.1.414 | Strict static typing, including unknown-type flow and unused symbols. |
 | pytest | 9.2.0 | Runtime behavior and regression coverage. |
 
-The Ruff exclusions are documented beside the configuration in `pyproject.toml`. They
-cover formatter conflicts, project-wide prose policy, intentional CLI output, and
-Unicode house style. File-level suppressions must carry a concrete reason. Enabling
-`ALL` means a Ruff upgrade can add rules; upgrade changes therefore require a clean
-review of new findings rather than an automatic version bump.
+The Ruff selection in `pyproject.toml` prioritizes correctness, security, annotations,
+imports, resource lifetime, complexity, and test validity. Stable rule families
+cover related defects. Specific selectors cover useful checks within families
+that also enforce discretionary style. Ruff formatting owns layout. Preview
+rules, framework-specific conventions, documentation wording, and mechanical
+rewrites stay outside the gate. Test exceptions cover assertions and trusted
+subprocess or loopback fixtures. Explain any new suppression where it is used.
 
-Pyright is intentionally strict. The one project-level diagnostic override permits
-reassignment of uppercase module snapshots because rules and board identities reload
-at runtime. Tests alone may access private restart/preflight seams. Neither exception
-relaxes production value types, JSON boundary validation, or annotation completeness.
+Pyright is strict. Two runtime modules allow reassignment of uppercase state
+for build, board, and policy refresh. Tests alone may access private
+restart and preflight seams.
 
 Mypy, Pylint, Flake8, isort, Black, Bandit, and pydocstyle are not added: their useful
 checks are already owned by strict Pyright or Ruff, while a second implementation would

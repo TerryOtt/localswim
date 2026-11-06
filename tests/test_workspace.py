@@ -352,7 +352,7 @@ def test_decorated_board_preserves_nondictionary_json(value: board_state.JsonVal
     )
 
 
-def _proxy_payload(  # noqa: PLR0913 -- explicit upstream response controls
+def _proxy_payload(  # explicit upstream response controls
     monkeypatch: pytest.MonkeyPatch,
     payload: bytes,
     *,
@@ -471,7 +471,7 @@ def test_decoration_failure_is_one_sanitized_response(
     if failure.startswith("encode-"):
 
         class FailingEncoder(json.JSONEncoder):
-            def iterencode(self, o: object, _one_shot: bool = False) -> Iterator[str]:  # noqa: ARG002, FBT001, FBT002 -- base protocol
+            def iterencode(self, o: object, _one_shot: bool = False) -> Iterator[str]:  # noqa: ARG002 -- base protocol
                 yield "partial private-sentinel"
                 if failure == "encode-unicode":
                     raise UnicodeEncodeError("utf-8", "private-sentinel", 0, 1, "secret")
@@ -527,7 +527,7 @@ def test_workspace_bad_session_and_status_metadata_is_unavailable(
         ).encode()
 
     class Handler(workspace.http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 -- HTTP handler protocol
+        def do_GET(self) -> None:  # HTTP handler protocol
             self.send_response(200 if self.path.endswith(route) else 404)
             self.end_headers()
             self.wfile.write(payload if self.path.endswith(route) else b"{}")
@@ -654,7 +654,7 @@ def catalog_boards(instance: workspace.Workspace) -> list[dict[str, Any]]:
         ("cards/card/attachment/id", False, 200, 32, 200),
     ],
 )
-def test_gateway_entity_route_boundaries(  # noqa: PLR0913 -- explicit route/status/size matrix
+def test_gateway_entity_route_boundaries(  # explicit route/status/size matrix
     gateway: RunningWorkspace,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -671,7 +671,7 @@ def test_gateway_entity_route_boundaries(  # noqa: PLR0913 -- explicit route/sta
         payload = b"\xff\xff"
 
     class Handler(workspace.http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 -- HTTP protocol
+        def do_GET(self) -> None:  # HTTP protocol
             if self.command == "POST":
                 self.rfile.read(int(self.headers["Content-Length"]))
             self.send_response(upstream_status)
@@ -680,7 +680,7 @@ def test_gateway_entity_route_boundaries(  # noqa: PLR0913 -- explicit route/sta
             self.end_headers()
             self.wfile.write(payload)
 
-        do_POST = do_GET  # noqa: N815 -- HTTP handler protocol
+        do_POST = do_GET  # HTTP handler protocol
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             pass
@@ -732,7 +732,7 @@ def test_gateway_committed_post_response_failure_is_uncertain(
     monkeypatch.setattr(workspace, "MAX_UPSTREAM_ENTITY_BYTES", 32)
 
     class Handler(workspace.http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802 -- HTTP protocol
+        def do_POST(self) -> None:  # HTTP protocol
             self.rfile.read(int(self.headers["Content-Length"]))
             observed.append((self.headers.get("Authorization"), self.headers.get("If-Match")))
             persisted.write_text(str(int(persisted.read_text()) + 1), encoding="utf-8")
@@ -1295,7 +1295,7 @@ def test_discovery_recovery_never_replays_proxy_post(
     posts = 0
 
     class Handler(workspace.http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802 -- HTTP handler protocol
+        def do_POST(self) -> None:  # HTTP handler protocol
             nonlocal posts
             posts += 1
             self.rfile.read(int(self.headers["Content-Length"]))
