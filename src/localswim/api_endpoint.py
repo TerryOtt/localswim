@@ -2480,7 +2480,8 @@ PAGE = """<!doctype html>
         id="live-read-age" hidden><span class="age-slot age-value" data-reserve="00"><span
         id="live-read-value"></span></span> <span id="live-read-unit" class="age-slot"><span
         id="live-read-unit-label"></span></span> ago</span></span>
-      <span id="live-clock"></span>
+      <span id="live-clock">· <span class="age-slot age-value" data-reserve="00"><span
+        id="live-clock-hour"></span></span><span id="live-clock-rest"></span></span>
     </span>
     <span id="stale"
       title="This tab stayed stale after one automatic reload."></span>
@@ -4453,7 +4454,7 @@ function clockOf(ms) {
   const h12 = ((h24 + 11) % 12) + 1;
   const mm = String(d.getMinutes()).padStart(2, '0');
   const ss = String(d.getSeconds()).padStart(2, '0');
-  return h12 + ':' + mm + ':' + ss + (h24 < 12 ? 'am' : 'pm');
+  return [h12, ':' + mm + ':' + ss + (h24 < 12 ? 'am' : 'pm')];
 }
 
 function agoOf(ms) {
@@ -4559,7 +4560,7 @@ function renderLive() {
   const badge = document.getElementById('badge');
   const dot = document.getElementById('dot');
   const nowMs = Date.now();
-  const nowTxt = clockOf(nowMs);
+  const [clockHour, clockRest] = clockOf(nowMs);
 
   // **Checked BEFORE the lastOk guard**, because a stale tab and a dead poll are
   // independent failures. A confirmed mismatch repairs itself after preserving every
@@ -4632,7 +4633,8 @@ function renderLive() {
   // The tooltip shows the complete status when a narrow window clips a field.
   const buildText = 'Build ' + PAGE_BUILD;
   document.getElementById('live-build').textContent = buildText;
-  document.getElementById('live-clock').textContent = '· ' + nowTxt;
+  document.getElementById('live-clock-hour').textContent = clockHour;
+  document.getElementById('live-clock-rest').textContent = clockRest;
   document.getElementById('live-read-never').hidden = !!lastOk;
   function showAge(kind, stamp) {
     const prefix = 'live-' + kind;
@@ -4649,7 +4651,8 @@ function renderLive() {
   const cardAge = showAge('card', lastOk && fileMs);
   const readAge = showAge('read', lastOk);
   el.title = [buildText, cardAge && 'Last card update: ' + cardAge,
-    'Last JSON file read: ' + (readAge || 'never'), nowTxt].filter(Boolean).join('  ·  ');
+    'Last JSON file read: ' + (readAge || 'never'), clockHour + clockRest]
+    .filter(Boolean).join('  ·  ');
 
   if (!lastOk) {
     badge.className = 'dead';
