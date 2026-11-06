@@ -1827,6 +1827,10 @@ PAGE = """<!doctype html>
                                       minmax(0, 18fr) minmax(0, 7fr);
                white-space: nowrap; }
   #live > span { overflow: hidden; text-overflow: ellipsis; }
+  #live .age-slot { display: inline-grid; }
+  #live .age-value { justify-items: end; }
+  #live .age-slot > span, #live .age-slot::after { grid-area: 1 / 1; }
+  #live .age-slot::after { content: attr(data-reserve); visibility: hidden; }
   @media (max-width: 1440px) {
     #bar { flex-wrap: wrap; row-gap: 6px; }
     #bar #live { flex-basis: 100%; order: 1; }
@@ -1955,7 +1959,7 @@ PAGE = """<!doctype html>
      LIVE badge and we're good." White on #14663F is 7.4:1, past WCAG AA for
      small text -- which matters because this is the one element on the page whose
      job is to be believed at a glance. */
-  #badge-slot { flex: 0 0 9.5em; display: flex; justify-content: flex-end; }
+  #badge-slot { flex: 0 0 10em; min-width: 0; display: flex; justify-content: flex-end; }
   #badge { font-size: 11px; font-weight: 700; letter-spacing: .06em;
            color: #FFFFFF; background: var(--live); border-radius: 4px;
            padding: 3px 8px; flex: 0 1 auto; white-space: nowrap;
@@ -2468,8 +2472,14 @@ PAGE = """<!doctype html>
     <span id="findn"></span>
     <span id="live">
       <span id="live-build">connecting...</span>
-      <span id="live-card-update"></span>
-      <span id="live-file-read"></span>
+      <span id="live-card-update"><span id="live-card-age" hidden>· Last card update: <span
+        class="age-slot age-value" data-reserve="00"><span id="live-card-value"></span></span> <span
+        id="live-card-unit" class="age-slot"><span
+        id="live-card-unit-label"></span></span> ago</span></span>
+      <span id="live-file-read">· Last JSON file read: <span id="live-read-never">never</span><span
+        id="live-read-age" hidden><span class="age-slot age-value" data-reserve="00"><span
+        id="live-read-value"></span></span> <span id="live-read-unit" class="age-slot"><span
+        id="live-read-unit-label"></span></span> ago</span></span>
       <span id="live-clock"></span>
     </span>
     <span id="stale"
@@ -4448,11 +4458,10 @@ function clockOf(ms) {
 
 function agoOf(ms) {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 60) return s + (s === 1 ? ' second ago' : ' seconds ago');
+  if (s < 60) return [s, 'second'];
   const m = Math.round(s / 60);
-  if (m < 60) return m + (m === 1 ? ' minute ago' : ' minutes ago');
-  const h = Math.round(m / 60);
-  return h + (h === 1 ? ' hour ago' : ' hours ago');
+  if (m < 60) return [m, 'minute'];
+  return [Math.round(m / 60), 'hour'];
 }
 
 let staleReloadStarted = false;
@@ -4621,16 +4630,26 @@ function renderLive() {
 
   // Keep each slot allocated even before the first successful read.
   // The tooltip shows the complete status when a narrow window clips a field.
-  const fields = [
-    ['live-build', 'Build ' + PAGE_BUILD],
-    ['live-card-update', lastOk && fileMs ? 'Last card update: ' + agoOf(fileMs) : ''],
-    ['live-file-read', 'Last JSON file read: ' + (lastOk ? agoOf(lastOk) : 'never')],
-    ['live-clock', nowTxt],
-  ];
-  fields.forEach(([id, text], index) => {
-    document.getElementById(id).textContent = text && index > 0 ? '· ' + text : text;
-  });
-  el.title = fields.map(([, text]) => text).filter(Boolean).join('  ·  ');
+  const buildText = 'Build ' + PAGE_BUILD;
+  document.getElementById('live-build').textContent = buildText;
+  document.getElementById('live-clock').textContent = '· ' + nowTxt;
+  document.getElementById('live-read-never').hidden = !!lastOk;
+  function showAge(kind, stamp) {
+    const prefix = 'live-' + kind;
+    document.getElementById(prefix + '-age').hidden = !stamp;
+    if (!stamp) return '';
+    const [value, unit] = agoOf(stamp);
+    const plural = unit + 's';
+    const label = value === 1 ? unit : plural;
+    document.getElementById(prefix + '-value').textContent = value;
+    document.getElementById(prefix + '-unit').dataset.reserve = plural;
+    document.getElementById(prefix + '-unit-label').textContent = label;
+    return value + ' ' + label + ' ago';
+  }
+  const cardAge = showAge('card', lastOk && fileMs);
+  const readAge = showAge('read', lastOk);
+  el.title = [buildText, cardAge && 'Last card update: ' + cardAge,
+    'Last JSON file read: ' + (readAge || 'never'), nowTxt].filter(Boolean).join('  ·  ');
 
   if (!lastOk) {
     badge.className = 'dead';

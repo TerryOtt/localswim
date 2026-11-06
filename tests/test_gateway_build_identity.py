@@ -23,7 +23,7 @@ const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 (async()=>{
 const elements = new Map();
 function element(id) {
-  if (!elements.has(id)) elements.set(id, {textContent:'', className:'', value:'draft',
+  if (!elements.has(id)) elements.set(id, {textContent:'', className:'', value:'draft',dataset:{},
     classList:{values:new Set(),toggle(k,v){v?this.values.add(k):this.values.delete(k)},
       add(k){this.values.add(k)},remove(k){this.values.delete(k)}}});
   return elements.get(id);
@@ -41,7 +41,7 @@ const context=vm.createContext({window,location,URL,Date,document:{getElementByI
   pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,LIVE_MS:5000,WARN_MS:15000,
   drafts:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
   STALE_RELOAD_STATE_KEY:'saved',STALE_RELOAD_QUERY:'_localswim_build',staleReloadStarted:false,
-  PAGE_BUILD:'aaaaaaa',clockOf:()=>'',agoOf:()=>''});
+  PAGE_BUILD:'aaaaaaa',clockOf:()=>'',agoOf:()=>[0,'second']});
 function section(source,start,end) {
   const a=source.indexOf(start),b=source.indexOf(end,a);
   if(a<0||b<0)throw Error('Production helper boundary not found: '+start);
