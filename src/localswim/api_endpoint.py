@@ -1821,7 +1821,20 @@ PAGE = """<!doctype html>
      Needs Terry. **The CTAs went white in #0054 and the metadata did not**, so the
      bar currently has two tiers on purpose rather than by omission. */
   #bar #live, #bar #alerts-wrap, #bar .meta { color: var(--bardim); }
-  #bar #live { min-width: 0; max-height: 3em; overflow: hidden; }
+  /* Fixed proportions keep each status field anchored as its text changes. */
+  #bar #live { flex: 0 1 52em; min-width: 0; display: grid; column-gap: .4em;
+               grid-template-columns: minmax(0, 8fr) minmax(0, 17fr)
+                                      minmax(0, 18fr) minmax(0, 7fr);
+               white-space: nowrap; }
+  #live > span { overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 1440px) {
+    #bar { flex-wrap: wrap; row-gap: 6px; }
+    #bar #live { flex-basis: 100%; order: 1; }
+  }
+  #bar:has(> :is(#stale, #restart, #push).show) { flex-wrap: wrap; row-gap: 6px; }
+  #bar:has(> :is(#stale, #restart, #push).show) #live { flex-basis: 100%; order: 1; }
+  #bar :is(#stale, #restart, #push) { max-width: 100%; white-space: normal;
+                                    overflow-wrap: anywhere; }
   /* The product wordmark and board name share the approved 15px title typography but
      have different emphasis. `localswim` uses the logo's light blue instead of white,
      so the static mark and word read as one product identity. The board name retains
@@ -1942,9 +1955,11 @@ PAGE = """<!doctype html>
      LIVE badge and we're good." White on #14663F is 7.4:1, past WCAG AA for
      small text -- which matters because this is the one element on the page whose
      job is to be believed at a glance. */
+  #badge-slot { flex: 0 0 9.5em; display: flex; justify-content: flex-end; }
   #badge { font-size: 11px; font-weight: 700; letter-spacing: .06em;
            color: #FFFFFF; background: var(--live); border-radius: 4px;
-           padding: 3px 8px; flex: 0 0 auto; transition: background .2s; }
+           padding: 3px 8px; flex: 0 1 auto; white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; transition: background .2s; }
   #badge.warn { background: var(--p1); }
   #badge.dead { background: var(--p0); }
 
@@ -2451,7 +2466,12 @@ PAGE = """<!doctype html>
       placeholder="Find in cards   /"
       title="Search titles, descriptions and comments. Press / to focus, Escape to clear.">
     <span id="findn"></span>
-    <span id="live">connecting...</span>
+    <span id="live">
+      <span id="live-build">connecting...</span>
+      <span id="live-card-update"></span>
+      <span id="live-file-read"></span>
+      <span id="live-clock"></span>
+    </span>
     <span id="stale"
       title="This tab stayed stale after one automatic reload."></span>
     <span id="restart"
@@ -2459,8 +2479,8 @@ PAGE = """<!doctype html>
 edit leaves the current process running and reports the failing check here."></span>
     <span id="push"></span>
     <label id="alerts-wrap"><input type="checkbox" id="alerts"> Alerts</label>
-    <span id="badge"
-      title="Green means Python read and parsed the board file in the last 5s.">LIVE</span>
+    <span id="badge-slot"><span id="badge"
+      title="Green means Python read and parsed the board file in the last 5s.">LIVE</span></span>
   </div>
   <div id="banner">
     <strong id="banner-head"></strong>
@@ -4599,12 +4619,20 @@ function renderLive() {
   }
   push.classList.toggle('show', pushFailed);
 
+  // Keep each slot allocated even before the first successful read.
+  // The tooltip shows the complete status when a narrow window clips a field.
+  const fields = [
+    ['live-build', 'Build ' + PAGE_BUILD],
+    ['live-card-update', lastOk && fileMs ? 'Last card update: ' + agoOf(fileMs) : ''],
+    ['live-file-read', 'Last JSON file read: ' + (lastOk ? agoOf(lastOk) : 'never')],
+    ['live-clock', nowTxt],
+  ];
+  fields.forEach(([id, text], index) => {
+    document.getElementById(id).textContent = text && index > 0 ? '· ' + text : text;
+  });
+  el.title = fields.map(([, text]) => text).filter(Boolean).join('  ·  ');
+
   if (!lastOk) {
-    // **`Build` leads here TOO, and it did not before.** This branch never reached
-    // the `parts` list, so the build id vanished exactly when the poll was dead --
-    // the moment somebody most needs to know which code they are looking at.
-    // Cards #0043 and #0049.
-    el.textContent = 'Build ' + PAGE_BUILD + '  ·  Last JSON file read: never  ·  ' + nowTxt;
     badge.className = 'dead';
     badge.textContent = 'NO DATA';
     dot.classList.add('stale');
@@ -4612,41 +4640,7 @@ function renderLive() {
     return;
   }
 
-  // **All three in ONE span, so every separator is the same separator.** Terry
-  // asked for the dot between the first two to match the one already between the
-  // last two; two spans plus a flex gap could never quite line up with a `·`
-  // typed into the middle of a string.
-  //
-  // The file's age is a DIFFERENT fact from the poll's, and both belong here: a
-  // board nobody has touched for two hours is normal, and a poll that has not
-  // answered for two hours is not.
-  // **The wall clock carries no label.** Terry: "drop 'Currently:', it's obvious
-  // its current local time." The two ages are labelled because a bare duration
-  // could be either; a running clock explains itself.
   const age = nowMs - lastOk;
-  const parts = [];
-  // **`Build` LEADS, and it is capitalized.** Terry, 2026-08-19: "Move 'build (hash)'
-  // to left of 'File written'. Separate with dot to stay consistent, capitalize
-  // 'Build'." Card #0043. The separator was already the dot he wanted.
-  //
-  // **It shows even when it AGREES with the server, and that is deliberate.** A check
-  // that is invisible while healthy is indistinguishable from one that was never wired
-  // up -- the failure this whole bar exists to refuse. It sits in the proof-of-life
-  // span rather than beside the counts, because it is EVIDENCE and not a call to
-  // action.
-  parts.push('Build ' + PAGE_BUILD);
-  // **Both labels renamed, and the pair gets DISAMBIGUATED.** Card #0049. One said
-  // *written* and the other said *update* -- two words for one idea, neither saying
-  // WHAT was written or updated.
-  //
-  // **The distinction was already documented here and invisible on screen:** the
-  // file's age and the poll's age are different facts. A board nobody has touched for
-  // two hours is normal; a poll that has not answered for two hours is not. **One
-  // going quiet is fine and the other is a fault, and now the labels say which.**
-  if (fileMs) parts.push('Last card update: ' + agoOf(fileMs));
-  parts.push('Last JSON file read: ' + agoOf(lastOk));
-  parts.push(nowTxt);
-  el.textContent = parts.join('  ·  ');
 
   // **The badge flips at LIVE_MS, not at WARN_MS.** It carries a single claim --
   // "Python read that file within the last 5 seconds" -- and a badge that stays
