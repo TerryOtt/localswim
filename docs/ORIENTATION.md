@@ -399,10 +399,13 @@ Every card has two permanent handles:
   or archived numbers must never be reused.
 
 `nextTicket` is stored rather than derived and must remain above every existing ticket.
-Card order is ascending `((priority_number + 1) * 100) - blocked_card_count`, then
-priority number and monotonically allocated ticket number. The browser and focused
-CLI triage queries share this comparator. Numeric P IDs use their number; named
-scales retain policy rank. Scores may be negative. Count distinct reachable unfinished
+Browser and CLI board lanes order by priority, then same-priority dependencies within
+that lane, then ticket number among eligible cards. Cycles form groups whose members
+appear in ticket order. Archived cards stay out of the visible ordering graph.
+Focused CLI queries order by ascending
+`((priority_number + 1) * 100) - blocked_card_count`, then priority and ticket number.
+Numeric P IDs use their number, and named scales retain policy rank. Scores may be
+negative. Count distinct reachable unfinished
 cards through canonical `blocks` edges across all lanes, excluding the card itself.
 Completed cards stop the path; archived unfinished cards still count. Diamond paths
 and cycles never multiply a card's contribution. Compute metrics before filters/limits.
@@ -433,10 +436,11 @@ using `cliUser` for these rule-adoption events. It advances revision only when a
 promotion is needed; subsequent reads and restarts do not fabricate duplicate history.
 Controlled offline lane/policy migrations also reconcile priorities before verification.
 A failed transaction discards relationship changes and their priority cascades together.
-The browser payload retains `blockingDepth` and adds `blockedCardCount` and `triageScore`.
-CLI next/search JSON exposes the same score/count. Shared ordering metadata names
-`triageScoreAsc`, `priority`, and `ticket`. These are derived fields, not snapshot schema
-or audit changes. Relationship-target selectors retain ascending numeric ticket order.
+The browser payload retains `blockingDepth`, `blockedCardCount`, and `triageScore`.
+Its visible lane order is described by `priority`, `blockingWithinLane`, and `ticket`.
+CLI next/search JSON exposes the same score/count and its separate `triageScoreAsc`,
+`priority`, and `ticket` order. These are derived fields. Relationship-target selectors
+retain ascending numeric ticket order.
 A priority mutation response includes the committed `priority`, letting the focused
 drawer selector reflect a clamped request immediately without depending on blur.
 

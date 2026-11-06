@@ -4810,7 +4810,11 @@ def payload() -> bytes:
     # Retain archived cards for relationship lookups and existing open drawers.
     # Only active cards contribute to lane rendering, counts, and search matches.
     order = board_state.blocking_order(board)
-    lanes = board.lanes(include_archived=True, order=order)
+    lanes = board.lanes()
+    lane_items = {lane.state: lane.items for lane in lanes}
+    for item in board.items:
+        if item.archived and item.state in lane_items:
+            lane_items[item.state].append(item)
     policy = board.policy
     browser_edges = policy.edges_for(board.browser_user)
 
@@ -4848,7 +4852,7 @@ def payload() -> bytes:
             "revision": board.revision,
             "attachmentMaxBytes": attachments.MAX_BYTES,
             "project": board.project,
-            "order": list(board_state.TRIAGE_ORDER_FIELDS),
+            "order": list(board_state.LANE_ORDER_FIELDS),
             "lanes": [
                 {
                     "state": lane.state,

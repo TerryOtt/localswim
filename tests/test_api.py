@@ -1554,7 +1554,7 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert [item["blockingDepth"] for item in lane["items"]] == [2, 1, 0]
     assert [item["blockedCardCount"] for item in lane["items"]] == [2, 1, 0]
     assert [item["triageScore"] for item in lane["items"]] == [98, 99, 100]
-    assert payload["order"] == ["triageScoreAsc", "priority", "ticket"]
+    assert payload["order"] == ["priority", "blockingWithinLane", "ticket"]
     events = len(saved.find("root").history)
     code, out = request_json(
         api.base + API + "/cards/root/priority",
@@ -1569,7 +1569,7 @@ def test_blocking_order_and_priority_cascade_use_one_api_revision(api: RunningAp
     assert len(board_state.load(api.path).find("root").history) == events
 
 
-def test_api_triage_weights_priority_and_breadth_like_cli(
+def test_api_lane_order_is_separate_from_cli_triage(
     api: RunningApi, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cards = [
@@ -1611,6 +1611,28 @@ def test_api_triage_weights_priority_and_breadth_like_cli(
     items = lane["items"]
     assert [item["id"] for item in items] == [
         "urgent",
+        "deep",
+        "middle",
+        "leaf",
+        "broad",
+        "first",
+        "second",
+        "third",
+    ]
+    assert [item["triageScore"] for item in items] == [100, 198, 199, 200, 197, 200, 400, 400]
+    assert [item["blockedCardCount"] for item in items] == [0, 2, 1, 0, 3, 0, 0, 0]
+    # Legacy depth remains informative but no longer controls display order.
+    assert [item["blockingDepth"] for item in items[:3]] == [0, 2, 1]
+    assert [item["priority"] for item in items] == ["P0", *["P1"] * 5, "P3", "P3"]
+    capsys.readouterr()
+    board_state.report_next_items(
+        board_state.load(api.path), ["backlog"], len(cards), as_json=True, include_comments=False
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert payload["order"] == ["priority", "blockingWithinLane", "ticket"]
+    assert report["order"] == ["triageScoreAsc", "priority", "ticket"]
+    assert [item["id"] for item in report["items"]] == [
+        "urgent",
         "broad",
         "deep",
         "middle",
@@ -1619,19 +1641,27 @@ def test_api_triage_weights_priority_and_breadth_like_cli(
         "second",
         "third",
     ]
-    assert [item["triageScore"] for item in items] == [100, 197, 198, 199, 200, 200, 400, 400]
-    assert [item["blockedCardCount"] for item in items] == [0, 3, 2, 1, 0, 0, 0, 0]
-    # Legacy depth remains informative but no longer controls display order.
-    assert [item["blockingDepth"] for item in items[:3]] == [0, 1, 2]
-    assert [item["priority"] for item in items] == ["P0", *["P1"] * 5, "P3", "P3"]
-    capsys.readouterr()
-    board_state.report_next_items(
-        board_state.load(api.path), ["backlog"], len(cards), as_json=True, include_comments=False
-    )
-    report = json.loads(capsys.readouterr().out)
-    assert report["order"] == payload["order"]
-    for field in ("id", "triageScore", "blockedCardCount"):
-        assert [item[field] for item in report["items"]] == [item[field] for item in items]
+    for field in ("triageScore", "blockedCardCount"):
+        assert {item["id"]: item[field] for item in report["items"]} == {
+            item["id"]: item[field] for item in items
+        }
+
+
+def test_archived_blocker_does_not_reorder_visible_lane_cards(api: RunningApi) -> None:
+    board = board_state.load(api.path)
+    for name in ("first", "second", "archived"):
+        board.create(name, name, "backlog", "bot", priority="P3")
+    board.link("archived", "blocks", "first", "bot")
+    board.set_archived("archived", archived=True, by="bot")
+    board_state.save(board, api.path)
+
+    code, payload = request_json(api.base + API + "/board")
+
+    assert code == 200
+    lane = next(lane for lane in payload["lanes"] if lane["state"] == "backlog")
+    assert [item["id"] for item in lane["items"] if not item.get("archived")] == ["first", "second"]
+    assert next(item for item in lane["items"] if item["id"] == "archived")["archived"] is True
+    assert payload["counts"]["backlog"] == 2
 
 
 @pytest.mark.parametrize("operation", ["add", "replace", "create"])

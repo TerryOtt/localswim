@@ -135,7 +135,14 @@ def test_scores_can_cross_priority_bands_and_be_negative_with_stable_ties(
     board.links = [board_state.Link("wide", "blocks", f"leaf{index}") for index in range(201)]
     order = board_state.blocking_order(board)
     assert order.triage_scores["wide"] == -1
-    assert [item.id for item in board.lanes()[0].items][:3] == ["wide", "ticket_first", "peer"]
+    assert [item.id for item in board.lanes(order=order)[0].items][:3] == [
+        "ticket_first",
+        "peer",
+        "wide",
+    ]
+    assert [
+        item.item.item_id for item in board_state.inspect_next_items(board, ("backlog",), 3)
+    ] == ["wide", "ticket_first", "peer"]
     board.links = board.links[:100]
     order = board_state.blocking_order(board)
     assert order.triage_scores["wide"] == order.triage_scores["ticket_first"] == 100

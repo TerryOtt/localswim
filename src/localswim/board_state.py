@@ -52,6 +52,7 @@ import copy
 import datetime as dt
 import graphlib
 import hashlib
+import heapq
 import http.client
 import io
 import itertools
@@ -75,7 +76,7 @@ from typing import TYPE_CHECKING, Literal, Self, cast
 from . import attachments as card_attachments
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping, Sequence
+    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 
 type JsonValue = bool | int | float | str | list[JsonValue] | JsonObject | None
 type JsonObject = dict[str, JsonValue]
@@ -1601,6 +1602,7 @@ class BlockingOrder:
 
 
 TRIAGE_ORDER_FIELDS = ("triageScoreAsc", "priority", "ticket")
+LANE_ORDER_FIELDS = ("priority", "blockingWithinLane", "ticket")
 
 
 def _blocking_counts(graph: Mapping[str, set[str]]) -> dict[str, int]:
@@ -1736,6 +1738,57 @@ def item_order_key(
     )
 
 
+def _lane_item_ranks(items: Mapping[str, Item], policy: TransitionPolicy) -> dict[str, int]:
+    ranks = priority_ranks(policy)
+    fallback = max(ranks.values()) + 1
+    return {item_id: ranks.get(item.priority, fallback) for item_id, item in items.items()}
+
+
+def _lane_blockers(
+    items: Mapping[str, Item],
+    links: Iterable[Link],
+    ranks: Mapping[str, int],
+) -> dict[str, set[str]]:
+    """Map each selected card to its blockers in the same lane and priority band."""
+    blockers: dict[str, set[str]] = {item_id: set() for item_id in items}
+    for link in links:
+        if link.kind != "blocks" or link.frm not in items or link.to not in items:
+            continue
+        blocker, blocked = items[link.frm], items[link.to]
+        if blocker.state == blocked.state and ranks[blocker.id] == ranks[blocked.id]:
+            blockers[blocked.id].add(blocker.id)
+    return blockers
+
+
+def _ordered_lane_items(
+    items: Mapping[str, Item],
+    blockers: Mapping[str, set[str]],
+    ranks: Mapping[str, int],
+) -> Iterator[Item]:
+    """Choose the earliest eligible component by priority and its lowest ticket."""
+    groups = [
+        sorted((items[node] for node in group), key=lambda item: (item.ticket, item.id))
+        for group in _blocking_components(blockers)
+    ]
+    group_by_id = {item.id: index for index, group in enumerate(groups) for item in group}
+    sorter: graphlib.TopologicalSorter[int] = graphlib.TopologicalSorter()
+    for node, prerequisites in blockers.items():
+        group_id = group_by_id[node]
+        sorter.add(
+            group_id,
+            *(group_by_id[parent] for parent in prerequisites if group_by_id[parent] != group_id),
+        )
+    sorter.prepare()
+    ready: list[tuple[int, int, str, int]] = []
+    while sorter.is_active():
+        for group_id in sorter.get_ready():
+            first = groups[group_id][0]
+            heapq.heappush(ready, (ranks[first.id], first.ticket, first.id, group_id))
+        _, _, _, group_id = heapq.heappop(ready)
+        yield from groups[group_id]
+        sorter.done(group_id)
+
+
 def parse_stamp(raw: str | None) -> dt.datetime:
     """One history `at` string as an aware datetime, or `_BEGINNING_OF_TIME`.
 
@@ -1777,46 +1830,51 @@ def _parse_stamp(raw: str | None) -> dt.datetime | None:
     return parsed
 
 
-def report_sort_health(board: Board) -> list[str]:
-    """Check the shared total order, print the outcome, and return failures.
+def report_sort_health(board: Board, *, include_archived: bool = False) -> list[str]:
+    """Check lane ordering, print the outcome, and return failures.
 
     **Extracted from `main()` rather than inlined**, because inlining it pushed that
     function to 14 branches and `ruff` refused at 12. The limit is doing its job here:
     `main()` is a dispatcher, and a block that prints a report is a different concern.
     """
-    problems = total_order_problems(board)
+    problems = total_order_problems(board, include_archived=include_archived)
     if problems:
         print(f"  SORT IS BROKEN, {len(problems)} problem(s):")
         for problem in problems:
             print(f"      {problem}")
     else:
-        print("  Sort self-test passed, and every lane is strictly ordered.")
+        print("  Ticket uniqueness, lane priority, and blocker placement checks passed.")
     return problems
 
 
-def total_order_problems(board: Board) -> list[str]:
-    """Report any lane whose cards do not compare STRICTLY increasing. **Card #0047.**
-
-    **This is the requirement the card states in capitals**, and it is about the screen
-    rather than about tidiness. The page repaints every 400 ms; two cards that compare
-    equal can swap between frames, which is a card moving under Terry's cursor as he
-    reaches for it.
-
-    **Checked against the real board rather than asserted in a comment**, because the
-    key is only total while `ticket` stays unique -- and nothing else here enforces that.
-    """
+def total_order_problems(board: Board, *, include_archived: bool = False) -> list[str]:
+    """Check unique tickets and the priority and dependency constraints of each lane."""
     problems: list[str] = []
+    seen_tickets: set[int] = set()
+    for item in board.items:
+        if item.ticket in seen_tickets:
+            problems.append(f"duplicate ticket {item.label}")
+        seen_tickets.add(item.ticket)
 
-    order = blocking_order(board)
-    scores = order.triage_scores
-    for lane in board.lanes(order=order):
-        keys = [item_order_key(item, board.policy, scores) for item in lane.items]
+    lanes = board.lanes(include_archived=include_archived)
+    items = {item.id: item for lane in lanes for item in lane.items}
+    ranks = _lane_item_ranks(items, board.policy)
+    blockers = _lane_blockers(items, board.links, ranks)
+    groups = _blocking_components(blockers)
+    group_by_id = {node: index for index, group in enumerate(groups) for node in group}
+    positions = {item.id: index for lane in lanes for index, item in enumerate(lane.items)}
+    for lane in lanes:
         problems.extend(
-            f"{lane.label}: #{before[2]:04d} and #{after[2]:04d} do not order"
-            for before, after in itertools.pairwise(keys)
-            if before >= after
+            f"{lane.label}: {before.label} and {after.label} are out of priority order"
+            for before, after in itertools.pairwise(lane.items)
+            if ranks[before.id] > ranks[after.id]
         )
-
+    problems.extend(
+        f"{items[parent].label} must precede blocked {items[node].label} in its lane"
+        for node, parents in blockers.items()
+        for parent in parents
+        if group_by_id[node] != group_by_id[parent] and positions[parent] > positions[node]
+    )
     return problems
 
 
@@ -2790,20 +2848,21 @@ class Board:
         raise BoardError(f"no item with id {ref!r}")
 
     def lanes(
-        self, *, include_archived: bool = False, order: BlockingOrder | None = None
+        self,
+        *,
+        include_archived: bool = False,
+        order: BlockingOrder | None = None,  # noqa: ARG002 -- retained for callers
     ) -> list[Lane]:
-        """Return lanes using the shared triage-score, priority, and ticket order.
+        """Return lanes ordered by priority, within-lane blockers, and ticket.
 
-        Ascending triage score is primary, then ascending priority number and
-        monotonically allocated ticket number. Counts include unfinished dependencies
-        in other lanes, and the same comparator is shared with CLI triage.
+        The legacy ``order`` argument is accepted for callers that precompute triage
+        metrics. Lane ordering is derived from the selected cards.
         """
-
-        scores = (order or blocking_order(self)).triage_scores
+        items = {item.id: item for item in self.items if include_archived or not item.archived}
+        ranks = _lane_item_ranks(items, self.policy)
+        blockers = _lane_blockers(items, self.links, ranks)
         buckets: dict[str, list[Item]] = {state: [] for state in self.policy.states}
-        for item in self.items:
-            if item.archived and not include_archived:
-                continue
+        for item in _ordered_lane_items(items, blockers, ranks):
             buckets.setdefault(item.state, []).append(item)
         return [
             Lane(
@@ -2811,10 +2870,7 @@ class Board:
                 label,
                 lane_class(state, self.policy, self.browser_user),
                 lane_owner_label(state, self.policy),
-                sorted(
-                    buckets.get(state, []),
-                    key=lambda item: item_order_key(item, self.policy, scores),
-                ),
+                buckets.get(state, []),
             )
             for state, label in self.policy.lanes
         ]
@@ -6158,9 +6214,12 @@ def _report(board: Board, args: argparse.Namespace) -> None:
 
     # **Card #0047.** `--verify` is the integrity command, so the sort's own checks
     # belong here rather than on every mutation, where they would double the output.
-    sort_problems = report_sort_health(board) if args.verify else []
+    include_archived = bool(getattr(args, "include_archived", False))
+    sort_problems = (
+        report_sort_health(board, include_archived=include_archived) if args.verify else []
+    )
 
-    lanes = board.lanes(include_archived=bool(getattr(args, "include_archived", False)))
+    lanes = board.lanes(include_archived=include_archived)
     visible_count = sum(len(lane.items) for lane in lanes)
     print(f"\n{board.project}  ({visible_count} items, port {board.port})")
     for lane in lanes:

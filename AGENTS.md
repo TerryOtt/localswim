@@ -150,7 +150,11 @@ native board monitoring is an optional extra.
   two digits of reserved width, exact larger totals, and accessible count labels.
   Omit zero counts and preserve covers and comment badges.
 
-- Order every lane and CLI next/search query by ascending
+- Order cards within each lane by priority, then enforce same-rank, same-lane
+  blockers before their blocked cards. Choose the lowest ticket among eligible
+  cards and keep cycles together in ticket order. Exclude archived cards from
+  the visible lane ordering graph.
+- Order CLI next/search queries by ascending
   `((priority_number + 1) * 100) - blocked_card_count`, then priority number and ticket.
   Count distinct unfinished downstream cards once across the entire board; exclude
   self even in cycles. Completed cards stop paths; archived unfinished cards still
@@ -167,9 +171,9 @@ native board monitoring is an optional extra.
   Explicit demotions respect the highest urgency of unfinished blocked descendants.
   Both `blocks` and `blocked_by` enforce this ongoing floor without rejecting different
   priorities. Lowering blocked cards or removing links leaves stored blocker priorities
-  in place. Only blocking
-  relationships contribute; hierarchy and other links do not. Keep browser and CLI
-  ordering consistent. Derived score/count fields are not persisted. Relationship
+  in place. Only blocking relationships contribute. Hierarchy and other links do not.
+  Keep browser and CLI board lane ordering consistent. Derived score/count fields
+  are not persisted. Relationship
   target pickers retain numeric ticket order; they are not triage lists.
 - Explicit batch priority changes use the live writer and one revision-checked store
   transaction. Evaluate all selected overrides together before applying unfinished

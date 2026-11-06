@@ -297,8 +297,14 @@ uv run --frozen localswim-cli boards/my-project.json card next 5 --lane needs_te
 uv run --frozen localswim-cli boards/my-project.json card next 10 --lane ready_for_work --lane needs_terry_action --json
 ~~~
 
-Every lane and focused query uses **ascending triage score**, then ascending priority
-number and ticket number for ties:
+Within a swimlane, cards appear in priority order, from P0 through P5 on the standard
+scale. At the same priority, a card follows all its blockers in that lane. When more
+than one card is eligible to appear next, the lowest ticket number wins. Blocking
+cycles are placed together in ticket order. The ordering constraints use only links
+between visible cards at the same priority within that lane.
+
+The focused `card next` and `card search` commands use **ascending triage score**,
+then ascending priority number and ticket number for ties:
 
 ```text
 triageScore = ((priority number + 1) * 100) - blockedCardCount

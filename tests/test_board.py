@@ -555,6 +555,15 @@ def test_lanes_sort_by_priority_then_monotonic_ticket(board: board_state.Board) 
     assert [item.id for item in backlog.items] == ["urgent", "older", "newer"]
 
 
+def test_lane_sort_verification_rejects_duplicate_tickets(board: board_state.Board) -> None:
+    board.create("first", "First", "backlog", "bot")
+    board.create("second", "Second", "ready_for_work", "bot")
+    first = board.find("first")
+    board.find("second").ticket = first.ticket
+
+    assert board_state.total_order_problems(board) == [f"duplicate ticket {first.label}"]
+
+
 def test_verify_detects_direct_state_write(board: board_state.Board) -> None:
     board.create("alpha", "Alpha", "backlog", "bot")
     board.find("alpha").state = "completed"
