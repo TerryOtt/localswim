@@ -167,6 +167,7 @@ def maintenance_fixture(board: pathlib.Path, operation: str) -> tuple[str, ...]:
     return {
         "embed": ("board", "embed-policy", str(board_state.RULES_PATH)),
         "add": ("lane", "add", "Maintenance lane"),
+        "retire": ("lane", "retire", "backlog"),
         "rename": ("lane", "rename-label", "backlog", "Pending"),
         "migrate-id": ("lane", "migrate-id", "backlog", "pending"),
     }[operation]
@@ -178,6 +179,8 @@ def invoke_maintenance(board: pathlib.Path, arguments: tuple[str, ...]) -> str:
             return board_state.embed_policy(board, board_state.RULES_PATH)
         case ("lane", "add"):
             return board_state.add_lane(board, arguments[2])
+        case ("lane", "retire"):
+            return board_state.retire_lane(board, arguments[2])
         case ("lane", "rename-label"):
             return board_state.rename_lane_label(board, arguments[2], arguments[3])
         case ("lane", "migrate-id"):
@@ -188,7 +191,7 @@ def invoke_maintenance(board: pathlib.Path, arguments: tuple[str, ...]) -> str:
             raise AssertionError("unknown maintenance fixture")
 
 
-@pytest.mark.parametrize("operation", ["embed", "add", "rename", "migrate-id", "migrate"])
+@pytest.mark.parametrize("operation", ["embed", "add", "retire", "rename", "migrate-id", "migrate"])
 @pytest.mark.parametrize("listener", [False, True], ids=["absent-listener", "port-override"])
 def test_maintenance_refuses_real_writer_without_changing_snapshot(
     tmp_path: pathlib.Path, operation: str, *, listener: bool
@@ -216,7 +219,7 @@ def test_maintenance_refuses_real_writer_without_changing_snapshot(
 
 
 @pytest.mark.parametrize("failure", ["validation", "save"])
-@pytest.mark.parametrize("operation", ["embed", "add", "rename", "migrate-id", "migrate"])
+@pytest.mark.parametrize("operation", ["embed", "add", "retire", "rename", "migrate-id", "migrate"])
 def test_maintenance_failure_releases_admission(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, failure: str, operation: str
 ) -> None:
@@ -229,7 +232,7 @@ def test_maintenance_failure_releases_admission(
 
     with monkeypatch.context() as patch:
         if failure == "save":
-            patch.setattr(board_state, "save", fail)
+            patch.setattr(board_state, "_save_document" if operation == "retire" else "save", fail)
         else:
             patch.setattr(board_state.Board, "from_json", fail)
         with pytest.raises(board_state.BoardError, match="injected maintenance failure"):
@@ -243,21 +246,30 @@ def test_maintenance_failure_releases_admission(
 
 
 @pytest.mark.parametrize("startup", ["direct", "workspace"])
-def test_maintenance_save_excludes_startup_until_exit(tmp_path: pathlib.Path, startup: str) -> None:
+@pytest.mark.parametrize("operation", ["rename", "retire"])
+def test_maintenance_save_excludes_startup_until_exit(
+    tmp_path: pathlib.Path, startup: str, operation: str
+) -> None:
     board = tmp_path / "board.json"
-    maintenance_fixture(board, "rename")
-    maintenance = """
+    maintenance_fixture(board, operation)
+    writer = "_save_document" if operation == "retire" else "save"
+    mutate = (
+        "state.retire_lane(board,'backlog')"
+        if operation == "retire"
+        else "state.rename_lane_label(board,'backlog','Pending')"
+    )
+    maintenance = f"""
 import pathlib,sys
 from localswim import board_state as state
 board=pathlib.Path(sys.argv[1])
-original=state.save
-def save(*args):
+original=state.{writer}
+def save(*args,**kwargs):
     print('saving',flush=True)
     sys.stdin.readline()
-    original(*args)
+    original(*args,**kwargs)
     print('saved',flush=True)
-state.save=save
-state.rename_lane_label(board,'backlog','Pending')
+state.{writer}=save
+{mutate}
 """
     startup_program = """
 import pathlib,sys

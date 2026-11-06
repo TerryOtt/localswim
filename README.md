@@ -417,7 +417,7 @@ The earlier schema-2 Ready For Work migration also produces a schema-4 board:
 uv run --frozen localswim-cli boards/my-project.json lane migrate <old-lane-id> ready_for_work
 ~~~
 
-The five offline structural operations (policy embedding, lane addition, label rename,
+Offline structural operations (policy embedding, lane addition, retirement, label rename,
 lane-ID migration and legacy lane migration) acquire the canonical launch gate and
 hold exclusive writer ownership through the snapshot transaction and save. A running
 service's lease prevents maintenance even when its listener is absent or uses a
@@ -465,6 +465,28 @@ The ID `completed` is reserved for completion semantics: identity migration refu
 both changing it to another ID and changing another ID to `completed`. Use
 `lane rename-label completed "Done"` to change its displayed name instead.
 
+### Retire an empty lane
+
+Stop the board service with `board shutdown` and wait for its writer to exit. Then
+retire the lane by its stable ID and restart the board using the shared installation:
+
+~~~console
+localswim-cli boards/my-project.json lane retire old_lane
+~~~
+
+The lane must have zero active cards. The command protects `completed`. The retired
+column disappears and creation or moves into it are refused. Its label, archived
+cards, transition history and historical grants remain available for inspection
+and audit. Use `card show` or `card search --include-archived` to find those cards.
+To restore a retired-lane card, move it while archived to an active lane using an
+existing permission, then unarchive it there.
+
+The first retirement updates the embedded policy to schema 7 and increments the
+board revision once. The snapshot remains board schema 4. A repeated retirement
+leaves the snapshot and revision in place. Older installations that support only
+policy schema 6 refuse a board after retirement. Use a retirement-aware shared
+installation for the service and CLI before retiring a lane.
+
 ## Archiving cards
 
 Archive a card to hide it without deleting its contents or changing its lane:
@@ -485,8 +507,9 @@ Archived cards disappear from swimlanes, lane counts, browser search, and the de
 `--include-archived` to those CLI reports to include them. `card show REF` always finds
 the card, identifies it as archived, and includes archive events in its JSON report.
 Existing relationships can still open an archived card's browser drawer. Unarchiving
-restores its visibility in the same lane; the existing 24-hour completed-card filter
-still applies.
+restores visibility in its current active lane, subject to the 24-hour completed-card
+filter. For a card in a [retired lane](#retire-an-empty-lane), move it to an active
+lane before unarchiving.
 
 `board show --json` always exports the complete snapshot, including archived cards.
 Verification and activity reports also retain archived cards; activity records

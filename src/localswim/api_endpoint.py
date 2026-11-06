@@ -2920,10 +2920,13 @@ function allowed(from, to) {
   return data.edges.some(e => e[0] === from && e[1] === to);
 }
 
+function* drawerItems() {
+  for (const lane of data.lanes) yield* lane.items;
+  yield* (data.retiredItems || []);
+}
+
 function itemById(id) {
-  for (const lane of data.lanes) {
-    for (const it of lane.items) if (it.id === id) return it;
-  }
+  for (const it of drawerItems()) if (it.id === id) return it;
   return null;
 }
 
@@ -2944,10 +2947,8 @@ const REL_WORD = {
 
 function allItems(excludeId) {
   const items = [];
-  for (const lane of data.lanes) {
-    for (const it of lane.items) {
-      if (it.id !== excludeId) items.push(it);
-    }
+  for (const it of drawerItems()) {
+    if (it.id !== excludeId) items.push(it);
   }
   // **Card #0020. Dependency choices are tickets, not lane contents.** Inheriting
   // lane order made the numbers jump at every lane boundary. Parse the displayed
@@ -3015,10 +3016,8 @@ function relationshipSpecs(container) {
 function openRelatedCard(ref) {
   const related = ref.id ? itemById(ref.id) : null;
   if (related) { openCard(related.id); return; }
-  for (const lane of data.lanes) {
-    for (const it of lane.items) {
-      if (it.ticket === ref.ticket) { openCard(it.id); return; }
-    }
+  for (const it of drawerItems()) {
+    if (it.ticket === ref.ticket) { openCard(it.id); return; }
   }
   toast(ref.ticket + ' is not on the board', true);
 }
@@ -4828,11 +4827,17 @@ def payload() -> bytes:
     order = board_state.blocking_order(board)
     lanes = board.lanes()
     lane_items = {lane.state: lane.items for lane in lanes}
-    for item in board.items:
-        if item.archived and item.state in lane_items:
-            lane_items[item.state].append(item)
     policy = board.policy
+    retired_items: list[board_state.Item] = []
+    for item in board.items:
+        if not item.archived:
+            continue
+        if item.state in policy.retired_lanes:
+            retired_items.append(item)
+        elif item.state in lane_items:
+            lane_items[item.state].append(item)
     browser_edges = policy.edges_for(board.browser_user)
+    lane_labels = policy.lane_label
 
     # **Card #0028. Relationships reach the page as LABELS, never as slugs.** The stored
     # row names `id`s because those are stable; Terry says "#0028" out loud, so the wire
@@ -4858,6 +4863,93 @@ def payload() -> bytes:
             kids.setdefault(child.parent, []).append(
                 {"ticket": child.label, "subject": child.subject}
             )
+
+    def render_item(item: board_state.Item, lane_label: str) -> dict[str, object]:
+        return {
+            "id": item.id,
+            "ticket": item.label,
+            "state": item.state,
+            "laneLabel": lane_label,
+            "subject": item.subject,
+            "priority": item.priority,
+            "blockingDepth": order.depths[item.id],
+            "blockedCardCount": order.blocked_counts[item.id],
+            "triageScore": order.triage_scores[item.id],
+            "attachments": [
+                {**file.to_json(), "url": attachment_url(item.id, file.id)}
+                for file in item.attachments
+            ],
+            "coverAttachment": item.cover_attachment,
+            "attachmentHistory": [
+                {**event.to_json(), "when": when(event.at)}
+                for event in reversed(item.attachment_history)
+            ],
+            **({"archived": True} if item.archived else {}),
+            "priorityLabel": policy.priority_label.get(item.priority, ""),
+            # **Card #0063.** Computed on the SERVER so one clock decides it, and
+            # so the 24-hour rule lives in exactly one place. The page re-fetches
+            # twice a second, so a card ages out on its own without a reload.
+            **({"old": True} if is_old(item) else {}),
+            "detail": inline(item.detail),
+            # **The RAW text as well as the rendered form, card #0082.** `detail`
+            # has already been through `inline()` -- escaped, with the markdown-ish
+            # bits turned into tags -- and putting THAT into an editor would hand
+            # Terry HTML to edit and then store it, one round trip from unreadable.
+            "detailRaw": item.detail,
+            # Card #0028. Omitted when empty so a board of unrelated cards stays
+            # the same size on the wire as it was before relationships existed.
+            **({"links": related(item.id)} if board.links_for(item.id) else {}),
+            **(
+                {
+                    "parent": {
+                        "ticket": by_id[item.parent].label,
+                        "subject": by_id[item.parent].subject,
+                    }
+                }
+                if item.parent and item.parent in by_id
+                else {}
+            ),
+            **({"children": kids[item.id]} if item.id in kids else {}),
+            # **A LABEL, never a permission.** Card #0053, Terry: *"It's just a
+            # label, not permissions model."* Nothing in the page may branch on
+            # this to allow or refuse a move -- `draggable` below and `allowed()`
+            # in the script both read the permission table and MUST keep doing so.
+            "owner": item.owner,
+            # **Computed on the SERVER from the same table the server enforces**,
+            # so the cursor and the answer cannot disagree.
+            "draggable": any(a == item.state for a, _ in browser_edges),
+            "comments": [
+                {"by": c.by, "when": when(c.at), "text": inline(c.text)} for c in item.comments
+            ],
+            # **Newest first.** Terry: "needs to be newest at top (most
+            # relevant) to oldest at bottom." The interesting end of the
+            # audit record is the recent end, and a long trail otherwise
+            # buries the entry you opened the card to read.
+            #
+            # **Reversed HERE rather than in `board_state.py`.** The stored order is
+            # chronological and `verify()` replays it forwards; flipping the
+            # model to suit a drawer would break the audit.
+            # **Ownership entries ride the SAME list**, because the trail is one
+            # chronological thing to read. `ownerTo` is the discriminant and is
+            # absent on a lane move. Card #0053.
+            "history": [
+                {
+                    "by": h.by,
+                    "when": when(h.at),
+                    "at": h.at,
+                    "from": h.frm,
+                    "fromLabel": lane_labels.get(h.frm or "", ""),
+                    "toLabel": lane_labels.get(h.to, h.to),
+                    "ownerFrom": h.owner_frm,
+                    "ownerTo": h.owner_to,
+                    # Card #0070, the third entry shape.
+                    "priorityFrom": h.priority_frm,
+                    "priorityTo": h.priority_to,
+                }
+                for h in reversed(item.history)
+            ],
+        }
+
     counts: dict[str, int] = {
         lane.state: sum(not item.archived for item in lane.items) for lane in lanes
     }
@@ -4883,97 +4975,19 @@ def payload() -> bytes:
                     # **Card #0063. Counted on the server, beside the flag it counts**, so the
                     # checkbox label and the hiding can never disagree about how many.
                     "oldCount": sum(1 for i in lane.items if not i.archived and is_old(i)),
-                    "items": [
-                        {
-                            "id": item.id,
-                            "ticket": item.label,
-                            "state": item.state,
-                            "laneLabel": lane.label,
-                            "subject": item.subject,
-                            "priority": item.priority,
-                            "blockingDepth": order.depths[item.id],
-                            "blockedCardCount": order.blocked_counts[item.id],
-                            "triageScore": order.triage_scores[item.id],
-                            "attachments": [
-                                {**file.to_json(), "url": attachment_url(item.id, file.id)}
-                                for file in item.attachments
-                            ],
-                            "coverAttachment": item.cover_attachment,
-                            "attachmentHistory": [
-                                {**event.to_json(), "when": when(event.at)}
-                                for event in reversed(item.attachment_history)
-                            ],
-                            **({"archived": True} if item.archived else {}),
-                            "priorityLabel": policy.priority_label.get(item.priority, ""),
-                            # **Card #0063.** Computed on the SERVER so one clock decides it, and
-                            # so the 24-hour rule lives in exactly one place. The page re-fetches
-                            # twice a second, so a card ages out on its own without a reload.
-                            **({"old": True} if is_old(item) else {}),
-                            "detail": inline(item.detail),
-                            # **The RAW text as well as the rendered form, card #0082.** `detail`
-                            # has already been through `inline()` -- escaped, with the markdown-ish
-                            # bits turned into tags -- and putting THAT into an editor would hand
-                            # Terry HTML to edit and then store it, one round trip from unreadable.
-                            "detailRaw": item.detail,
-                            # Card #0028. Omitted when empty so a board of unrelated cards stays
-                            # the same size on the wire as it was before relationships existed.
-                            **({"links": related(item.id)} if board.links_for(item.id) else {}),
-                            **(
-                                {
-                                    "parent": {
-                                        "ticket": by_id[item.parent].label,
-                                        "subject": by_id[item.parent].subject,
-                                    }
-                                }
-                                if item.parent and item.parent in by_id
-                                else {}
-                            ),
-                            **({"children": kids[item.id]} if item.id in kids else {}),
-                            # **A LABEL, never a permission.** Card #0053, Terry: *"It's just a
-                            # label, not permissions model."* Nothing in the page may branch on
-                            # this to allow or refuse a move -- `draggable` below and `allowed()`
-                            # in the script both read the permission table and MUST keep doing so.
-                            "owner": item.owner,
-                            # **Computed on the SERVER from the same table the server enforces**,
-                            # so the cursor and the answer cannot disagree.
-                            "draggable": any(a == item.state for a, _ in browser_edges),
-                            "comments": [
-                                {"by": c.by, "when": when(c.at), "text": inline(c.text)}
-                                for c in item.comments
-                            ],
-                            # **Newest first.** Terry: "needs to be newest at top (most
-                            # relevant) to oldest at bottom." The interesting end of the
-                            # audit record is the recent end, and a long trail otherwise
-                            # buries the entry you opened the card to read.
-                            #
-                            # **Reversed HERE rather than in `board_state.py`.** The stored order is
-                            # chronological and `verify()` replays it forwards; flipping the
-                            # model to suit a drawer would break the audit.
-                            # **Ownership entries ride the SAME list**, because the trail is one
-                            # chronological thing to read. `ownerTo` is the discriminant and is
-                            # absent on a lane move. Card #0053.
-                            "history": [
-                                {
-                                    "by": h.by,
-                                    "when": when(h.at),
-                                    "at": h.at,
-                                    "from": h.frm,
-                                    "fromLabel": policy.lane_label.get(h.frm or "", ""),
-                                    "toLabel": policy.lane_label.get(h.to, h.to),
-                                    "ownerFrom": h.owner_frm,
-                                    "ownerTo": h.owner_to,
-                                    # Card #0070, the third entry shape.
-                                    "priorityFrom": h.priority_frm,
-                                    "priorityTo": h.priority_to,
-                                }
-                                for h in reversed(item.history)
-                            ],
-                        }
-                        for item in lane.items
-                    ],
+                    "items": [render_item(item, lane.label) for item in lane.items],
                 }
                 for lane in lanes
             ],
+            **(
+                {
+                    "retiredItems": [
+                        render_item(item, lane_labels[item.state]) for item in retired_items
+                    ],
+                }
+                if retired_items
+                else {}
+            ),
             "edges": sorted(browser_edges),
             # **The priority list ships from `rules.json`, never typed into the page.**
             # A range written in HTML is a second copy that goes stale silently -- and it

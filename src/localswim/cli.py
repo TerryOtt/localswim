@@ -260,6 +260,15 @@ def lane_migrate_id(context: CliContext, old: str, new: str) -> None:
     click.echo(f"  {result}")
 
 
+@lane_commands.command("retire")
+@click.argument("lane_id")
+@click.pass_obj
+def lane_retire(context: CliContext, lane_id: str) -> None:
+    """Retire an empty lane on a stopped board while preserving its history."""
+    result = _board_call(lambda: board_state.retire_lane(context.board, lane_id))
+    click.echo(f"  {result}")
+
+
 @cli.group("activity", no_args_is_help=True)
 def activity_commands() -> None:
     """Inspect sanitized board events without exposing card prose."""

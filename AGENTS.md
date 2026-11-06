@@ -54,7 +54,7 @@ native board monitoring is an optional extra.
   Use explicit child-process handoff on Windows; do not assume byte locks are inherited.
   Keep the old descriptor until replacement publication, preserve workspace launch identity,
   and rotate bearer credentials normally.
-  Offline embed_policy, add_lane, rename_lane_label, migrate_lane_id and migrate_lane
+  Offline embed_policy, add_lane, retire_lane, rename_lane_label, migrate_lane_id and migrate_lane
   resolve the board canonically and hold the shared launch gate, then writer claim,
   then snapshot transaction lock through save; release in reverse order on every exit.
   A held writer lease is authoritative without a listener or at a different port.
@@ -89,6 +89,11 @@ native board monitoring is an optional extra.
   migration operations for those different intents.
   Reserve `completed` as both source and destination of identity migration; change
   its display text only through label rename. Keep its terminal semantics intact.
+  Retirement requires no active cards, protects `completed`, and preserves the lane
+  ID, label, archived cards, and historical grants. Policy schema 7 marks retired
+  lanes while schema 6 remains supported for existing boards. Use historical grants
+  for replay, refuse new arrivals and unarchive in place, and omit retired columns
+  from active rendering and target choices.
 - Keep policy input, public document exposure and serialized output detached from
   canonical policy state, including nested metadata. Compiled grants and subsequent
   serialization must not change when a caller mutates any returned dictionary/list.

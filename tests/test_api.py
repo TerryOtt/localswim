@@ -1064,6 +1064,42 @@ def test_archive_routes_keep_data_and_enforce_credentials_and_revisions(api: Run
     assert saved.verify() == []
 
 
+def test_board_payload_keeps_retired_cards_available_to_drawers(api: RunningApi) -> None:
+    board = board_state.load(api.path)
+    lane_label = board.policy.lane_label["backlog"]
+    board.create("historical", "Archived evidence", "backlog", "bot", detail="Original detail")
+    board.create("active", "Current work", "backlog", "bot")
+    board.move("active", "ready_for_work", "bot")
+    board.link("active", "references", "historical", "bot")
+    board.set_parent("active", "historical", "bot")
+    board.comment("historical", "Original comment", "bot")
+    board.set_archived("historical", archived=True, by="bot")
+    board_state.save(board, api.path)
+    board_state.retire_lane(api.path, "backlog")
+
+    status, payload = request_json(api.base + API + "/board")
+    assert status == 200
+    assert payload["error"] is None
+    assert "backlog" not in {lane["state"] for lane in payload["lanes"]}
+    assert "backlog" not in payload["counts"]
+    assert payload["counts"]["open"] == 1
+    assert payload["edges"]
+    assert all("backlog" not in edge for edge in payload["edges"])
+    (active,) = [item for lane in payload["lanes"] for item in lane["items"]]
+    assert active["id"] == "active"
+    assert active["history"][0]["fromLabel"] == lane_label
+
+    (archived,) = payload["retiredItems"]
+    assert archived["id"] == active["links"][0]["id"] == "historical"
+    assert archived["ticket"] == active["parent"]["ticket"]
+    assert archived["children"][0]["ticket"] == active["ticket"]
+    assert archived["archived"] is True
+    assert archived["draggable"] is False
+    assert archived["laneLabel"] == archived["history"][0]["toLabel"] == lane_label
+    assert archived["detailRaw"] == "Original detail"
+    assert archived["comments"][0]["text"] == "Original comment"
+
+
 def test_create_can_atomically_add_relationships(api: RunningApi) -> None:
     first_code, _first = request_json(
         api.base + API + "/cards",

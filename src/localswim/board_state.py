@@ -105,6 +105,7 @@ API_PREFIX = "/api/v001"
 # in every row; grouping makes one person's complete permission set readable in one
 # place. Edge `note` also became the optional, clearer `description`.
 RULES_SCHEMA = 6
+RETIRED_LANES_RULES_SCHEMA = 7
 REQUIRED_EDGE_ACTORS = 2
 
 
@@ -664,6 +665,7 @@ class Rules:
     priority_label: Mapping[str, str]
     default_priority: str
     edge_actors: frozenset[str]
+    retired_lanes: frozenset[str]
     _document_json: str
     # **The cast is NOT here, card #0083.** It moved to the board file, which is
     # per-project; this object describes `rules.json`, which is per-tool.
@@ -814,7 +816,31 @@ def _parse_priorities(
     return tuple(priority_id for priority_id, _label in rows), dict(rows)
 
 
-def _parse_rules(doc: JsonObject, path: pathlib.Path) -> Rules:
+def _parse_retired_lanes(doc: JsonObject, known: set[str], path: pathlib.Path) -> frozenset[str]:
+    if doc.get("schema") == RULES_SCHEMA:
+        if "retiredLanes" in doc:
+            raise BoardError(
+                f"{path}: retiredLanes requires policy schema {RETIRED_LANES_RULES_SCHEMA}"
+            )
+        return frozenset()
+    raw = doc.get("retiredLanes")
+    if not isinstance(raw, list) or not raw:
+        raise BoardError(f"{path}: retiredLanes must be a nonempty list of lane IDs")
+    retired: set[str] = set()
+    for lane in raw:
+        if not isinstance(lane, str) or lane not in known:
+            raise BoardError(f"{path}: retiredLanes names unknown lane ID {lane!r}")
+        if lane == "completed":
+            raise BoardError(f"{path}: cannot retire reserved lane ID 'completed'")
+        if lane in retired:
+            raise BoardError(f"{path}: duplicate retired lane ID {lane!r}")
+        retired.add(lane)
+    if retired == known:
+        raise BoardError(f"{path}: retiredLanes must leave at least one active lane")
+    return frozenset(retired)
+
+
+def _parse_rules(doc: JsonObject, path: pathlib.Path, *, embedded: bool = False) -> Rules:
     """Validate one rules document into the shapes the rest of this module uses.
 
     **It REFUSES rather than repairs**, exactly like `Board.from_json`. A rules file
@@ -825,17 +851,20 @@ def _parse_rules(doc: JsonObject, path: pathlib.Path) -> Rules:
     for the person reading the diff; only actor, source, and destination affect the
     transition index.
     """
-    if doc.get("schema") != RULES_SCHEMA:
+    supported = (RULES_SCHEMA, RETIRED_LANES_RULES_SCHEMA) if embedded else (RULES_SCHEMA,)
+    schema = doc.get("schema")
+    if schema not in supported or (
+        schema == RETIRED_LANES_RULES_SCHEMA and type(schema) is not int
+    ):
         raise BoardError(
-            f"{path}: rules schema {doc.get('schema')!r}, want {RULES_SCHEMA}. "
-            "schema 6 groups edges under actor ids and renames edge note to the "
-            "optional description field."
+            f"{path}: rules schema {schema!r}, want {' or '.join(map(str, supported))}"
         )
 
     # **ACTORS ARE NOT VALIDATED HERE ANY MORE. Card #0083.** The user list moved to
     # the board file, which is not loaded yet -- the board path is a command-line
     # argument. `install_users` does the check the moment both halves exist.
     lanes, order, known = _parse_lanes(doc, path)
+    retired_lanes = _parse_retired_lanes(doc, known, path)
 
     edges_raw = doc.get("edges")
     if not isinstance(edges_raw, dict) or not edges_raw:
@@ -870,6 +899,7 @@ def _parse_rules(doc: JsonObject, path: pathlib.Path) -> Rules:
         priority_label=labels,
         default_priority=default,
         edge_actors=edge_actors,
+        retired_lanes=retired_lanes,
         _document_json=json.dumps(doc, ensure_ascii=False),
     )
 
@@ -964,7 +994,7 @@ class TransitionPolicy:
     def from_json(cls, document: JsonObject, where: str) -> Self:
         """Build a policy from the resolved document embedded in a board snapshot."""
         path = pathlib.Path(where)
-        policy = cls(_parse_rules(document, path), path, 0)
+        policy = cls(_parse_rules(document, path, embedded=True), path, 0)
         if problems := policy.check_edges():
             raise BoardError("; ".join(problems))
         return policy
@@ -986,6 +1016,18 @@ class TransitionPolicy:
         return tuple(state for state, _ in self.lanes)
 
     @property
+    def retired_lanes(self) -> frozenset[str]:
+        return self.rules.retired_lanes
+
+    @property
+    def active_lanes(self) -> tuple[tuple[str, str], ...]:
+        return tuple(lane for lane in self.lanes if lane[0] not in self.retired_lanes)
+
+    @property
+    def active_states(self) -> tuple[str, ...]:
+        return tuple(state for state, _ in self.active_lanes)
+
+    @property
     def lane_label(self) -> dict[str, str]:
         return dict(self.lanes)
 
@@ -1002,10 +1044,20 @@ class TransitionPolicy:
         return self.rules.default_priority
 
     def may_move(self, actor: str, from_state: str, to_state: str) -> bool:
+        return to_state not in self.retired_lanes and self.has_move_grant(
+            actor, from_state, to_state
+        )
+
+    def has_move_grant(self, actor: str, from_state: str, to_state: str) -> bool:
+        """Return the original grant used to replay historical moves."""
         rules = self.table.get(from_state)
         return rules is not None and actor in rules.outbound.get(to_state, NOBODY)
 
     def may_create(self, actor: str, state: str) -> bool:
+        return state not in self.retired_lanes and self.has_create_grant(actor, state)
+
+    def has_create_grant(self, actor: str, state: str) -> bool:
+        """Return the original grant used to replay historical creations."""
         rules = self.table.get(state)
         return rules is not None and actor in rules.create
 
@@ -1013,17 +1065,24 @@ class TransitionPolicy:
         rules = self.table.get(from_state)
         if rules is None:
             return f"{from_state} is not a lane"
-        if to_state not in self.table:
-            return f"{to_state} is not a lane"
+        if to_state not in self.active_states:
+            return (
+                f"lane {to_state!r} is retired"
+                if to_state in self.retired_lanes
+                else f"{to_state} is not a lane"
+            )
         if self.may_move(actor, from_state, to_state):
             return ""
-        allowed_here = sorted(dst for dst, actors in rules.outbound.items() if actor in actors)
+        active_outbound = {
+            dst: actors for dst, actors in rules.outbound.items() if dst not in self.retired_lanes
+        }
+        allowed_here = sorted(dst for dst, actors in active_outbound.items() if actor in actors)
         if allowed_here:
             return (
                 f"{actor.capitalize()} has out permission on {from_state}, but not "
                 f"to {to_state}. From here {actor} may go to: " + ", ".join(allowed_here)
             )
-        others = sorted({a for actors in rules.outbound.values() for a in actors})
+        others = sorted({a for actors in active_outbound.values() for a in actors})
         if others:
             return (
                 f"{from_state} is not {actor}'s to move out of. "
@@ -1032,24 +1091,34 @@ class TransitionPolicy:
         return f"Nothing moves out of {from_state}"
 
     def edges_for(self, actor: str) -> frozenset[tuple[str, str]]:
+        states = self.active_states
         return frozenset(
-            (a, b)
-            for a in self.states
-            for b in self.states
-            if a != b and self.may_move(actor, a, b)
+            (a, b) for a in states for b in states if a != b and self.may_move(actor, a, b)
         )
 
     def actors_in(self, state: str) -> frozenset[str]:
+        """Summarize actors on active inbound edges for lane displays."""
         rules = self.table.get(state)
-        if rules is None or not rules.inbound:
+        if rules is None or state in self.retired_lanes:
             return NOBODY
-        return frozenset[str]().union(*rules.inbound.values())
+        return frozenset(
+            actor
+            for source, actors in rules.inbound.items()
+            if source not in self.retired_lanes
+            for actor in actors
+        )
 
     def actors_out(self, state: str) -> frozenset[str]:
+        """Summarize actors on active outbound edges for lane displays."""
         rules = self.table.get(state)
-        if rules is None or not rules.outbound:
+        if rules is None or state in self.retired_lanes:
             return NOBODY
-        return frozenset[str]().union(*rules.outbound.values())
+        return frozenset(
+            actor
+            for destination, actors in rules.outbound.items()
+            if destination not in self.retired_lanes
+            for actor in actors
+        )
 
     def check_edges(self) -> list[str]:
         problems: list[str] = []
@@ -1149,9 +1218,17 @@ def _board_policy(
     raw: JsonObject, where: str, supplied: TransitionPolicy | None
 ) -> TransitionPolicy:
     """Select an explicit test/migration policy or validate the embedded document."""
-    if supplied is not None:
-        return supplied
     policy_raw = raw.get("policy")
+    if supplied is not None:
+        if supplied.retired_lanes or (
+            isinstance(policy_raw, dict)
+            and (
+                policy_raw.get("schema") == RETIRED_LANES_RULES_SCHEMA
+                or "retiredLanes" in policy_raw
+            )
+        ):
+            raise BoardError(f"{where}: policy overrides cannot be used with lane retirement")
+        return supplied
     if not isinstance(policy_raw, dict):
         raise BoardError(f"{where}: 'policy' is missing or not an object")
     return TransitionPolicy.from_json(policy_raw, f"{where}: policy")
@@ -2618,6 +2695,8 @@ class Board:
         for lane in (*create, *(end for move in moves for end in move)):
             if lane not in self.policy.states:
                 raise BoardError(f"unknown lane {lane!r}; use an existing lane ID")
+            if lane in self.policy.retired_lanes:
+                raise BoardError(f"lane {lane!r} is retired")
         for frm, to in moves:
             if frm == to:
                 raise BoardError(f"move permission joins {frm!r} to itself")
@@ -2859,9 +2938,10 @@ class Board:
         metrics. Lane ordering is derived from the selected cards.
         """
         items = {item.id: item for item in self.items if include_archived or not item.archived}
+        lanes = self.policy.lanes if include_archived else self.policy.active_lanes
         ranks = _lane_item_ranks(items, self.policy)
         blockers = _lane_blockers(items, self.links, ranks)
-        buckets: dict[str, list[Item]] = {state: [] for state in self.policy.states}
+        buckets: dict[str, list[Item]] = {state: [] for state, _ in lanes}
         for item in _ordered_lane_items(items, blockers, ranks):
             buckets.setdefault(item.state, []).append(item)
         return [
@@ -2872,7 +2952,7 @@ class Board:
                 lane_owner_label(state, self.policy),
                 buckets.get(state, []),
             )
-            for state, label in self.policy.lanes
+            for state, label in lanes
         ]
 
     def _parent_history_problems(self, known_actors: set[str]) -> list[str]:
@@ -2979,6 +3059,8 @@ class Board:
             if change.by not in known_actors
         )
         for item in self.items:
+            if not item.archived and item.state in self.policy.retired_lanes:
+                problems.append(f"{item.id}: active card in retired lane {item.state!r}")
             if not item.history:
                 continue
 
@@ -3012,7 +3094,7 @@ class Board:
                 continue
 
             first = lane_history[0]
-            if first.frm is None and not self.policy.may_create(first.by, first.to):
+            if first.frm is None and not self.policy.has_create_grant(first.by, first.to):
                 problems.append(
                     f"{item.id}: history says {first.by} created it in {first.to}, "
                     f"which {first.by} may not do"
@@ -3031,7 +3113,7 @@ class Board:
                         f"{item.id}: history[{index}] leaves {change.frm!r} but the "
                         f"previous entry arrived at {where!r} -- the chain is broken"
                     )
-                elif not self.policy.may_move(change.by, change.frm, change.to):
+                elif not self.policy.has_move_grant(change.by, change.frm, change.to):
                     problems.append(
                         f"{item.id}: history[{index}] records {change.by} moving "
                         f"{change.frm} -> {change.to}, which the permission table "
@@ -3074,6 +3156,8 @@ class Board:
             raise BoardError("a card needs a non-empty id")
         if not subject:
             raise BoardError("a card needs a non-empty subject")
+        if state in self.policy.retired_lanes:
+            raise BoardError(f"lane {state!r} is retired")
         if not self.policy.may_create(by, state):
             allowed = sorted(s for s in self.policy.states if self.policy.may_create(by, s))
             raise BoardError(
@@ -3523,6 +3607,10 @@ class Board:
         if by not in {self.browser_user, self.cli_user}:
             raise BoardError(f"unauthorized archive actor {by!r}")
         item = self.find(item_id)
+        if not archived and item.state in self.policy.retired_lanes:
+            raise BoardError(
+                f"move {item.label} out of retired lane {item.state!r} before unarchiving"
+            )
         action = "archived" if archived else "unarchived"
         if item.archived == archived:
             return f"{item.label} is already {action}"
@@ -3570,6 +3658,8 @@ class Board:
         """
         if to_state not in self.policy.states:
             raise BoardError(f"unknown state {to_state!r}")
+        if to_state in self.policy.retired_lanes:
+            raise BoardError(f"lane {to_state!r} is retired")
         item = self.find(item_id)
         was = item.state
         if was == to_state:
@@ -3900,7 +3990,13 @@ def save(board: Board, path: pathlib.Path, *, outcome: SaveOutcome | None = None
     """
     if outcome is not None:
         outcome.state = "uncommitted"
-    text = json.dumps(board.to_json(), indent=2, ensure_ascii=False) + "\n"
+    _save_document(board.to_json(), path, outcome=outcome)
+
+
+def _save_document(
+    document: JsonObject, path: pathlib.Path, *, outcome: SaveOutcome | None = None
+) -> None:
+    text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
     target = pathlib.Path(path)
     tmp = target.with_name(target.name + f".tmp{os.getpid()}")
     try:
@@ -4305,6 +4401,7 @@ def add_lane(  # noqa: PLR0913 -- explicit optional maintenance settings
             raise BoardError(f"{target}: lane add needs a schema-{SCHEMA} board")
         _require_board_port_stopped(target, raw)
         policy = _policy_document(raw, target)
+        active_states = TransitionPolicy.from_json(policy, f"{target}: policy").active_states
         lanes = policy.get("lanes")
         edges = policy.get("edges")
         if not isinstance(lanes, list) or not isinstance(edges, dict):
@@ -4334,8 +4431,7 @@ def add_lane(  # noqa: PLR0913 -- explicit optional maintenance settings
             actor_edges = edges.get(actor)
             if not isinstance(actor_edges, list):
                 raise BoardError(f"{target}: policy has no edge list for {actor!r}")
-            for existing_lane in existing:
-                other_id = existing_lane["id"]
+            for other_id in active_states:
                 actor_edges.extend(
                     ({"from": other_id, "to": lane_id}, {"from": lane_id, "to": other_id})
                 )
@@ -4346,6 +4442,41 @@ def add_lane(  # noqa: PLR0913 -- explicit optional maintenance settings
         changed.revision += 1
         save(changed, target)
     return f"added lane {lane_id} ({label}); revision {changed.revision}"
+
+
+def retire_lane(path: pathlib.Path, lane_id: str) -> str:
+    """Mark a lane retired offline while retaining its policy and audit data."""
+    target = path.resolve()
+    lane_id = _validate_lane_id(lane_id, "lane id")
+    if lane_id == "completed":
+        raise BoardError("cannot retire reserved lane ID 'completed'")
+    with _maintenance_locked(target):
+        raw = _read_json(target)
+        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+            raise BoardError(f"{target}: lane retirement needs a schema-{SCHEMA} board")
+        _require_board_port_stopped(target, raw)
+        board = Board.from_json(raw, str(target), install_context=False)
+        if lane_id not in board.policy.states:
+            raise BoardError(f"{target}: unknown lane ID {lane_id!r}")
+        already_retired = lane_id in board.policy.retired_lanes
+        if not already_retired:
+            active_cards = [
+                item.label for item in board.items if item.state == lane_id and not item.archived
+            ]
+            if active_cards:
+                raise BoardError(f"lane {lane_id!r} has active cards: {', '.join(active_cards)}")
+            policy = _policy_document(raw, target)
+            retired = cast("list[JsonValue]", policy.get("retiredLanes", []))
+            policy["schema"] = RETIRED_LANES_RULES_SCHEMA
+            policy["retiredLanes"] = [*retired, lane_id]
+            raw["revision"] = board.revision + 1
+            board = Board.from_json(raw, str(target), install_context=False)
+        if problems := board.verify():
+            raise BoardError(f"{target}: board does not verify: {'; '.join(problems)}")
+        if already_retired:
+            return f"lane {lane_id} is already retired; revision {board.revision}"
+        _save_document(raw, target)
+    return f"retired lane {lane_id}; revision {board.revision}"
 
 
 def rename_lane_label(path: pathlib.Path, lane_id: str, label: str) -> str:
@@ -4389,6 +4520,10 @@ def _rewrite_policy_lane_id(
         raise BoardError(f"{target}: policy has no unique lane id {source!r}")
     matches[0]["id"] = destination
     replacements = 1
+    retired = policy.get("retiredLanes")
+    if isinstance(retired, list) and source in retired:
+        retired[retired.index(source)] = destination
+        replacements += 1
     edges = policy.get("edges")
     if not isinstance(edges, dict):
         raise BoardError(f"{target}: policy.edges is not an object")

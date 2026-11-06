@@ -122,6 +122,7 @@ HELP_PATHS = [
     ("lane", "migrate"),
     ("lane", "migrate-id"),
     ("lane", "rename-label"),
+    ("lane", "retire"),
 ]
 
 
