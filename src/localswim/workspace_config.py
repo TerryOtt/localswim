@@ -31,7 +31,7 @@ class GatewayConfigUnavailableError(GatewayConfigError):
     """Persisted preferences cannot be safely read or replaced."""
 
 
-class ConfigRevisionConflict(ValueError):  # noqa: N818 -- public revision-conflict contract
+class ConfigRevisionConflict(ValueError):  # public revision-conflict contract
     """The caller's preferences revision is stale."""
 
 

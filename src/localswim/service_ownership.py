@@ -65,7 +65,7 @@ def _regular_file(path: pathlib.Path) -> None:
 def _try_lock(descriptor: int) -> bool:
     os.lseek(descriptor, 0, os.SEEK_SET)
     if os.name == "nt":
-        import msvcrt  # noqa: PLC0415 -- platform-specific lock implementation
+        import msvcrt  # platform-specific lock implementation
 
         try:
             msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
@@ -74,7 +74,7 @@ def _try_lock(descriptor: int) -> bool:
                 return False
             raise
         return True
-    import fcntl  # noqa: PLC0415 -- platform-specific lock implementation
+    import fcntl  # platform-specific lock implementation
 
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -86,11 +86,11 @@ def _try_lock(descriptor: int) -> bool:
 def _unlock(descriptor: int) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
     if os.name == "nt":
-        import msvcrt  # noqa: PLC0415 -- platform-specific lock implementation
+        import msvcrt  # platform-specific lock implementation
 
         msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
     else:
-        import fcntl  # noqa: PLC0415 -- platform-specific lock implementation
+        import fcntl  # platform-specific lock implementation
 
         fcntl.flock(descriptor, fcntl.LOCK_UN)
 
@@ -229,7 +229,7 @@ def service_descriptor(
     """Validate a board-bound endpoint, optionally requiring its CLI capability."""
     raw = read_service_metadata(path)
     if not isinstance(raw, dict):
-        raise ValueError("invalid service descriptor")  # noqa: TRY004 -- malformed JSON metadata
+        raise ValueError("invalid service descriptor")  # malformed JSON metadata
     port, board, token = raw.get("port"), raw.get("board"), raw.get("token")
     if (
         type(raw.get("schema")) is not int

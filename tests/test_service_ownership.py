@@ -150,11 +150,14 @@ def release_child(child: subprocess.Popen[str]) -> None:
     child.stdin.flush()
 
 
-def maintenance_fixture(board: pathlib.Path, operation: str) -> tuple[str, ...]:
+def maintenance_fixture(
+    board: pathlib.Path, operation: str, *, unused_port: int | None = None
+) -> tuple[str, ...]:
     make_board(board, "Maintenance")
-    with socket.socket() as candidate:
-        candidate.bind(("127.0.0.1", 0))
-        unused_port = candidate.getsockname()[1]
+    if unused_port is None:
+        with socket.socket() as candidate:
+            candidate.bind(("127.0.0.1", 0))
+            unused_port = int(candidate.getsockname()[1])
     if operation == "migrate":
         legacy = write_schema_two_lane_board(board, unused_port)
         return ("lane", "migrate", legacy, "ready_for_work")
@@ -218,13 +221,27 @@ def test_maintenance_refuses_real_writer_without_changing_snapshot(
     assert board_state.load(board).verify() == []
 
 
+@pytest.fixture
+def stopped_board_port() -> Generator[int]:
+    """Keep a loopback port reserved without making it a listener."""
+    with socket.socket() as candidate:
+        if sys.platform == "win32":
+            candidate.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        candidate.bind(("127.0.0.1", 0))
+        yield int(candidate.getsockname()[1])
+
+
 @pytest.mark.parametrize("failure", ["validation", "save"])
 @pytest.mark.parametrize("operation", ["embed", "add", "retire", "rename", "migrate-id", "migrate"])
 def test_maintenance_failure_releases_admission(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, failure: str, operation: str
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stopped_board_port: int,
+    failure: str,
+    operation: str,
 ) -> None:
     board = tmp_path / "board.json"
-    arguments = maintenance_fixture(board, operation)
+    arguments = maintenance_fixture(board, operation, unused_port=stopped_board_port)
     before = board.read_bytes()
 
     def fail(*_args: object, **_kwargs: object) -> None:
@@ -790,11 +807,11 @@ def test_failed_replacement_cleanup_rejects_bounded_bad_metadata(
 
 @pytest.mark.parametrize("mode", ["shutdown", "restart"])
 @pytest.mark.parametrize("send_failure", [False, True])
-def test_admitted_command_retains_lease_and_gate_until_worker_join(  # noqa: PLR0915 -- synchronized lifecycle phases and cleanup
+def test_admitted_command_retains_lease_and_gate_until_worker_join(  # synchronized lifecycle phases and cleanup
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
-    send_failure: bool,  # noqa: FBT001 -- parameterized failure control
+    send_failure: bool,  # parameterized failure control
 ) -> None:
     """The transport budget cannot release a writer still able to save."""
     board = tmp_path / "board.json"

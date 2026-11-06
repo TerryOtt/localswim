@@ -91,7 +91,7 @@ def test_duplicate_and_existing_grants_are_idempotent(board: board_state.Board) 
         (["bot"], ["in_progress"], [], "unknown", "unknown actor"),
     ],
 )
-def test_invalid_batch_keeps_original_policy_and_snapshot(  # noqa: PLR0913 -- table covers each field
+def test_invalid_batch_keeps_original_policy_and_snapshot(  # table covers each field
     board: board_state.Board,
     actors: Sequence[str],
     create: Sequence[str],

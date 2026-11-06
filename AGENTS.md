@@ -367,10 +367,9 @@ fresh per-turn owner approval before any Astra use remain unchanged.
   `pyproject.toml`, refresh `uv.lock`, and commit both.
 - Fully annotate every function and method signature. Ruff checks annotation presence;
   Pyright checks correctness.
-- Follow `pyproject.toml`: Ruff `ALL`, Ruff formatting, 100-column lines, modern
-  syntax, sorted imports, `pathlib` for paths, and Pyright strict mode. The documented
-  ignores remove formatter conflicts or known low-value policy checks; do not weaken
-  checks to make a change pass.
+- Follow `pyproject.toml`: curated Ruff lint, Ruff formatting, 100-column lines, modern
+  syntax, sorted imports, `pathlib` for paths, and strict Pyright. Explain scoped
+  exceptions where they are configured or used.
 - Preserve UTF-8, LF endings, and the repository's US English/house vocabulary.
 - Preserve the CLI's explicit UTF-8 stdout/stderr boundary. Its Unicode status output
   must not depend on a Windows console or redirection target inheriting UTF-8.
@@ -479,8 +478,8 @@ uv run --frozen python check.py
 uv build --no-sources --clear
 ```
 
-`check.py` validates tracked-file line endings, Ruff `ALL`, Ruff formatting, strict
-Pyright, pytest, and actionlint with ShellCheck. All stages are mandatory; missing
+`check.py` validates tracked-file line endings, curated Ruff lint, Ruff formatting,
+strict Pyright, pytest, and actionlint with ShellCheck. All stages are mandatory; missing
 workflow tools fail the gate. See `docs/TOOLING.md` for tool choices, pins,
 installation, and rationale.
 

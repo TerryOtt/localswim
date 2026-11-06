@@ -491,7 +491,7 @@ def test_malformed_attachment_metadata_is_refused(
 @pytest.mark.parametrize(
     "boundary", ["cleanup", "publication", "interruption", "primitive_response", "helper_failure"]
 )
-def test_upload_retains_bytes_when_snapshot_committed_or_unknown(  # noqa: PLR0915 -- fault matrix
+def test_upload_retains_bytes_when_snapshot_committed_or_unknown(  # fault matrix
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str
 ) -> None:
     path = tmp_path / "board.json"

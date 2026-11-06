@@ -1062,8 +1062,8 @@ the authorized external scratch root. The complete project gate is:
 uv run --frozen python check.py
 ```
 
-The gate runs LF validation, Ruff `ALL`, Ruff's formatter check, strict Pyright, pytest,
-and actionlint with ShellCheck. Ruff verifies that annotations exist; Pyright verifies
+The gate runs LF validation, curated Ruff lint, Ruff's formatter check, strict
+Pyright, pytest, and actionlint with ShellCheck. Ruff verifies that annotations exist; Pyright verifies
 their types. Every stage runs even after an earlier failure, and any failed stage or
 missing workflow tool fails the gate. Line-ending validation covers Git-tracked text
 in the working tree, including Unicode and space-bearing paths; untracked files are

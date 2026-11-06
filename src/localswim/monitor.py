@@ -175,7 +175,7 @@ def board_signature(path: Path) -> tuple[int, int]:
 def try_lock(descriptor: int) -> bool:
     """Use the same platform-specific OS lock conventions as writer ownership."""
     if os.name == "nt":
-        import msvcrt  # noqa: PLC0415 -- Windows-only lock implementation
+        import msvcrt  # Windows-only lock implementation
 
         try:
             msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
@@ -184,7 +184,7 @@ def try_lock(descriptor: int) -> bool:
                 return False
             raise
     else:
-        import fcntl  # noqa: PLC0415 -- POSIX-only lock implementation
+        import fcntl  # POSIX-only lock implementation
 
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -218,11 +218,11 @@ def release_lock(handle: IO[bytes]) -> None:
 
     handle.seek(0)
     if os.name == "nt":
-        import msvcrt  # noqa: PLC0415 -- Windows-only lock implementation
+        import msvcrt  # Windows-only lock implementation
 
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
     else:
-        import fcntl  # noqa: PLC0415 -- POSIX-only lock implementation
+        import fcntl  # POSIX-only lock implementation
 
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     handle.close()

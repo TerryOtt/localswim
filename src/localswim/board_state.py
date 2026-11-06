@@ -1,3 +1,5 @@
+# Board policy and actor state are reloaded at runtime.
+# pyright: reportConstantRedefinition=false
 """The data model for a human/bot swimlane board, stored as ONE JSON file.
 
 **RFC 2119 keywords, and the capitals are load-bearing.** MUST and MUST NOT are
@@ -580,7 +582,7 @@ NOBODY: frozenset[str] = frozenset()
 RULES_PATH = pathlib.Path(__file__).resolve().parent / "rules.json"
 
 
-def _index_edges(  # noqa: PLR0912 -- every branch rejects one malformed input shape
+def _index_edges(  # every branch rejects one malformed input shape
     edges_raw: JsonObject,
     known: set[str],
     path: pathlib.Path,
@@ -1257,7 +1259,7 @@ CLI_USER: str = ""
 DEFAULT_OWNER: str = ""
 
 
-def install_users(  # noqa: PLR0913, PLR0917 -- one complete user configuration
+def install_users(  # one complete user configuration
     users: tuple[User, ...],
     browser: str,
     cli: str,
@@ -1278,8 +1280,8 @@ def install_users(  # noqa: PLR0913, PLR0917 -- one complete user configuration
     ignored. That edge would silently grant nothing to nobody, and a permission that
     quietly does not exist is worse than one that fails.
     """
-    global USERS, ACTORS, USER_LABEL, USER_CLASS, USER_COLOR  # noqa: PLW0603
-    global BROWSER_USER, CLI_USER, DEFAULT_OWNER, BROWSER_EDGES  # noqa: PLW0603
+    global USERS, ACTORS, USER_LABEL, USER_CLASS, USER_COLOR
+    global BROWSER_USER, CLI_USER, DEFAULT_OWNER, BROWSER_EDGES
 
     configured_edge_actors = frozenset((browser, cli))
     if len(configured_edge_actors) != REQUIRED_EDGE_ACTORS:
@@ -1500,9 +1502,9 @@ def reload_rules_if_changed() -> str | None:
     # not.** PLW0603 does not fire on names bound only by TUPLE UNPACKING, and every
     # name on the first line is. Adding a matching directive there is an unused `noqa`,
     # which `RUF100` then reports -- so the asymmetry is ruff's, not a slip.
-    global LANES, RULES, PRIORITIES, PRIORITY_LABEL, DEFAULT_PRIORITY  # noqa: PLW0603
-    global STATES, LANE_LABEL, BROWSER_EDGES, _rules_mtime  # noqa: PLW0603
-    global _POLICY, _RULES  # noqa: PLW0603
+    global LANES, RULES, PRIORITIES, PRIORITY_LABEL, DEFAULT_PRIORITY
+    global STATES, LANE_LABEL, BROWSER_EDGES, _rules_mtime
+    global _POLICY, _RULES
     fresh_policy, message = _POLICY.reload_if_changed(
         set(ACTORS) if ACTORS else None,
         frozenset((BROWSER_USER, CLI_USER)) if ACTORS else None,
@@ -3131,7 +3133,7 @@ class Board:
 
     # ---- writing -------------------------------------------------------------
 
-    def create(  # noqa: PLR0913 -- see below
+    def create(  # see below
         self,
         item_id: str,
         subject: str,
@@ -4317,7 +4319,7 @@ def initialize_board(
 def _maintenance_locked(path: pathlib.Path) -> Generator[None]:
     """Exclude service launch and retain writer ownership through the snapshot save."""
     # Ownership depends on board types; import only after this module is initialized.
-    from . import service_ownership  # noqa: PLC0415 -- avoid the ownership import cycle
+    from . import service_ownership  # avoid the ownership import cycle
 
     target = path.resolve()
     with (
@@ -4381,7 +4383,7 @@ def _lane_insertion_index(lanes: list[JsonValue], before: str | None, after: str
     return matches[0] + (after is not None)
 
 
-def add_lane(  # noqa: PLR0913 -- explicit optional maintenance settings
+def add_lane(  # explicit optional maintenance settings
     path: pathlib.Path,
     label: str,
     *,
@@ -4650,7 +4652,7 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
 
 def _service_descriptor(path: pathlib.Path) -> JsonObject:
     """Validate board-bound metadata and live identity before any CLI dispatch."""
-    from . import service_ownership  # noqa: PLC0415 -- ownership imports board types
+    from . import service_ownership  # ownership imports board types
 
     try:
         raw = service_ownership.service_descriptor(path, require_cli_token=True)
@@ -6227,7 +6229,7 @@ def _print_item_inspection(
     _print_report_section("comment text", _comment_report_lines(inspection.comments or ()))
 
 
-def _report_next_items(  # noqa: PLR0913 -- explicit selection and output options
+def _report_next_items(  # explicit selection and output options
     board: Board,
     lanes: list[str],
     limit: int,
@@ -6276,7 +6278,7 @@ def _report_next_items(  # noqa: PLR0913 -- explicit selection and output option
         )
 
 
-def _report_search_items(  # noqa: PLR0913 -- explicit selection and output options
+def _report_search_items(  # explicit selection and output options
     board: Board,
     query: str,
     lanes: list[str] | None,
@@ -6403,7 +6405,7 @@ def report_item(
     )
 
 
-def report_next_items(  # noqa: PLR0913 -- explicit selection and output options
+def report_next_items(  # explicit selection and output options
     board: Board,
     lanes: list[str],
     limit: int,
@@ -6423,7 +6425,7 @@ def report_next_items(  # noqa: PLR0913 -- explicit selection and output options
     )
 
 
-def report_search_items(  # noqa: PLR0913 -- explicit selection and output options
+def report_search_items(  # explicit selection and output options
     board: Board,
     query: str,
     lanes: list[str] | None,
