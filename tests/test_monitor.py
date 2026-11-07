@@ -304,7 +304,11 @@ def test_reload_debounces_initialization_write_with_or_without_notification(
     monkeypatch.setattr(watcher.time, "monotonic", clock)
     monkeypatch.setattr(watcher.time, "sleep", Mock(return_value=None))
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="codex"))
-    monkeypatch.setattr(watcher, "service_is_healthy", Mock(return_value=True))
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_service_health",
+        Mock(return_value=watcher.service_ownership.ServiceHealth(True, "complete", "healthy", 0)),
+    )
     flush = Mock(return_value="alert stamp")
     monkeypatch.setattr(watcher, "flush_pending_alert", flush)
 
@@ -638,7 +642,30 @@ def test_ordinary_restart_retries_failed_queue_without_board_write(
 ) -> None:
     watcher.write_atomic_json(config.status_path, saved_status(config, pending))
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
-    monkeypatch.setattr(watcher, "service_is_healthy", Mock(return_value=True))
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_service_health",
+        Mock(
+            side_effect=[
+                watcher.service_ownership.ServiceHealth(
+                    False,
+                    "response_headers",
+                    "response_headers_failed",
+                    1001,
+                    port=52668,
+                    error_type="timeout",
+                ),
+                watcher.service_ownership.ServiceHealth(
+                    True,
+                    "complete",
+                    "healthy",
+                    3,
+                    port=52668,
+                    http_status=200,
+                ),
+            ]
+        ),
+    )
     monkeypatch.setattr(watcher, "read_activity", Mock(return_value=None))
     monkeypatch.setattr(watcher.time, "monotonic", Mock(side_effect=[100.0, 115.0] * 2))
     queue = Mock(side_effect=[RuntimeError("queue unavailable"), None])
@@ -658,6 +685,8 @@ def test_ordinary_restart_retries_failed_queue_without_board_write(
     assert failed["state"] == "failed"
     assert failed["pendingActivityStartedAt"] == pending.activity_started_at
     assert failed["pendingWriteCount"] == pending.write_count
+    assert failed["lastHealthCheck"]["error_type"] == "timeout"
+    assert failed["consecutiveHealthFailures"] == 1
     assert watcher.monitor(config) == 0
     status = watcher.read_json(config.status_path)
     assert queue.call_count == 2
@@ -666,7 +695,171 @@ def test_ordinary_restart_retries_failed_queue_without_board_write(
     assert retried.last_observed_at == pending.last_observed_at
     assert status["pendingWriteCount"] == 0
     assert status["lastAlertAt"] is not None
+    assert status["lastHealthCheck"]["healthy"] is True
+    assert status["consecutiveHealthFailures"] == 0
+    assert watcher.read_json(config.target_path)["threadId"] == config.thread_id
     assert watcher.board_signature(config.board) == signature
+
+
+def test_health_failure_diagnostics_recover_without_success_log_churn(
+    config: watcher.Config,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    failed = watcher.service_ownership.ServiceHealth(
+        False,
+        "response_headers",
+        "response_headers_failed",
+        1001,
+        port=52668,
+        error_type="timeout",
+    )
+    healthy = watcher.service_ownership.ServiceHealth(
+        True,
+        "complete",
+        "healthy",
+        4,
+        port=52668,
+        http_status=200,
+    )
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_service_health",
+        Mock(side_effect=[failed, failed, healthy, healthy]),
+    )
+    runtime = watcher.MonitorRuntime(watcher.board_signature(config.board), watcher.now())
+    publish = Mock()
+
+    for _ in range(4):
+        watcher.handle_idle_cycle(config, "mock-codex", runtime, publish)
+
+    assert runtime.service_misses == 0
+    assert runtime.last_health == healthy
+    assert publish.call_count == 3
+    reports = [
+        json.loads(line.removeprefix("Monitor health check: "))
+        for line in capsys.readouterr().out.splitlines()
+    ]
+    assert [report["consecutiveFailures"] for report in reports] == [1, 2, 0]
+    assert [report["code"] for report in reports] == [
+        "response_headers_failed",
+        "response_headers_failed",
+        "healthy",
+    ]
+
+
+def test_fifth_health_failure_preserves_diagnostic_and_target(
+    config: watcher.Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_service_health",
+        Mock(
+            return_value=watcher.service_ownership.ServiceHealth(
+                False,
+                "descriptor_read",
+                "descriptor_unreadable",
+                0,
+                error_type="missing",
+            )
+        ),
+    )
+    empty_changes: set[object] = set()
+    monkeypatch.setattr(watcher, "watch_board", Mock(return_value=iter([empty_changes] * 5)))
+
+    with pytest.raises(RuntimeError, match="five consecutive checks"):
+        watcher.monitor(config)
+
+    status = watcher.read_json(config.status_path)
+    assert status["state"] == "failed"
+    assert status["consecutiveHealthFailures"] == 5
+    assert status["lastHealthCheck"]["phase"] == "descriptor_read"
+    assert "port" not in status["lastHealthCheck"]
+    assert status["pendingWriteCount"] == 0
+    assert watcher.read_json(config.target_path)["threadId"] == config.thread_id
+    lock = watcher.acquire_lock(config.lock_path)
+    assert lock is not None
+    watcher.release_lock(lock)
+
+
+@pytest.mark.parametrize("failure", ["log", "diagnostic-status"])
+def test_diagnostic_io_failure_keeps_pending_flush_and_health_counter(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_service_health",
+        Mock(
+            return_value=watcher.service_ownership.ServiceHealth(
+                False,
+                "response_headers",
+                "response_headers_failed",
+                1001,
+                port=52668,
+                error_type="timeout",
+            )
+        ),
+    )
+    monkeypatch.setattr(watcher.time, "monotonic", Mock(return_value=116.0))
+    flush = Mock(return_value="queued")
+    monkeypatch.setattr(watcher, "flush_pending_alert", flush)
+    runtime = watcher.MonitorRuntime(
+        watcher.board_signature(config.board),
+        watcher.now(),
+        pending_alert=pending,
+    )
+    publish = Mock()
+    if failure == "log":
+        monkeypatch.setattr(
+            watcher, "print", Mock(side_effect=OSError("private failure")), raising=False
+        )
+    else:
+        publish.side_effect = [OSError("private failure"), None]
+
+    watcher.handle_idle_cycle(config, "mock-codex", runtime, publish)
+
+    assert runtime.service_misses == 1
+    assert runtime.pending_alert is None
+    assert runtime.last_alert_at == "queued"
+    flush.assert_called_once_with(config, "mock-codex", pending)
+    assert publish.call_count == 2
+
+
+def test_activity_status_io_failure_keeps_its_existing_failure_semantics(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_service_health",
+        Mock(
+            return_value=watcher.service_ownership.ServiceHealth(
+                True,
+                "complete",
+                "healthy",
+                1,
+                port=52668,
+                http_status=200,
+            )
+        ),
+    )
+    monkeypatch.setattr(watcher.time, "monotonic", Mock(return_value=116.0))
+    monkeypatch.setattr(watcher, "flush_pending_alert", Mock(return_value="queued"))
+    runtime = watcher.MonitorRuntime(
+        watcher.board_signature(config.board),
+        watcher.now(),
+        pending_alert=pending,
+    )
+    publish = Mock(side_effect=[None, OSError("existing activity persistence failure")])
+
+    with pytest.raises(OSError, match="existing activity persistence failure"):
+        watcher.handle_idle_cycle(config, "mock-codex", runtime, publish)
 
 
 @pytest.mark.parametrize("with_pending", [False, True])
@@ -781,7 +974,11 @@ def test_recovered_interval_uses_shared_actor_filter_and_mocked_transport(
     watcher.write_atomic_json(config.status_path, saved_status(config, pending))
     monkeypatch.setattr(watcher.time, "monotonic", Mock(side_effect=[100.0, 115.0]))
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-executable"))
-    monkeypatch.setattr(watcher, "service_is_healthy", Mock(return_value=True))
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_service_health",
+        Mock(return_value=watcher.service_ownership.ServiceHealth(True, "complete", "healthy", 0)),
+    )
     transport = Mock(
         side_effect=[
             subprocess.CompletedProcess([], 0, json.dumps(events), ""),

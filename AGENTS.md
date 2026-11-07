@@ -580,6 +580,10 @@ The monitor never reads board content. After a trailing-edge 15-second quiet
 window it queries sanitized `localswim-cli` activity metadata. Suppress a nonempty
 result only when every event is by the configured automation actor (`bot` by
 default). Human, mixed, unknown, empty, malformed and failed queries still alert.
+Health diagnostics use bounded phase/code/error categories, elapsed milliseconds,
+and validated port/HTTP status only. Preserve the current target, activity cursor,
+pending intervals, ownership and filtering during diagnostics recovery. Never log
+descriptor bodies, browser-session content, tokens or raw exception text.
 Never require one activity event per observed filesystem write. For queued alerts,
 inspect only activity metadata first; proven automation-only events need no card
 inspection, work resumption or further action. Preserve Terry's alerts. Keep prose

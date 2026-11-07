@@ -227,7 +227,14 @@ def service_descriptor(
     path: pathlib.Path, *, require_cli_token: bool = False
 ) -> board_state.JsonObject:
     """Validate a board-bound endpoint, optionally requiring its CLI capability."""
-    raw = read_service_metadata(path)
+    return _validate_service_descriptor(
+        path, read_service_metadata(path), require_cli_token=require_cli_token
+    )
+
+
+def _validate_service_descriptor(
+    path: pathlib.Path, raw: board_state.JsonValue, *, require_cli_token: bool = False
+) -> board_state.JsonObject:
     if not isinstance(raw, dict):
         raise ValueError("invalid service descriptor")  # malformed JSON metadata
     port, board, token = raw.get("port"), raw.get("board"), raw.get("token")
@@ -283,22 +290,163 @@ def read_service_metadata(path: pathlib.Path) -> board_state.JsonValue:
     return _read_json(board_state.service_descriptor_path(path), MAX_METADATA_BYTES)
 
 
+HEALTH_PHASE_CODES = {
+    "descriptor_read": "descriptor_unreadable",
+    "descriptor_validation": "descriptor_invalid",
+    "connect_request": "request_failed",
+    "response_headers": "response_headers_failed",
+    "response_read": "response_read_failed",
+    "metadata_decode": "metadata_invalid",
+    "metadata_validation": "metadata_invalid",
+    "response_close": "response_close_failed",
+    "http_status": "http_status_unexpected",
+    "identity": "identity_mismatch",
+    "complete": "healthy",
+}
+HEALTH_ERROR_TYPES = frozenset(
+    {
+        "missing",
+        "permission",
+        "timeout",
+        "connection_refused",
+        "connection_reset",
+        "os_error",
+        "http_error",
+        "invalid_metadata",
+        "recursion_error",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ServiceHealth:
+    """Bounded diagnostic metadata, containing no descriptor or response content."""
+
+    healthy: bool
+    phase: str
+    code: str
+    elapsed_ms: int
+    port: int | None = None
+    http_status: int | None = None
+    error_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.healthy) is not bool
+            or HEALTH_PHASE_CODES.get(self.phase) != self.code
+            or self.healthy != (self.code == "healthy")
+            or type(self.elapsed_ms) is not int
+            or self.elapsed_ms < 0
+            or (
+                self.port is not None
+                and (type(self.port) is not int or not 0 < self.port < PORT_LIMIT)
+            )
+            or (
+                self.http_status is not None
+                and (type(self.http_status) is not int or not 100 <= self.http_status <= 999)
+            )
+            or (self.error_type is not None and self.error_type not in HEALTH_ERROR_TYPES)
+        ):
+            raise ValueError("invalid service health metadata")
+
+    def to_json(self) -> board_state.JsonObject:
+        """Serialize only validated, explicitly selected diagnostic fields."""
+        result: board_state.JsonObject = {
+            "healthy": self.healthy,
+            "phase": self.phase,
+            "code": self.code,
+            "elapsed_ms": self.elapsed_ms,
+        }
+        for key, value in (
+            ("port", self.port),
+            ("http_status", self.http_status),
+            ("error_type", self.error_type),
+        ):
+            if value is not None:
+                result[key] = value
+        return result
+
+
+def _health_error_type(error: BaseException) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "missing"
+    if isinstance(error, PermissionError):
+        return "permission"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, ConnectionRefusedError):
+        return "connection_refused"
+    if isinstance(error, ConnectionResetError):
+        return "connection_reset"
+    if isinstance(error, http.client.HTTPException):
+        return "http_error"
+    if isinstance(error, RecursionError):
+        return "recursion_error"
+    if isinstance(error, ValueError):
+        return "invalid_metadata"
+    return "os_error"
+
+
+def probe_service_health(path: pathlib.Path) -> ServiceHealth:
+    """Identify the failed stage of the existing bounded correct-board GET probe."""
+    started = time.monotonic()
+    phase = "descriptor_read"
+    port: int | None = None
+    http_status: int | None = None
+    connection: http.client.HTTPConnection | None = None
+    failure_type: str | None = None
+
+    def result(error_type: str | None = None) -> ServiceHealth:
+        return ServiceHealth(
+            healthy=phase == "complete",
+            phase=phase,
+            code=HEALTH_PHASE_CODES[phase],
+            elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+            port=port,
+            http_status=http_status,
+            error_type=error_type,
+        )
+
+    try:
+        try:
+            raw = read_service_metadata(path)
+        except ValueError, RecursionError:
+            phase = "descriptor_validation"
+            raise
+        phase = "descriptor_validation"
+        descriptor = _validate_service_descriptor(path, raw)
+        port = cast("int", descriptor["port"])
+        phase = "connect_request"
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+        connection.request("GET", board_state.API_PREFIX + "/browser-session")
+        phase = "response_headers"
+        response = connection.getresponse()
+        http_status = response.status
+        phase = "response_read"
+        data = response.read(MAX_METADATA_BYTES + 1)
+        phase = "metadata_decode"
+        session = _decode_json(data, MAX_METADATA_BYTES)
+        if http_status != HTTPStatus.OK:
+            phase = "http_status"
+        elif not isinstance(session, dict) or not isinstance(session.get("boardIdentity"), str):
+            phase = "metadata_validation"
+        elif session.get("boardIdentity") != board_identity(path):
+            phase = "identity"
+        else:
+            phase = "complete"
+    except (OSError, ValueError, RecursionError, http.client.HTTPException) as error:
+        failure_type = _health_error_type(error)
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except (OSError, ValueError, RecursionError, http.client.HTTPException) as error:
+                if phase == "complete":
+                    phase = "response_close"
+                    failure_type = _health_error_type(error)
+    return result(failure_type)
+
+
 def service_is_healthy(path: pathlib.Path) -> bool:
     """Recognize legacy correct-board listeners which predate OS ownership leases."""
-    try:
-        raw = service_descriptor(path)
-        port = cast("int", raw["port"])
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
-        try:
-            connection.request("GET", board_state.API_PREFIX + "/browser-session")
-            response = connection.getresponse()
-            session = _decode_json(response.read(MAX_METADATA_BYTES + 1), MAX_METADATA_BYTES)
-            return (
-                response.status == HTTPStatus.OK
-                and isinstance(session, dict)
-                and session.get("boardIdentity") == board_identity(path)
-            )
-        finally:
-            connection.close()
-    except OSError, ValueError, RecursionError, http.client.HTTPException:
-        return False
+    return probe_service_health(path).healthy

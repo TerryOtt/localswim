@@ -1021,6 +1021,18 @@ suppressed only when every event belongs to the configured automation actor.
 Human, mixed, unknown, empty, malformed and failed results queue an alert.
 Filesystem signatures and activity-event counts differ and are never compared.
 No board prose or service credentials enter monitor logs or status files.
+Monitor status also includes `lastHealthCheck` after a probe has completed, with
+`healthy`, a bounded `phase` and `code`, `elapsed_ms`, and `checkedAt`. Optional
+`port`, `http_status`, and `error_type` describe only validated endpoint metadata
+or an allowlisted failure category. `consecutiveHealthFailures` reports the normal
+idle-cycle lifecycle counter. Failed probes and recovery emit the same diagnostic
+fields to stdout; successful quiet polling produces no repeated log entries.
+Diagnostic-only log/status I/O failures are best effort; existing activity/cursor
+and lifecycle persistence keeps its normal failure behavior.
+Status is persisted on health-category changes, failed probes, recovery, and the
+existing activity/lifecycle events. It is an observation, not a live heartbeat.
+Existing status files remain supported. The one-second probe timeout and
+five-consecutive-miss exit rule keep their existing behavior.
 Queued alerts contain the board label, one activity datetime range, and a sorted,
 deduplicated bullet list of changed card numbers from that same metadata query.
 If card numbers are unavailable, a short fallback requests metadata inspection;

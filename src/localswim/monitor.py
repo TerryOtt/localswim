@@ -78,6 +78,8 @@ class MonitorRuntime:
     pending_alert: PendingAlert | None = None
     service_misses: int = 0
     stopping: bool = False
+    last_health: service_ownership.ServiceHealth | None = None
+    health_checked_at: str | None = None
 
 
 def note_board_write(
@@ -251,10 +253,47 @@ def handle_idle_cycle(
     publish_status: Callable[[str], None],
 ) -> None:
     """Update health and flush any alert whose quiet window has elapsed."""
-    if service_is_healthy(config.board):
+    previous = runtime.last_health
+    recovering = runtime.service_misses > 0
+    health = service_ownership.probe_service_health(config.board)
+    runtime.last_health = health
+    runtime.health_checked_at = now()
+    if health.healthy:
         runtime.service_misses = 0
     else:
         runtime.service_misses += 1
+    changed = previous is None or (
+        previous.healthy,
+        previous.phase,
+        previous.code,
+        previous.port,
+        previous.http_status,
+        previous.error_type,
+    ) != (
+        health.healthy,
+        health.phase,
+        health.code,
+        health.port,
+        health.http_status,
+        health.error_type,
+    )
+    if not health.healthy or recovering:
+        with contextlib.suppress(OSError):
+            print(
+                "Monitor health check: "
+                + json.dumps(
+                    {
+                        **health.to_json(),
+                        "checkedAt": runtime.health_checked_at,
+                        "consecutiveFailures": runtime.service_misses,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+    if changed or not health.healthy or recovering:
+        with contextlib.suppress(OSError):
+            publish_status("running")
     if runtime.pending_alert is not None and quiet_window_elapsed(
         runtime.pending_alert,
         current_monotonic=time.monotonic(),
@@ -843,6 +882,17 @@ def monitor(config: Config) -> int:
                     if runtime.pending_alert is None
                     else runtime.pending_alert.last_observed_at
                 ),
+                **(
+                    {
+                        "lastHealthCheck": {
+                            **runtime.last_health.to_json(),
+                            "checkedAt": runtime.health_checked_at,
+                        },
+                        "consecutiveHealthFailures": runtime.service_misses,
+                    }
+                    if runtime.last_health is not None
+                    else {}
+                ),
                 **extra,
             },
         )
@@ -852,7 +902,10 @@ def monitor(config: Config) -> int:
         print(f"Watching {config.board} for Codex thread alerts.", flush=True)
         for changes in watch_board(config):
             if stop_requested(config.target_path, os.getpid()):
-                if service_is_healthy(config.board):
+                health = service_ownership.probe_service_health(config.board)
+                runtime.last_health = health
+                runtime.health_checked_at = now()
+                if health.healthy:
                     if not runtime.stopping:
                         status("stopping")
                     runtime.stopping = True
