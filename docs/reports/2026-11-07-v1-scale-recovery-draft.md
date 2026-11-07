@@ -1,12 +1,13 @@
 # V1 scale recovery: lessons and test cases for V2
 
-**Draft 2 — 2026-11-07. Working discussion copy; not sent to V2.**
+**Revision 3 — 2026-11-07. V1 closeout packet for V2 planning intake.**
 
 Tracking card: **#0215**. This draft records the accepted work in #0210–#0214 and
-#0216–#0218, #0219 and #0220. Terry approved the notifier and SSE cards and moved
-them to Completed before this update.
-It will be amended after Terry's further discussion. It does not authorize V2
-implementation changes or alter existing V2 acceptance gates.
+#0216–#0218 and #0219–#0222. Terry approved those cards and moved them to Completed.
+This revision includes the final status-bar simplification and complete retirement
+of the old watcher commands. It does not authorize V2 implementation changes or
+alter existing V2 acceptance gates. The V2 planning receipt belongs on #0215 and
+the corresponding V2 intake card.
 
 ## What happened
 
@@ -20,6 +21,10 @@ workloads. Terry subsequently reported that the gateway was vastly improved and
 accepted #0210–#0214 and #0216–#0218. Further discussion led to the simpler owner
 notifier in #0219 and the browser SSE path in #0220, both now accepted. That is
 useful operational confirmation alongside the tests.
+
+Terry later reported watching another agent's bulk board cleanup arrive in the
+browser, with Last card update repeatedly showing zero seconds or one second. That
+is user-reported operational feedback, not a measured latency distribution.
 
 The main lesson for V2 is work amplification. A cheap-looking sidebar, health
 check, or change detector can repeatedly trigger expensive work elsewhere. SQLite
@@ -92,6 +97,13 @@ polling and ten-second sidebar polling were useful interim repairs in
 - Resolve the selected board without a workspace-wide JSON scan.
 - Reuse unchanged recognition and sidebar summaries.
 - Recheck path, file and writer identity; cached facts do not become authority.
+- Retain one explicit V1 tradeoff: while the catalog is subscribed, its periodic
+  reconciliation still reads/hashes candidate board bytes. Unchanged content
+  avoids parsing again, but this is not a completely event-driven storage path.
+
+Terry accepted that remaining sweep as sufficient headroom for a reliable bridge
+to V2. Further V1 rearchitecture is not part of this closeout. For V2, measure the
+work behind a catalog response, not merely its small network payload.
 
 ### Board service
 
@@ -106,6 +118,13 @@ polling and ten-second sidebar polling were useful interim repairs in
   snapshots and Git backup status.
 - Use an admitted content marker so timestamp-preserving and policy-only changes
   are visible.
+- Remove the visible Last confirmed sync age. An unchanged board could be current
+  while that age grew, but the label still suggested that the site had stopped
+  keeping up. Keep Last card update and the wall clock.
+- Show the dot and CONNECTED badge green while SSE is open, including an open but
+  silent connection, and for ten seconds after it disconnects. Repeated failed
+  reconnects do not renew the grace period. Genuine board-read errors remain
+  independently visible.
 
 ### Browser
 
@@ -145,8 +164,13 @@ polling and ten-second sidebar polling were useful interim repairs in
 
 ### Legacy monitors
 
-- Keep the native watcher/pool improvements available for compatibility.
-- They are not the normal owner-notification path and remain off.
+- Remove watcher/pool implementations, public launch commands and the optional
+  native watcher dependency. There is no legacy customer requiring compatibility.
+- Keep only immediate-failure stubs for stale installed launchers or module calls,
+  with guidance to the service-owned notification CLI. No old start, reload or stop
+  mode can revive them.
+- Preserve historical runtime files and the current sanitized activity inspection
+  API; neither requires a filesystem watcher.
 
 ### Attribution
 
@@ -162,11 +186,14 @@ priority reconciliation can affect several cards; those effects must commit
 together. Card revisions reject stale intent. Separate lane locks were not needed
 to obtain safe behavior. Independent boards remain independent.
 
-The **legacy monitor feed** is an in-memory evidence cache, not a durable journal.
+The following records the retired monitor contract for historical context; it is
+not an operating recipe. The retained **activity feed** is an in-memory evidence
+cache, not a durable journal.
 A writer commit performs one exact-byte verification; ordinary feed queries use
 strong file metadata. Restart, retention, external-change and other coverage gaps
 remain explicit. Native events are hints, not one-for-one transaction records.
-Production legacy monitors were left off. The legacy notifier's at-least-once
+Production legacy monitors were first left off, then their startup paths were
+removed in #0222. The former legacy notifier's at-least-once
 delivery has a duplicate window between queue acknowledgement and status persistence.
 That is a legacy monitor contract, not a guarantee of the new owner notifier.
 Unsupported transient manual JSON writes overwritten outside the sole-writer
@@ -197,7 +224,7 @@ startup catch-up or resend. One authorized idle-chat smoke test showed that
 agent consumed the notice or finished work. Windows requires native `codex.exe`
 on the service's PATH.
 
-The notifier and legacy watcher/pool are not run together for the same board.
+The legacy watcher/pool can no longer be launched through the shared package.
 Existing legacy target, cursor, pending-alert and lock files were preserved.
 Owner settings were also preserved through the SSE rollout, including an already
 enabled V2 target; the rollout did not activate notifications on every board.
@@ -223,9 +250,12 @@ so visiting many boards does not leave each one rereading JSON indefinitely. An
 already admitted read may finish. A returning view wakes production promptly.
 
 A prebuilt **five-second heartbeat performs no JSON I/O**. Connection health is
-separate from **Last confirmed sync**, which records the browser's last accepted
-and rendered authoritative snapshot. Server `readAt` remains a separate disk-read
-diagnostic. Removing browser polling does not mean all disk-health checks vanished.
+separate from snapshot acceptance and disk health. #0220 initially displayed
+**Last confirmed sync** as the last accepted/rendered snapshot time; #0221 removed
+that label because it looked alarming on a healthy unchanged board. The clock and
+Last card update remain. Server `readAt` is a separate disk-read diagnostic.
+Removing browser polling does not mean all disk-health checks vanished: the active
+board health check and subscribed catalog reconciliation still do work.
 
 Latest-only metadata and bounded writes keep slow consumers off the writer.
 Shutdown wakes streams, interrupts upstream connections and joins producers before
@@ -236,6 +266,37 @@ SSE fit the local use case: server-to-browser notices over an ordinary HTTP
 response, with browser-supported reconnection. Edits already had an HTTP API;
 they did not need a second bidirectional command channel. No new dependency,
 external push service, daemon, framework or cross-tab coordinator was added.
+
+### Status simplification and retirement: #0221–#0222
+
+Connection indicators now report only whether SSE is open or disconnected within
+the ten-second grace period. They do not infer connection failure from a lack of
+data events. Deliberately replacing a stream also starts grace; an unsuccessful
+replacement cannot leave an indefinitely green indicator. Malformed metadata does
+not pretend the transport closed. Board-read errors survive ordinary repaint and
+clear through their own recovery path.
+
+Removing a field also required removing its layout allocation. The first revision
+left an empty fourth grid track. Terry caught the resulting dead space; the fix
+removed that track and reduced the status group's basis from 52em to 34em. The
+remaining fields retain stable widths and the reserved two-digit clock hour.
+
+The legacy watcher/pool implementations and their console entrypoints were deleted,
+including old stop-only compatibility. Stale wrappers and Python module invocations
+fail before parsing configuration, acquiring locks or touching runtime state.
+The unused `monitor` extra and `watchfiles`/`anyio`/`idna` dependencies were removed;
+CI, tooling and maintained operating instructions were updated with them.
+
+Twenty refusal cases replaced 149 parameterized cases in five retired watcher-only
+test modules (71 named test functions). The current activity client/feed, service
+health, owner-notification and SSE tests remain. A lower aggregate test count here
+records feature removal, not a claim that the earlier qualification disappeared.
+
+All four live board notification configurations were preserved through deployment.
+The V1 board was subsequently connected to this owning chat at Terry's prompting.
+A genuine Human approval burst for #0221/#0222 then arrived as a metadata-only chat
+notice; sanitized activity confirmed the two Completed transitions. That exercises
+the real workflow in addition to the earlier isolated idle-chat smoke test.
 
 ### A related transport finding
 
@@ -335,6 +396,15 @@ was a marker. DOM assertions, saved-state recovery and product tests established
 correctness. The owned mailbox was exported and deleted. No real board content or
 credentials were included in those messages.
 
+The #0221 browser follow-up verified a silent open stream remained green, a short
+disconnect stayed green during grace, and 65 failed reconnect attempts did not
+prevent the indicator expiring. A successful reopen restored green immediately.
+The removed age was absent from the bar and tooltip, while the clock remained.
+The CSS-only spacing correction was checked at a 1920-pixel viewport: three tracks,
+a 408-pixel status group, an unclipped clock, the normal 14-pixel gap before Alerts,
+and stable field positions as the clock ticked. These are scoped UI checks, not
+new throughput measurements.
+
 ## V2 implications
 
 **RECOMMENDED: carry these behavioral scenarios into V2 qualification now, then
@@ -401,6 +471,11 @@ Do not remove V2's existing guarantees without an explicit contract decision.
 Keep chat attribution separate from browser propagation: Bot-only edits should
 not nudge their own agent, but they must still update Terry's browser.
 
+The V2 M15 contract explicitly separates the Python administrative owner notifier
+from the Go product's local notice and eventual delivery surfaces. Preserve that
+distinction during intake. The simple operator nudge is not, by itself, evidence
+that an already approved product receipt or recovery guarantee should be removed.
+
 Keep intake independent of slow processing and delivery. Bound concurrency, queued
 work and per-board coalescing. Test simultaneous bursts, slow sinks, missed signals,
 restart, retention gaps and writes that arrive during drain. One failed board must
@@ -450,19 +525,25 @@ fixture construction must not dominate the measurement or quietly change its pre
 - `06f543c`: #0216–#0218; final gate **2,271 passed, one platform-specific skip**.
 - `cd973e5`: #0219; final gate **2,374 passed, one platform-specific skip**.
 - `d4db7be`: #0220; final gate **2,429 passed, one platform-specific skip**.
+- `818e6d4`: #0221/#0222; final gate **2,302 passed, one platform-specific skip**.
+- `8445e62`: #0221 CSS-only spacing follow-up; **121 focused tests**, static checks,
+  source/wheel build and real-browser geometry checks passed. No separate full-suite
+  run is claimed for those two CSS declaration changes.
 - Source/wheel builds, independent reviews and clean shared activation were recorded
   for these releases. These are separate runs/scopes, not additive unique-test totals.
-- Native filesystem watching was qualified on Windows; other OS watcher backends
+- The retired native filesystem watcher was qualified on Windows; other OS backends
   were not exercised here. The owner-notification live test covered one idle Codex
   chat in this Windows installation. No power-loss durability claim is made.
 - Detailed machine-local evidence remains under `artifacts/v1-performance-qualification`
   and `artifacts/v1-monitor-qualification`, plus the newer
   `artifacts/v1-owner-notifications-qualification` and `artifacts/v1-sse-qualification`;
+  #0221/#0222 evidence is under `artifacts/v1-status-grace-qualification`, including
+  its `spacing-followup` subdirectory;
   raw production board content and credentials
   are not included in this document.
 - V2 context checked: its implementation README, workspace catalog decision, M11
-  activity CLI runbook, and M13/M14 notice recovery/control runbooks. Those documents
-  establish context, not a claim of new V2 scale qualification.
+  activity CLI runbook, M13/M14 notice recovery/control runbooks, and M12/M15 notice
+  contracts. Those documents establish context, not new V2 scale qualification.
 - This report supplies observations and behavioral acceptance ideas. Do not copy V1
   source/tests/internal designs into V2. Prior V1 exposure is disclosed; no independent
   clean-room certification is claimed.
@@ -470,16 +551,37 @@ fixture construction must not dominate the measurement or quietly change its pre
 For V1 operation and architecture context, see the [README](../../README.md) and
 [orientation](../ORIENTATION.md).
 
-## Discussion still to add
+## V2 intake and #0215 closeout
 
-- Which workspace, client, active-card and retained-history envelopes should V2 commit
-  to, and which latency/resource budgets should qualify them?
-- Which additional data shapes or failure sequences does Terry want represented?
-- Which notice-delivery and retention guarantees should be tested beyond the current
-  contracts, including the boundary between local acceptance and external delivery?
-- Which V2 transport/notice contracts should change, if any, after reviewing the
-  clarified local single-user use case? No such V2 change is approved by this draft.
-- Which operational lessons belong in product behavior versus test/diagnostic tooling?
+Publication or a chat acknowledgement alone does not close the transfer. The V2
+owner should record a durable, human-readable mapping covering every area above
+and every applicable qualification dimension. Reuse existing work rather than
+creating duplicate milestones. For each area, return one disposition:
 
-This is Draft 2. Keep it unsent until Terry finishes the discussion and authorizes
-delivery to V2.
+- **Covered:** identify the accepted implementation and concrete test/evidence
+  reference. Separate existing behavior from any larger-workload extension needed.
+- **Planned:** link a specific existing or new V2 card and milestone, with acceptance
+  criteria, prerequisite/decision gates and the first useful qualification slot.
+  Do not defer every scale check to final cutover merely because a later release
+  milestone can hold an aggregate test.
+- **Intentional difference:** name the decision, product limit and rationale, including
+  any Terry approval still required. SQLite alone is not proof that amplification,
+  copying, rendering or idle-work scenarios are inapplicable.
+
+The mapping must include producer-driven owner nudges and browser updates,
+bootstrap/reconnect consistency, truthful pending/error/connection UI, catalog
+work and inactive-board quiescence, atomic writes and uncertain outcomes,
+attachment-path costs, diagnostic/lifecycle isolation, and the large-card/count/
+combined workload matrix. V2 may meet these outcomes with its own architecture;
+this is not a request to copy V1's mechanisms or retain unnecessary compatibility.
+
+Agree explicit V2 operating envelopes and resource/latency budgets through the
+appropriate decision cards. Start with the clarified one-Human, one-browser,
+one-tab case; retain Human/Bot concurrency. Where V2's approved notice, authority
+or recovery contracts are stronger, keep them until the owner approves a change.
+
+The receipt should link this pinned report revision, the V2 intake card, mapping
+artifact, affected implementation/test cards and schedule updates, plus unresolved
+owner decisions. Record it on both boards. #0215 can reach Ready for Review once
+that receipt accounts for the lessons; it need not wait for all V2 implementation
+to finish. Terry retains control of Completed and future execution approvals.
