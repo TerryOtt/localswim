@@ -110,9 +110,13 @@ for (const id of ['scrim', 'panel']) {
   elements[id] = {classList: {remove(name) {events.push([id, name]);}}};
 }
 const ctx = vm.createContext({input, button, events, say, JSON, Set, encodeURIComponent,
-  document});
+  document, crypto:require("crypto").webcrypto, AbortSignal,
+  sessionStorage:{getItem(){return null},setItem(){}}});
 vm.runInContext(`
 let API_PREFIX = '/alpha', API_TOKEN = 'synthetic', openId = 'review', seen = 'fresh';
+let authoritativeData = null;
+const HAY = {clear(){}}; function paint(){} function tick(){}
+async function apiGet(){return {...data,revision:input.mode.endsWith('error')?4:5};}
 let data = {revision: 4, browserUser: 'terry', actors: [{id:'terry', class:'human'}],
   lanes: [{state:'ready_for_review'}, {state:'completed'}]};
 let card = {id:'review', state:'ready_for_review', archived:false};
@@ -129,7 +133,7 @@ function fetch(path, options) {
   calls.push({path, options});
   return new Promise((resolve, reject) => {resolveFetch=resolve; rejectFetch=reject;});
 }
-` + section('async function apiPost(', '// **The repaint counter') +
+` + section('// Pending browser intent', '// **The repaint counter') +
 section('const pendingApprovals =', 'function openCard('), ctx);
 vm.runInContext(section('let editing = null;', 'function startSubjectEdit()') +
   section('function closeCard()',
@@ -139,6 +143,7 @@ vm.runInContext(`this.run = async () => {
   const eligible = !button.hidden && !button.disabled && button.textContent;
   const first = approveReview();
   const pendingDisabled = button.disabled;
+  await Promise.resolve(); await Promise.resolve();
   await approveReview();
   const closedBeforeResponse = events.length;
   say.value = 'typed while approval pending';
@@ -218,8 +223,10 @@ def test_browser_approval_guards_pending_request_and_navigation(mode: str) -> No
     )
     if mode in {"board", "board_error", "card", "closed", "epoch"}:
         assert observed["toasts"] == []
-        assert observed["seen"] == "fresh"
-        assert observed["revision"] == (99 if mode.startswith("board") else 4)
+        assert observed["seen"] == (None if mode in {"card", "closed"} else "fresh")
+        assert observed["revision"] == (
+            99 if mode.startswith("board") else 5 if mode in {"card", "closed"} else 4
+        )
     else:
         assert len(observed["toasts"]) == 1
         assert observed["seen"] is None
@@ -227,7 +234,7 @@ def test_browser_approval_guards_pending_request_and_navigation(mode: str) -> No
         assert observed["disabled"] is (mode == "stay")
     assert len(observed["reconciled"]) == (1 if mode in {"board", "epoch"} else 0)
     if mode == "error":
-        assert "outcome unknown" in observed["toasts"][0][0]
+        assert "unconfirmed" in observed["toasts"][0][0]
         assert observed["toasts"][0][1] is True
     if mode == "refused":
         assert observed["toasts"] == [["refused", True]]

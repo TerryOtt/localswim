@@ -68,20 +68,26 @@ aggregate error and retains unresolved child/launch pairs for a later retry. Nor
 gateway exit still leaves board writers running.
 The CLI continues to use each board's JSON path and its own service descriptor.
 
-Discovery reads at most 8 MiB (8,388,608 bytes) plus one detection byte from each
+Discovery reads at most 32 MiB (33,554,432 bytes) plus one detection byte from each
 regular JSON candidate. This ceiling leaves room above representative local boards
 while bounding unrelated or damaged files. Unreadable, oversized, invalid JSON and
 nonboard files are omitted; a recognized board that fails validation remains visible
 with an error. This is a discovery limit, separate from attachment and API limits;
 it does not bound the number of files or total directory traversal time.
 
-A stable request uses one discovery scan. If an ordinary atomic save replaces the
-snapshot during endpoint acquisition, the gateway allows at most two fresh scans of
-that same key and validates the replacement before reuse. It keeps the current
-launch gate and child wait; it does not resend a mutation. Unsafe paths, invalid
-replacement boards and continued churn still fail visibly. Standard error records
-fixed discovery retry/recovery/refusal events and attempt counts without board
-paths, card content or capabilities; redirect it to a private log when launching.
+Ordinary selected-board requests resolve only that board's canonical key; they do
+not rescan every JSON file. In-memory recognition and Attention summaries reuse
+unchanged content. Metadata checks detect ordinary replacements, while bounded
+byte-digest checks detect edits that preserve file size and timestamps. Unchanged
+bytes do not require another full parse. The sidebar refreshes every ten seconds;
+it still traverses filesystem metadata and checks content, without reparsing all
+unchanged boards. Cached entries never authorize a path or a writer.
+
+Containment, file identity and current service descriptors remain checked at use.
+Descriptor-bound browser sessions are invalidated by replacement or board changes.
+An ordinary atomic save may refresh the same selected key at most twice within the
+original request budget. Unsafe paths, invalid replacements and exhausted churn
+refuse; the gateway never resends a mutation.
 
 The Attention sidebar gives every project three fixed count columns: **Blocked** (red),
 **Needs Terry** (amber), and **Ready for Review** (blue). A zero count leaves its column
@@ -905,6 +911,35 @@ The browser validates drag data before requesting a card move. It clears drag
 decoration and refreshes authoritative state after a submitted move, containing
 request, response-read, and refresh failures. An uncertain move is not replayed;
 inspect the refreshed board before trying again.
+
+## Polling, pending edits, and conflicts
+
+Visible boards poll every five seconds; the workspace sidebar refreshes every ten
+seconds. Initial loading and completed user actions can refresh immediately. A
+request already in flight is not duplicated by the periodic timer. Unchanged board
+bytes reuse verified admission, while each health read still reads the actual file.
+The displayed file-read age uses the server's successful read time, independently
+of a later snapshot download or render. An admitted content marker also detects
+valid edits that preserve file timestamps and external-policy changes.
+
+Edits, moves and new cards can appear locally with a pending indicator before they
+are persisted. Existing-card browser writes retain the card's original opaque
+revision in `If-Match-Card`, alongside the board revision in `If-Match`. The writer
+checks both inside one atomic board transaction. Conflicting edits to the same card
+fail; unrelated board changes may be reread and retried once with the original card
+revision. Adds retain one client-generated card ID across recovery attempts.
+
+A lost response is not automatically treated as a failed save. Bounded readback
+can confirm an already applied change or safely retry an unchanged target. Uncertain
+additive or compound actions are not blindly repeated. Drafts and pending state
+survive navigation/reload, and an older response cannot replace newer confirmed data.
+Legacy API/CLI consumers keep their mandatory whole-board revision check; the card
+header is an additive, more precise browser precondition.
+
+Storage failures during a mutation return a sanitized uncertain-outcome response
+(HTTP 503), because a replacement may already have committed. The CLI treats POST
+5xx responses and explicit unknown-outcome codes as uncertain and never retries them
+automatically. Validation refusals retain their existing 409/413 behavior.
 
 ## Live code updates
 

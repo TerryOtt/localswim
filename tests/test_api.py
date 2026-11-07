@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
@@ -86,6 +87,7 @@ def request_json(
     *,
     token: str | None = None,
     revision: int | None = None,
+    card_version: str | None = None,
     body: dict[str, object] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Return status and decoded JSON for both success and HTTP refusal."""
@@ -94,6 +96,8 @@ def request_json(
         headers["Authorization"] = f"Bearer {token}"
     if revision is not None:
         headers["If-Match"] = f'"revision-{revision}"'
+    if card_version is not None:
+        headers["If-Match-Card"] = f'"{card_version}"'
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -140,6 +144,166 @@ def test_board_and_status_reads(api: RunningApi) -> None:
     assert health_code == 200
     assert health["ok"] is True
     assert health["restarting"] is False
+    assert 0 < health["readAt"] <= time.time()
+
+
+def test_status_content_version_detects_timestamp_preserving_edits(api: RunningApi) -> None:
+    import os
+
+    first = request_json(api.base + API + "/status")[1]
+    stamp = api.path.stat()
+    original = api.path.read_bytes()
+    replacement = original.replace(b'"project": "API"', b'"project": "New"')
+    assert replacement != original and len(replacement) == len(original)
+    api.path.write_bytes(replacement)
+    os.utime(api.path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    second = request_json(api.base + API + "/status")[1]
+    assert second["ok"] is True
+    assert second["mtime"] == first["mtime"]
+    assert second["contentVersion"] != first["contentVersion"]
+    assert second["revision"] == first["revision"]
+    assert request_json(api.base + API + "/board")[1]["project"] == "New"
+
+
+def test_card_precondition_allows_only_unchanged_target_after_board_conflict(
+    api: RunningApi,
+) -> None:
+    token = api_endpoint.BROWSER_TOKEN
+    for revision, item_id in enumerate(("alpha", "other")):
+        assert (
+            request_json(
+                api.base + API + "/cards",
+                token=token,
+                revision=revision,
+                body={"id": item_id, "subject": item_id, "state": "backlog"},
+            )[0]
+            == 200
+        )
+    board = request_json(api.base + API + "/board")[1]
+    cards = {item["id"]: item for lane in board["lanes"] for item in lane["items"]}
+    alpha_version = cards["alpha"]["cardVersion"]
+    assert re.fullmatch(r"[0-9a-f]{64}", alpha_version)
+    assert (
+        request_json(
+            api.base + API + "/cards/other/comment",
+            token=token,
+            revision=2,
+            card_version=cards["other"]["cardVersion"],
+            body={"text": "Other edit"},
+        )[0]
+        == 200
+    )
+    route = api.base + API + "/cards/alpha/comment"
+    status, response = request_json(
+        route, token=token, revision=2, card_version=alpha_version, body={"text": "First"}
+    )
+    assert status == 412 and response["code"] == "board_revision_conflict"
+    assert (
+        request_json(
+            route, token=token, revision=3, card_version=alpha_version, body={"text": "First"}
+        )[0]
+        == 200
+    )
+    before = api.path.read_bytes()
+    status, response = request_json(
+        route, token=token, revision=4, card_version=alpha_version, body={"text": "Stale"}
+    )
+    assert status == 412 and response["code"] == "card_revision_conflict"
+    assert api.path.read_bytes() == before
+
+
+def test_card_precondition_rejects_aba_and_allows_intentional_unarchive(api: RunningApi) -> None:
+    token = api_endpoint.BROWSER_TOKEN
+    assert (
+        request_json(
+            api.base + API + "/cards",
+            token=token,
+            revision=0,
+            body={"id": "alpha", "subject": "Alpha", "state": "backlog"},
+        )[0]
+        == 200
+    )
+
+    def version() -> str:
+        board = request_json(api.base + API + "/board")[1]
+        return next(item["cardVersion"] for lane in board["lanes"] for item in lane["items"])
+
+    original = version()
+    for revision, action in ((1, "archive"), (2, "unarchive")):
+        assert (
+            request_json(
+                api.base + API + f"/cards/alpha/{action}",
+                token=token,
+                revision=revision,
+                card_version=version(),
+                body={},
+            )[0]
+            == 200
+        )
+    assert version() != original
+    status, response = request_json(
+        api.base + API + "/cards/alpha/comment",
+        token=token,
+        revision=3,
+        card_version=original,
+        body={"text": "Stale before archive"},
+    )
+    assert status == 412 and response["code"] == "card_revision_conflict"
+
+
+def test_simultaneous_card_clients_commit_only_one_original_intent(api: RunningApi) -> None:
+    token = api_endpoint.BROWSER_TOKEN
+    assert (
+        request_json(
+            api.base + API + "/cards",
+            token=token,
+            revision=0,
+            body={"id": "alpha", "subject": "Alpha", "state": "backlog"},
+        )[0]
+        == 200
+    )
+    snapshot = request_json(api.base + API + "/board")[1]
+    version = next(item["cardVersion"] for lane in snapshot["lanes"] for item in lane["items"])
+    barrier = threading.Barrier(2)
+
+    def submit(text: str) -> int:
+        barrier.wait(timeout=5)
+        return request_json(
+            api.base + API + "/cards/alpha/comment",
+            token=token,
+            revision=1,
+            card_version=version,
+            body={"text": text},
+        )[0]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = sorted(pool.map(submit, ["First", "Second"]))
+    assert statuses == [200, 412]
+    status, response = request_json(
+        api.base + API + "/cards/alpha/comment",
+        token=token,
+        revision=2,
+        card_version=version,
+        body={"text": "Retry stale intent"},
+    )
+    assert status == 412 and response["code"] == "card_revision_conflict"
+    assert len(board_state.load(api.path).find("alpha").comments) == 1
+
+
+@pytest.mark.parametrize("card_version", ["", "bad", "A" * 64, "0" * 63])
+def test_malformed_card_precondition_refuses_without_mutation(
+    api: RunningApi, card_version: str
+) -> None:
+    before = api.path.read_bytes()
+    code, _response = request_json(
+        api.base + API + "/cards/missing/comment",
+        token=api_endpoint.BROWSER_TOKEN,
+        revision=0,
+        card_version=card_version,
+        body={"text": "No mutation"},
+    )
+    assert code == 400
+    assert api.path.read_bytes() == before
 
 
 def test_board_payload_keeps_literal_subject_and_raw_detail(api: RunningApi) -> None:
@@ -168,21 +332,17 @@ def test_board_payload_keeps_literal_subject_and_raw_detail(api: RunningApi) -> 
 
 
 @pytest.fixture
-def status_loads(monkeypatch: pytest.MonkeyPatch) -> list[pathlib.Path]:
+def status_loads(monkeypatch: pytest.MonkeyPatch, api: RunningApi) -> list[pathlib.Path]:
     """Count actual admission loads without substituting their validation."""
-    original = board_state.load
+    original = pathlib.Path.read_bytes
     calls: list[pathlib.Path] = []
 
-    def counted(
-        path: pathlib.Path,
-        policy: board_state.TransitionPolicy | None = None,
-        *,
-        install_context: bool = True,
-    ) -> board_state.Board:
-        calls.append(path)
-        return original(path, policy, install_context=install_context)
+    def counted(path: pathlib.Path) -> bytes:
+        if path == api.path:
+            calls.append(path)
+        return original(path)
 
-    monkeypatch.setattr(board_state, "load", counted)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", counted)
     return calls
 
 
@@ -190,7 +350,13 @@ def break_status_disk(api: RunningApi, fault: str, patch: pytest.MonkeyPatch) ->
     """Damage only the synthetic snapshot or deterministically refuse its I/O."""
     original_stat = pathlib.Path.stat
 
-    def failed_read(_path: pathlib.Path) -> board_state.JsonObject:
+    original_read = pathlib.Path.read_bytes
+
+    def failed_read(path: pathlib.Path) -> bytes:
+        if path != api.path:
+            return original_read(path)
+        # Keep the successful-read counter independent of the injected refusal.
+        original_read(path)
         if fault == "decoder_recursion":
             raise RecursionError("injected snapshot decoder nesting failure")
         raise OSError("injected snapshot read failure")
@@ -203,7 +369,7 @@ def break_status_disk(api: RunningApi, fault: str, patch: pytest.MonkeyPatch) ->
     if fault == "missing":
         api.path.unlink()
     elif fault in {"read", "decoder_recursion"}:
-        patch.setattr(board_state, "_read_json", failed_read)
+        patch.setattr(pathlib.Path, "read_bytes", failed_read)
     elif fault == "stat":
         patch.setattr(pathlib.Path, "stat", failed_stat)
     elif fault == "malformed":
@@ -228,6 +394,7 @@ def test_status_contains_disk_failure_and_recovers(
     store = api_endpoint.STORE
     assert store is not None
     accepted = store._board.to_json()
+    prior_read_at = store.read_at
     restored = board_state.Board.from_json(accepted, "recovery", install_context=False)
     policy_doc = restored.policy.to_json()
     policy_doc["defaultPriority"] = "P4"
@@ -249,6 +416,7 @@ def test_status_contains_disk_failure_and_recovers(
     assert health["ok"] is False
     assert health["mtime"] == 0
     assert health["stamp"] == "unreadable"
+    assert health["readAt"] == prior_read_at
     assert health["error"]
     assert health["build"] == "stale-build"
     assert health["codeStale"] is True
@@ -287,19 +455,18 @@ def test_status_uses_one_candidate_for_policy_and_health(
     policy_doc["defaultPriority"] = "P4"
     candidate.policy = board_state.TransitionPolicy.from_json(policy_doc, "first policy")
     board_state.save(candidate, api.path)
-    original = board_state.load
+    original = board_state.load_bytes
 
     def replace_after_read(
+        data: bytes,
         path: pathlib.Path,
         policy: board_state.TransitionPolicy | None = None,
-        *,
-        install_context: bool = True,
     ) -> board_state.Board:
-        loaded = original(path, policy, install_context=install_context)
+        loaded = original(data, path, policy)
         path.write_text("{", encoding="utf-8")
         return loaded
 
-    monkeypatch.setattr(board_state, "load", replace_after_read)
+    monkeypatch.setattr(board_state, "load_bytes", replace_after_read)
     code, health = request_json(api.base + API + "/status")
     assert code == 200
     assert health["ok"] is True
@@ -364,10 +531,10 @@ def test_admission_does_not_normalize_unexpected_runtime_error(
     assert store.path == api.path
     accepted = store._board.to_json()
 
-    def unexpected_failure(_path: pathlib.Path) -> board_state.JsonObject:
+    def unexpected_failure(_path: pathlib.Path) -> bytes:
         raise RuntimeError("unexpected implementation failure")
 
-    monkeypatch.setattr(board_state, "_read_json", unexpected_failure)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", unexpected_failure)
     with pytest.raises(RuntimeError, match="unexpected implementation failure"):
         store.snapshot()
     assert store._board.to_json() == accepted
@@ -493,6 +660,7 @@ def test_dirty_build_id_includes_source_fingerprint(
             "workspace_config.py",
             "gateway_publish.py",
             "service_ownership.py",
+            "service_output.py",
             "workspace.js",
             "workspace.css",
         )
@@ -511,7 +679,7 @@ def test_dirty_build_id_includes_source_fingerprint(
     assert len(ident.removeprefix("deadbee-").removesuffix("-dirty")) == 8
     assert api_endpoint.build_id() == ident
 
-    for name in ("api_endpoint.py", "workspace.js", "workspace.css"):
+    for name in ("api_endpoint.py", "service_output.py", "workspace.js", "workspace.css"):
         original = sources[name]
         sources[name] = original + b"changed bytes\n"
         changed = api_endpoint.build_id()
@@ -1164,7 +1332,16 @@ def test_new_card_dialog_exposes_repeatable_relationship_controls(api: RunningAp
 
     assert 'id="mk-relations"' in page
     assert 'id="mk-rel-add"' in page
-    assert "links: relationshipSpecs(document.getElementById('mk-relations'))" in page
+    draft = page.split("function makeDraft() {", 1)[1].split("function sameMakeDraft", 1)[0]
+    assert re.search(
+        r"links:\s*relationshipSpecs\(document.getElementById\('mk-relations'\)\)", draft
+    )
+    submit = page.split("async function submitMake() {", 1)[1].split(
+        "document.getElementById('mk-go').addEventListener", 1
+    )[0]
+    assert "const submitted = makeDraft();" in submit
+    assert "apiPost(API_PREFIX + '/cards', {...submitted, id:attempt.id})" in submit
+    assert "sameMakeDraft(makeDraft(), submitted)" in submit
 
 
 def test_existing_relationship_can_be_added_retyped_and_removed(api: RunningApi) -> None:

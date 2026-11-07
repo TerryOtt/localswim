@@ -39,6 +39,7 @@ const context=vm.createContext({window,location,URL,Date,document:{getElementByI
   sessionStorage:{setItem(k,v){stored[k]=v}},serverBuild:input.boardBuild || null,
   codeStale:!!input.boardStale,restarting:!!input.boardRestarting,restartProblem:input.boardProblem||null,
   pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,LIVE_MS:5000,WARN_MS:15000,
+  subjectEdit:null,detailEditVersion:null,mkAttempt:null,relationshipSpecs:()=>[],
   drafts:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
   STALE_RELOAD_STATE_KEY:'saved',STALE_RELOAD_QUERY:'_localswim_build',staleReloadStarted:false,
   PAGE_BUILD:'aaaaaaa',clockOf:()=>[1,':00:00am'],agoOf:()=>[0,'second']});
@@ -287,12 +288,15 @@ if(input.mode==='card-focus'){
   const haystacks=vm.runInContext('items.map(hay)',context);
   const cached=vm.runInContext(`items[0].subject='replacement';hay(items[0])`,context);
   // A changed payload must invalidate the existing ID through the actual poll handler.
-  Object.assign(context,{pollingEpoch:null,seen:0,API_PREFIX:'/api/v001',
+  Object.assign(context,{pollingEpoch:null,pollingController:null,pollingQueued:false,
+    AbortController,AbortSignal,queueMicrotask,seen:0,API_PREFIX:'/api/v001',
     apiGet:async path=>path.endsWith('/status')?{ok:true,mtime:1}:
       {actors:input.actors,lanes:[{state:'completed',items:input.items}]},
+    authoritativeData:null, acknowledgeSnapshot(value){context.authoritativeData=value;return true},
+    projectActions(value){return value},
     paint(){},restoreStaleReloadState(){},renderLive(){}});
   context.window.workspaceEpoch=1;
-  vm.runInContext(section(input.page,'async function tick()', '\ntick();'),context);
+  vm.runInContext(section(input.page,'async function tick(', '\ntick();'),context);
   await vm.runInContext('tick()',context);
   const refreshed=vm.runInContext('hay(items[0])',context);
   context.comments=input.comments;
@@ -322,7 +326,7 @@ if(input.mode==='card-focus'){
     '// **Terry specified this bar himself:');
   vm.runInContext(helpers,context);
   Object.assign(context,{drafts:{'other-card':'other unsent comment'},openId:'card-17',
-    editing:'detail',query:'urgent café',unhideOld:true,mkOpen:'ready_for_work'});
+    editing:'detail',detailEditVersion:'original-version',query:'urgent café',unhideOld:true,mkOpen:'ready_for_work'});
   for(const [id,value] of Object.entries({'say':'unsent comment\nsecond line',
     'p-detail-text':'unsaved **detail**','mk-subject':'new draft subject',
     'mk-detail':'new draft detail\nwith newline','mk-priority':'P3','mk-owner':'bot'}))
@@ -330,7 +334,7 @@ if(input.mode==='card-focus'){
   vm.runInContext('saveStaleReloadState();',context);
   const saved=JSON.parse(stored.saved), freshElements=new Map(), storageCalls=[];
   function freshElement(id){
-    if(!freshElements.has(id))freshElements.set(id,{value:''});
+    if(!freshElements.has(id))freshElements.set(id,{value:'',replaceChildren(){}});
     return freshElements.get(id);
   }
   // No saved-value globals cross the reload boundary. The shipped reader and
@@ -342,7 +346,8 @@ if(input.mode==='card-focus'){
   vm.runInContext(section(input.page,"const STALE_RELOAD_STATE_KEY =",
     '// **Card #0072.'),fresh);
   vm.runInContext(section(input.page,'let query =','const HAY ='),fresh);
-  vm.runInContext(`let openId=null,editing=null,mkOpen=null;
+  vm.runInContext(`let openId=null,editing=null,mkOpen=null,subjectEdit={},detailEditVersion=null;
+    function addRelationshipRow(){} function restoreMakeAttempt(){}
     data.lanes=[{state:'ready_for_work'}];
     function itemById(id){return id==='card-17'?{id}:null}
     function openCard(id){openId=id;document.getElementById('say').value=drafts[id]||''}
@@ -351,7 +356,7 @@ if(input.mode==='card-focus'){
     function openMake(lane){mkOpen=lane.state}`,fresh);
   vm.runInContext(helpers+'\nrestoreStaleReloadState();',fresh);
   const restored=vm.runInContext(
-    '({drafts,query,unhideOld,openId,editing,mkOpen,staleReloadState})',fresh);
+    '({drafts,query,unhideOld,openId,editing,mkOpen,staleReloadState,detailEditVersion})',fresh);
   process.stdout.write(JSON.stringify({saved,restored,storageCalls,
     fields:Object.fromEntries([...freshElements].map(([key,value])=>[key,value.value]))}));
 }else{
@@ -613,6 +618,7 @@ def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm()
         "openId": "card-17",
         "editing": "detail",
         "editValue": "unsaved **detail**",
+        "editCardVersion": "original-version",
         "query": "urgent café",
         "unhideOld": True,
         "make": {
@@ -621,6 +627,7 @@ def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm()
             "detail": "new draft detail\nwith newline",
             "priority": "P3",
             "owner": "bot",
+            "links": [],
         },
     }
     assert result["restored"] == {
@@ -631,6 +638,7 @@ def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm()
         "editing": "detail",
         "mkOpen": "ready_for_work",
         "staleReloadState": None,
+        "detailEditVersion": "original-version",
     }
     assert result["fields"] == {
         "find": "urgent café",
@@ -640,6 +648,7 @@ def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm()
         "mk-detail": "new draft detail\nwith newline",
         "mk-priority": "P3",
         "mk-owner": "bot",
+        "mk-relations": "",
     }
     assert result["storageCalls"] == [
         ["get", "localswim-stale-reload-state-v1"],
@@ -658,6 +667,7 @@ def test_reload_state_empty_storage_control_cannot_restore_seeded_drafts() -> No
         "editing": None,
         "mkOpen": None,
         "staleReloadState": None,
+        "detailEditVersion": None,
     }
     assert result["fields"] == {}
 

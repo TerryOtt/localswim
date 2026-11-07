@@ -116,10 +116,12 @@
     if (openId) drafts[openId] = document.getElementById('say').value;
     const saved = {drafts: {...drafts}, openId, editing, query, unhideOld, relationshipDraft,
       scroll: Object.fromEntries([...board.querySelectorAll('.lane')].map(lane => [lane.dataset.lane, lane.querySelector('.cards').scrollTop]))};
+    if (editing) saved.editCardVersion = editing === 'subject' ? subjectEdit?.cardVersion : detailEditVersion;
     if (editing) saved.editValue = document.getElementById(editing === 'subject' ? 'p-subject-edit' : 'p-detail-text').value;
     if (mkOpen) saved.make = {state: mkOpen, subject: document.getElementById('mk-subject').value,
       detail: document.getElementById('mk-detail').value, priority: document.getElementById('mk-priority').value,
-      owner: document.getElementById('mk-owner').value, links: relationshipSpecs(document.getElementById('mk-relations'))};
+      owner: document.getElementById('mk-owner').value, links: relationshipSpecs(document.getElementById('mk-relations')),
+      ...(mkAttempt ? {attempt:mkAttempt} : {})};
     const drawer = document.querySelector('#panel .body');
     saved.drawerScroll = drawer ? drawer.scrollTop : 0;
     state.records[current] = saved; state.lastBoard = current;
@@ -151,6 +153,8 @@
       openCard(saved.openId);
       if (saved.editing === 'subject') startSubjectEdit();
       if (saved.editing === 'detail') startDetailEdit();
+      if (saved.editing === 'subject') subjectEdit.cardVersion = saved.editCardVersion || null;
+      if (saved.editing === 'detail') detailEditVersion = saved.editCardVersion || null;
       if (saved.editing) document.getElementById(saved.editing === 'subject' ? 'p-subject-edit' : 'p-detail-text').value = saved.editValue || '';
       relationshipDraft = saved.relationshipDraft || null;
       paintRelations(itemById(saved.openId));
@@ -162,6 +166,7 @@
         for (const field of ['subject', 'detail', 'priority', 'owner']) document.getElementById('mk-' + field).value = saved.make[field] || '';
         const relations = document.getElementById('mk-relations'); relations.replaceChildren();
         for (const spec of saved.make.links || []) addRelationshipRow(relations, spec, null);
+        restoreMakeAttempt(saved.make.attempt);
       }
     }
     restoreScroll(saved.scroll || {});
@@ -197,6 +202,7 @@
     drafts = {...(pending.drafts || {})}; query = pending.query || ''; unhideOld = !!pending.unhideOld;
     staleReloadState = null; HAY.clear(); seen = null; lastOk = 0; lastCta = null;
     data = {lanes: [], edges: [], counts: {}, actors: [], revision: 0};
+    authoritativeData = null;
     codeStale = false; restarting = false; restartProblem = null;
     document.getElementById('find').value = query;
     document.getElementById('counts').replaceChildren();
@@ -516,9 +522,10 @@
       if (current === key && openId === id && editing === action && field.value === body[action]) closeEditors();
     }
     if (action === 'link' && saved.relationshipDraft && saved.relationshipDraft.source === id && saved.relationshipDraft.kind === body.kind && saved.relationshipDraft.other === body.other) saved.relationshipDraft = null;
-    if (tail.length === 1 && tail[0] === 'cards' && saved.make && saved.make.subject.trim() === body.subject && saved.make.detail === body.detail) {
-      delete saved.make;
-      if (current === key && mkOpen && document.getElementById('mk-subject').value.trim() === body.subject && document.getElementById('mk-detail').value === body.detail) closeMake(true);
+    if (tail.length === 1 && tail[0] === 'cards' && saved.make
+        && saved.make.attempt?.id === body.id) {
+      saved.make.attempt.confirmed = true;
+      if (sameMakeDraft({...saved.make, subject:saved.make.subject.trim()}, body)) delete saved.make;
     }
     try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
@@ -530,5 +537,5 @@
   document.addEventListener('change', persist);
   window.addEventListener('beforeunload', persist);
   window.addEventListener('popstate', () => { const key = urlKey(); if (key) select(key, 'none'); });
-  refresh(); setInterval(refresh, 2000);
+  refresh(); setInterval(refresh, 10000);
 })();

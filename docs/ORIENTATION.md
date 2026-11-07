@@ -115,24 +115,27 @@ schema-4 snapshots recursively, excluding hidden directories, Git metadata, atta
 storage, and symbolic-link escapes. Nonboard JSON is ignored; malformed schema-4 boards
 remain visible as unavailable entries with an error instead of being partially loaded.
 
-Each regular candidate has an 8 MiB (8,388,608-byte) discovery ceiling, with a
-limit-plus-one read to detect growth beyond it. The ceiling is about 4.8 times the
-largest representative snapshot measured when introduced. Unreadable, oversized,
+Each regular candidate has a 32 MiB (33,554,432-byte) discovery ceiling, with a
+limit-plus-one read to detect growth beyond it. The ceiling admits the qualified 20 MiB JumboBoards fixtures with bounded headroom. Unreadable, oversized,
 invalid JSON, excessive JSON nesting and non-envelope files are omitted. A recognized
 schema-4 envelope that fails board validation, including validation recursion, stays
 in the catalog with an error. API and attachment limits are separate; discovery does
 not promise a bound on total traversal or file count.
 
-A stable proxy request resolves its board with one discovery scan. Its private candidate
-retains file identity only for that request; it is neither a persistent cache nor
-caller-supplied authorization. Direct path/endpoint calls perform their own safe
-discovery. Before consumption and after waiting for board acquisition, containment,
-symlink/junction membership and file identity are checked again. An ordinary atomic
-replacement may refresh that same key at most twice per request, with fresh bounded
-discovery and full board validation. The current launch gate, capability and child
-wait remain intact. Unsafe paths, invalid replacements and exhausted churn refuse;
-proxy mutations are never replayed. Fixed diagnostic event labels and attempt counts
-go to standard error without paths, card content or capabilities.
+A proxy request resolves only its selected canonical board key, with fresh
+containment, hidden-directory, symlink/junction and file-identity checks. In-memory
+recognition/summary caches are optimization hints, never discovery authority.
+Filesystem identities invalidate ordinary changes immediately; a bounded five-second
+byte-digest check detects size/timestamp-preserving changes and keeps unchanged
+content out of the parser. Sidebar refresh is ten seconds. Catalog requests still
+traverse metadata and verify bytes; total file count/traversal remains unbounded.
+
+Browser capabilities are reused only while the fresh validated descriptor, board
+binding and held writer ownership remain compatible. Changed credentials invalidate
+the session. Replacements retain the original request's at-most-two refresh budget;
+they do not gain nested retry budgets. The existing launch gate and child wait remain
+intact. Unsafe paths, invalid replacements and exhausted churn refuse. Proxy writes
+are single-submit and never automatically replayed by the gateway.
 
 A board key is its relative POSIX path without `.json`. For example,
 `localswim/localswim.json` becomes `localswim/localswim`, with a readable
@@ -822,6 +825,27 @@ The server binds only to `127.0.0.1`. Read routes are loopback-accessible withou
 credential. Mutations require both a per-process bearer credential and
 `If-Match: "revision-N"`.
 
+Existing-card browser commands also send `If-Match-Card: "<cardVersion>"`.
+The optional header preserves CLI compatibility; when present it must contain the
+quoted 64-character lowercase hexadecimal token exposed on that card's payload.
+The sole writer checks it inside the same revision-checked board transaction.
+A board-revision conflict returns HTTP 412 with `code: "board_revision_conflict"`;
+a changed or missing card returns `code: "card_revision_conflict"`. Malformed card
+headers return 400. No refused command changes the board or replays a mutation.
+
+The opaque card version covers persisted card fields and relevant relationship,
+parent, description, subject and archive histories, including edit-and-revert
+changes. Successful existing-card responses include the exact `cardVersion` from
+their committed `revision`; a subsequent GET may already represent another edit.
+The board transaction remains atomic for cross-card effects and dependencies.
+An unrelated board edit can retain a card's token, but never bypasses `If-Match`.
+
+Status `readAt` is the UNIX timestamp of the latest successful actual snapshot
+read and admission. Every poll still reads the file bytes. Identical accepted
+bytes under the same policy reuse prior parsing and audit results; timestamps
+and file size alone never authorize reuse. Failed health checks retain the
+previous `readAt`, and source, restart and push diagnostics remain independent.
+
 Current API routes:
 
 ```text
@@ -994,8 +1018,11 @@ with immutable caching; all board/page responses are no-store.
 
 Important UI mechanics:
 
-- Poll `/api/v001/status` every 400 ms and fetch the board only when its mtime changes.
-- Treat a successful parse, not merely an HTTP response or `stat`, as proof of life.
+- Poll `/api/v001/status` every five seconds and refresh the workspace sidebar every ten seconds.
+  Prefer the admitted content version to detect changes, including timestamp-preserving edits.
+- Treat a successful actual byte read with valid admission, not a socket response or `stat`,
+  as proof of life. Exact unchanged bytes may reuse their already verified admission.
+  Server `readAt` advances independently of browser download/render completion.
 - Repaint lanes wholesale while preserving unsent comment, editor, new-card, search,
   and view state.
 - Use session storage to survive one guarded reload when the page build differs from
@@ -1274,3 +1301,15 @@ Later adapter integration checklist:
   once; apply validates the same sealed bytes and performs no new allocation.
 - Coordinate consumer rollout separately; this preparation authorizes no live
   migration, installation, restart, restore or backup configuration change.
+
+## Service output backpressure
+
+Long-lived background launchers must establish private regular-file or null output
+before Python starts. A pipe already full at interpreter initialization can block
+before application safeguards run. The entry-point safeguard redirects unsafe
+pipe/socket stdout and stderr to private per-launch `localswim-service-*` temporary
+log directories without flushing the blocked old sink. Existing regular files,
+terminals and null devices are preserved. Windows native handles and CRT descriptors
+remain aligned, and board handoff explicitly passes the safe streams. Routine HTTP
+request/result printing is omitted. Writer leases and non-daemon drain semantics are
+unchanged.

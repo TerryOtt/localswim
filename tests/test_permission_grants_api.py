@@ -202,8 +202,9 @@ def test_permission_grants_save_failure_never_publishes(
 
     monkeypatch.setattr(board_state, "save", fail_save)
     code, response = grant(api)
-    assert code == 409
-    assert "injected save failure" in response["error"]
+    assert code == 503
+    assert response["code"] == "mutation_outcome_unknown"
+    assert "injected save failure" not in response["error"]
     assert api.path.read_bytes() == before
     assert store._board.to_json() == snapshot
     assert store.policy is policy

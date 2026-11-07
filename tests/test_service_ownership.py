@@ -838,12 +838,23 @@ def test_admitted_command_retains_lease_and_gate_until_worker_join(  # synchroni
         parts: list[str],
         body: board_state.JsonObject,
         actor: str,
+        *,
+        expected_card: str | None = None,
+        response_metadata: dict[str, str] | None = None,
     ) -> tuple[str, int, str | None, attachments.Attachment | None]:
         assert api_endpoint._command_gate.locked()  # noqa: SLF001 -- admission oracle
         request_workers.append(threading.current_thread())
         entered.set()
         assert resume.wait(5)
-        result = execute(store, expected, parts, body, actor)
+        result = execute(
+            store,
+            expected,
+            parts,
+            body,
+            actor,
+            expected_card=expected_card,
+            response_metadata=response_metadata,
+        )
         calls.append("saved")
         return result
 

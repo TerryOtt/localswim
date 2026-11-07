@@ -360,6 +360,8 @@ def _proxy_payload(  # explicit upstream response controls
     status: int = 200,
     write: bool = False,
     declared: int | None = None,
+    request_headers: dict[str, str] | None = None,
+    forwarded: list[dict[str, str]] | None = None,
 ) -> list[tuple[bytes, str, int, dict[str, str] | None]]:
     """Exercise the handler's response boundary without a real upstream listener."""
     response = _finite_response(
@@ -370,7 +372,8 @@ def _proxy_payload(  # explicit upstream response controls
     )
 
     def request(*_args: object, **_kwargs: object) -> None:
-        pass
+        if forwarded is not None:
+            forwarded.append(cast("dict[str, str]", _kwargs["headers"]))
 
     connection = SimpleNamespace(
         request=request,
@@ -398,6 +401,8 @@ def _proxy_payload(  # explicit upstream response controls
     handler.headers = http.client.HTTPMessage()
     handler.headers["Authorization"] = "Bearer gateway-token"
     handler.headers["Content-Length"] = "2"
+    for key, value in (request_headers or {}).items():
+        handler.headers[key] = value
     handler.rfile = io.BytesIO(b"{}")
     handler.path = workspace.BOARD_PREFIX + "key/" + tail
     sent: list[tuple[bytes, str, int, dict[str, str] | None]] = []
@@ -728,13 +733,19 @@ def test_gateway_committed_post_response_failure_is_uncertain(
 ) -> None:
     persisted = gateway.root / "command-receipt.txt"
     persisted.write_text("0", encoding="utf-8")
-    observed: list[tuple[str | None, str | None]] = []
+    observed: list[tuple[str | None, str | None, str | None]] = []
     monkeypatch.setattr(workspace, "MAX_UPSTREAM_ENTITY_BYTES", 32)
 
     class Handler(workspace.http.server.BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # HTTP protocol
             self.rfile.read(int(self.headers["Content-Length"]))
-            observed.append((self.headers.get("Authorization"), self.headers.get("If-Match")))
+            observed.append(
+                (
+                    self.headers.get("Authorization"),
+                    self.headers.get("If-Match"),
+                    self.headers.get("If-Match-Card"),
+                )
+            )
             persisted.write_text(str(int(persisted.read_text()) + 1), encoding="utf-8")
             if failure in ("disconnect", "exception"):
                 return
@@ -780,12 +791,13 @@ def test_gateway_committed_post_response_failure_is_uncertain(
             board_route(gateway.base, "alpha/board", "cards/card/attachments/id"),
             token=gateway.instance.token,
             revision=7,
+            card_version="a" * 64,
             body={"subject": "one dispatch"},
         )
         assert code == 502
         assert result == {"error": workspace.POST_OUTCOME_UNKNOWN}
         assert persisted.read_text() == "1"
-        assert observed == [("Bearer upstream-secret", '"revision-7"')]
+        assert observed == [("Bearer upstream-secret", '"revision-7"', '"' + "a" * 64 + '"')]
         assert "sentinel" not in json.dumps(result)
         assert "upstream-secret" not in json.dumps(result)
     finally:
@@ -843,6 +855,7 @@ def test_discovery_candidate_exact_byte_boundary(tmp_path: pathlib.Path, extra: 
     make_board(path, "Boundary")
     original = path.read_bytes()
     ceiling = workspace.MAX_CANDIDATE_BYTES
+    assert ceiling == 33_554_432
     path.write_bytes(original + b" " * (ceiling + extra - len(original)))
     rows = catalog_boards(workspace.Workspace(tmp_path))
     assert len(rows) == (0 if extra > 0 else 1)
@@ -885,7 +898,7 @@ def test_discovery_growth_read_is_limited_to_ceiling_plus_one(
     assert reads == [101]
 
 
-def test_proxy_resolution_scans_and_reads_each_candidate_once(
+def test_proxy_resolution_reads_only_selected_candidate(
     gateway: RunningWorkspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scans: list[None] = []
@@ -903,10 +916,17 @@ def test_proxy_resolution_scans_and_reads_each_candidate_once(
 
     monkeypatch.setattr(gateway.instance, "_paths", scan)
     monkeypatch.setattr(workspace, "_read_candidate", read)
+
+    def existing(_path: pathlib.Path) -> workspace.Endpoint:
+        # Keep this a deterministic discovery work-count test; process lifetime
+        # and native startup are covered independently by the ownership suite.
+        return workspace.Endpoint(12345, "synthetic-capability", "")
+
+    monkeypatch.setattr(gateway.instance, "_existing", existing)
     status, _ = request_json(board_route(gateway.base, "alpha/board", "browser-session"))
     assert status == 200
-    assert len(scans) == 1
-    assert sorted(reads) == sorted([gateway.first, gateway.second])
+    assert len(scans) == 0
+    assert reads == [gateway.first]
 
 
 @pytest.mark.parametrize("change", ["remove", "replace", "directory"])
@@ -916,10 +936,10 @@ def test_request_resolution_refuses_changed_candidates(
     path = tmp_path / "board.json"
     make_board(path, "Before")
     instance = workspace.Workspace(tmp_path)
-    original_paths = instance._paths  # noqa: SLF001 -- deterministic filesystem race
+    original_resolve = instance._resolve  # noqa: SLF001 -- deterministic filesystem race
 
-    def scan_then_change() -> dict[str, workspace._Candidate]:
-        candidates = original_paths()
+    def scan_then_change(key: str) -> workspace._Candidate:
+        candidates = original_resolve(key)
         path.unlink()
         if change == "replace":
             make_board(path, "Replacement with a different size")
@@ -927,7 +947,7 @@ def test_request_resolution_refuses_changed_candidates(
             path.mkdir()
         return candidates
 
-    monkeypatch.setattr(instance, "_paths", scan_then_change)
+    monkeypatch.setattr(instance, "_resolve", scan_then_change)
     with pytest.raises((ValueError, OSError)):
         instance.resolve_endpoint("board")
     assert not instance._children  # noqa: SLF001 -- refusal must precede child launch
@@ -945,13 +965,13 @@ def test_launch_gate_rechecks_candidate_before_reuse_or_launch(
     instance = workspace.Workspace(root)
     scans = 0
     reuse_calls = 0
-    original_paths = instance._paths  # noqa: SLF001 -- no second scan after gate wait
+    original_resolve = instance._resolve  # noqa: SLF001 -- no second scan after gate wait
     expected = workspace.Endpoint(12345, "synthetic", "")
 
-    def scan() -> dict[str, workspace._Candidate]:
+    def scan(key: str) -> workspace._Candidate:
         nonlocal scans
         scans += 1
-        return original_paths()
+        return original_resolve(key)
 
     @contextlib.contextmanager
     def delayed_gate(target: pathlib.Path) -> Generator[object]:
@@ -974,7 +994,7 @@ def test_launch_gate_rechecks_candidate_before_reuse_or_launch(
     def refuse_spawn(*_args: object, **_kwargs: object) -> None:
         pytest.fail("changed candidate reached process launch")
 
-    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_resolve", scan)
     monkeypatch.setattr(instance, "_launch_locked", delayed_gate)
     monkeypatch.setattr(instance, "_existing", reuse)
     monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
@@ -1039,7 +1059,7 @@ def test_atomic_save_recovers_through_fresh_discovery(
     make_board(path, "Private project prose")
     instance = workspace.Workspace(tmp_path)
     expected = workspace.Endpoint(12345, "private-capability", "private-css")
-    original_paths = instance._paths  # noqa: SLF001 -- deterministic scan boundary
+    original_resolve = instance._resolve  # noqa: SLF001 -- deterministic scan boundary
     scans = 0
     changed = False
 
@@ -1049,10 +1069,10 @@ def test_atomic_save_recovers_through_fresh_discovery(
             changed = True
             make_board(path, "After atomic replacement")
 
-    def scan() -> dict[str, workspace._Candidate]:
+    def scan(key: str) -> workspace._Candidate:
         nonlocal scans
         scans += 1
-        found = original_paths()
+        found = original_resolve(key)
         if boundary == "scan":
             replace()
         return found
@@ -1080,7 +1100,7 @@ def test_atomic_save_recovers_through_fresh_discovery(
     def refuse_spawn(*_args: object, **_kwargs: object) -> None:
         pytest.fail("existing writer recovery reached process launch")
 
-    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_resolve", scan)
     monkeypatch.setattr(instance, "_launch_locked", gate)
     monkeypatch.setattr(instance, "_existing", existing)
     monkeypatch.setattr(service_ownership, "writer_busy", busy)
@@ -1154,12 +1174,12 @@ def test_discovery_refresh_rejects_invalid_replacement(
     path = tmp_path / "board.json"
     make_board(path, "Before")
     instance = workspace.Workspace(tmp_path)
-    original_paths = instance._paths  # noqa: SLF001 -- deterministic scan boundary
+    original_resolve = instance._resolve  # noqa: SLF001 -- deterministic scan boundary
     changed = False
 
-    def scan() -> dict[str, workspace._Candidate]:
+    def scan(key: str) -> workspace._Candidate:
         nonlocal changed
-        found = original_paths()
+        found = original_resolve(key)
         if not changed:
             changed = True
             blobs = {
@@ -1176,7 +1196,7 @@ def test_discovery_refresh_rejects_invalid_replacement(
     def refuse_spawn(*_args: object, **_kwargs: object) -> None:
         pytest.fail("invalid replacement reached process launch")
 
-    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_resolve", scan)
     monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
     with pytest.raises(ValueError, match=r"unknown workspace board|policy"):
         instance.resolve_endpoint("board")
@@ -1190,17 +1210,17 @@ def test_discovery_refresh_churn_is_bounded(
     path = tmp_path / "board.json"
     make_board(path, "Before")
     instance = workspace.Workspace(tmp_path)
-    original_paths = instance._paths  # noqa: SLF001 -- deterministic churn boundary
+    original_resolve = instance._resolve  # noqa: SLF001 -- deterministic churn boundary
     scans = 0
 
-    def scan() -> dict[str, workspace._Candidate]:
+    def scan(key: str) -> workspace._Candidate:
         nonlocal scans
         scans += 1
-        found = original_paths()
+        found = original_resolve(key)
         make_board(path, f"Replacement {scans}")
         return found
 
-    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_resolve", scan)
     with pytest.raises(ValueError, match="changed during discovery"):
         instance.resolve_endpoint("board")
     assert scans == 1 + workspace.MAX_DISCOVERY_REFRESHES
@@ -1215,16 +1235,16 @@ def test_discovery_refresh_rechecks_after_full_validation(
     path = tmp_path / "board.json"
     make_board(path, "Before")
     instance = workspace.Workspace(tmp_path)
-    original_paths = instance._paths  # noqa: SLF001 -- deterministic validation boundary
+    original_resolve = instance._resolve  # noqa: SLF001 -- deterministic validation boundary
     original_load = board_state.load
     scans = 0
     validations = 0
     expected = workspace.Endpoint(12345, "synthetic", "")
 
-    def scan() -> dict[str, workspace._Candidate]:
+    def scan(key: str) -> workspace._Candidate:
         nonlocal scans
         scans += 1
-        found = original_paths()
+        found = original_resolve(key)
         if scans == 1:
             make_board(path, "After initial scan")
         return found
@@ -1241,7 +1261,7 @@ def test_discovery_refresh_rechecks_after_full_validation(
     def reuse(_candidate: workspace._Candidate) -> workspace.Endpoint:
         return expected
 
-    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_resolve", scan)
     monkeypatch.setattr(board_state, "load", load)
     monkeypatch.setattr(instance, "_endpoint_under_gate", reuse)
     if churn:
@@ -1250,7 +1270,7 @@ def test_discovery_refresh_rechecks_after_full_validation(
     else:
         assert instance.resolve_endpoint("board") == (path.resolve(), expected)
     assert scans == 3
-    assert validations == 2
+    assert validations == (2 if churn else 3)
 
 
 def test_discovery_refresh_rejects_escape_after_fresh_scan(
@@ -1261,13 +1281,13 @@ def test_discovery_refresh_rejects_escape_after_fresh_scan(
     make_board(path, "Before")
     make_board(outside, "Outside")
     instance = workspace.Workspace(path.parent)
-    original_paths = instance._paths  # noqa: SLF001 -- deterministic fresh-scan escape
+    original_resolve = instance._resolve  # noqa: SLF001 -- deterministic fresh-scan escape
     scans = 0
 
-    def scan() -> dict[str, workspace._Candidate]:
+    def scan(key: str) -> workspace._Candidate:
         nonlocal scans
         scans += 1
-        found = original_paths()
+        found = original_resolve(key)
         if scans == 1:
             make_board(path, "Ordinary replacement")
         else:
@@ -1281,7 +1301,7 @@ def test_discovery_refresh_rejects_escape_after_fresh_scan(
     def refuse_spawn(*_args: object, **_kwargs: object) -> None:
         pytest.fail("escaped replacement reached process launch")
 
-    monkeypatch.setattr(instance, "_paths", scan)
+    monkeypatch.setattr(instance, "_resolve", scan)
     monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
     with pytest.raises(ValueError, match=r"outside the workspace|path changed"):
         instance.resolve_endpoint("board")
@@ -1354,7 +1374,8 @@ def test_catalog_contains_recursion_in_recognized_board_validation(
     path = tmp_path / "board.json"
     make_board(path, "Recognized")
 
-    def too_deep(_path: pathlib.Path) -> board_state.Board:
+    def too_deep(_path: pathlib.Path, *, install_context: bool = True) -> board_state.Board:
+        assert not install_context
         raise RecursionError("synthetic validation recursion")
 
     monkeypatch.setattr(board_state, "load", too_deep)
@@ -2061,3 +2082,27 @@ def test_residual_child_wait_rechecks_discovery_before_new_launch(
         assert not instance._children  # noqa: SLF001 -- prior child confirmed reaped
         assert not instance._launch_ids  # noqa: SLF001 -- prior pair removed only after reap
     assert instance.token == token
+
+
+@pytest.mark.parametrize("card_header", [None, "", "invalid", '"' + "a" * 64 + '"'])
+def test_proxy_preserves_optional_card_precondition_and_conflict(
+    monkeypatch: pytest.MonkeyPatch, card_header: str | None
+) -> None:
+    headers = {"If-Match": '"revision-7"'}
+    if card_header is not None:
+        headers["If-Match-Card"] = card_header
+    forwarded: list[dict[str, str]] = []
+    payload = b'{"code":"card_revision_conflict"}'
+    sent = _proxy_payload(
+        monkeypatch,
+        payload,
+        status=412,
+        write=True,
+        request_headers=headers,
+        forwarded=forwarded,
+    )
+    assert len(forwarded) == 1
+    assert forwarded[0].get("If-Match-Card") == card_header
+    assert ("If-Match-Card" in forwarded[0]) == (card_header is not None)
+    assert forwarded[0]["If-Match"] == '"revision-7"'
+    assert sent == [(payload, "application/json", 412, {})]

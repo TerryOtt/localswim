@@ -5,9 +5,11 @@ import contextlib
 import datetime as dt
 import hashlib
 import json
+import pathlib
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 lazy from collections.abc import Generator
@@ -22,8 +24,6 @@ from tests.test_store import initialize_autopush_repository, make_store, run_git
 __all__ = ["api", "served_board"]  # Pytest collects the imported service fixtures.
 
 if TYPE_CHECKING:
-    import pathlib
-
     from tests.test_api import RunningApi
 
 API = board_state.API_PREFIX
@@ -54,6 +54,61 @@ def upload(api: RunningApi, revision: int, name: str = "picture.png", blob: byte
     assert code == 200, out
     assert out["revision"] == revision + 1
     return str(out["attachment"]["id"])
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_attachment_reads_admit_without_copy_and_release_board_lock_for_blob(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch, *, archived: bool
+) -> None:
+    create_card(api)
+    aid = upload(api, 1)
+    if archived:
+        assert (
+            request_json(
+                api.base + API + "/cards/card/archive",
+                token=api_endpoint.BROWSER_TOKEN,
+                revision=2,
+                body={},
+            )[0]
+            == 200
+        )
+    store = api_endpoint.STORE
+    assert store is not None
+    store.disk_status()
+    original_read = pathlib.Path.read_bytes
+    original_blob = attachments.read_blob
+    reads = 0
+    blob_reads = 0
+
+    def read(target: pathlib.Path) -> bytes:
+        nonlocal reads
+        if target == api.path:
+            reads += 1
+        return original_read(target)
+
+    def blob(path: pathlib.Path, ticket: int, file: attachments.Attachment) -> bytes:
+        nonlocal blob_reads
+        blob_reads += 1
+        # Another thread must acquire the board mutex while blob I/O is running.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(store.credential_actor, browser=True).result(timeout=2) == "terry"
+        return original_blob(path, ticket, file)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("warm attachment GET copied or revalidated the full board")
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", read)
+    monkeypatch.setattr(attachments, "read_blob", blob)
+    monkeypatch.setattr(api_endpoint.copy, "deepcopy", forbidden)
+    monkeypatch.setattr(board_state, "load_bytes", forbidden)
+    monkeypatch.setattr(board_state.Board, "verify", forbidden)
+    url = api.base + api_endpoint.attachment_url("card", aid)
+    for _ in range(2):
+        with urllib.request.urlopen(url, timeout=5) as response:
+            assert response.read() == PNG
+            assert response.headers["Cache-Control"] == "private, max-age=86400, immutable"
+    assert reads == 2
+    assert blob_reads == 2
 
 
 def test_upload_preview_cover_and_removal_have_atomic_attributed_history(api: RunningApi) -> None:

@@ -3850,6 +3850,19 @@ def load(
     return Board.from_json(raw, str(path), policy, install_context=install_context)
 
 
+def load_bytes(data: bytes, path: pathlib.Path, policy: TransitionPolicy | None = None) -> Board:
+    """Structurally parse the exact UTF-8 bytes observed by live admission."""
+    try:
+        raw = cast(
+            "JsonValue", json.loads(data.decode("utf-8"), object_pairs_hook=_unique_json_object)
+        )
+    except json.JSONDecodeError as exc:
+        raise BoardError(
+            f"{path}: invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        ) from exc
+    return Board.from_json(raw, str(path), policy, install_context=False)
+
+
 def service_descriptor_path(path: pathlib.Path) -> pathlib.Path:
     """Stable machine-local rendezvous path for one resolved board file."""
     identity = str(path.resolve()).casefold().encode("utf-8")
@@ -4687,6 +4700,7 @@ def _service_json(
         ) as response:
             raw = cast("JsonValue", json.loads(response.read()))
     except urllib.error.HTTPError as exc:
+        error_raw: JsonValue = None
         try:
             error_raw = cast("JsonValue", json.loads(exc.read()))
             error = error_raw.get("error", str(exc)) if isinstance(error_raw, dict) else str(exc)
@@ -4694,6 +4708,15 @@ def _service_json(
             error = f"HTTP {exc.code}"
         finally:
             exc.close()
+        if body is not None and (
+            exc.code >= 500
+            or isinstance(error_raw, dict)
+            and error_raw.get("code") == "mutation_outcome_unknown"
+        ):
+            raise BoardError(
+                "board service could not confirm the command; "
+                "mutation outcome is unknown; inspect before retrying"
+            ) from exc
         raise BoardError(f"board service refused the command: {error}") from exc
     except http.client.HTTPException as exc:
         outcome = (
@@ -4714,6 +4737,11 @@ def _service_json(
             "; mutation outcome is unknown; inspect before retrying" if body is not None else ""
         )
         raise BoardError(f"board service returned a non-object response{outcome}")
+    if body is not None and raw.get("code") == "mutation_outcome_unknown":
+        raise BoardError(
+            "board service could not confirm the command; "
+            "mutation outcome is unknown; inspect before retrying"
+        )
     return raw
 
 

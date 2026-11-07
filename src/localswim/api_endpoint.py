@@ -83,7 +83,7 @@ import urllib.parse
 import uuid
 from typing import TYPE_CHECKING, cast
 
-from . import attachments, board_state, service_ownership
+from . import attachments, board_state, service_output, service_ownership
 
 if TYPE_CHECKING:
     import socketserver
@@ -152,6 +152,7 @@ def build_id() -> str:
                 pathlib.Path(__file__).with_name("workspace_config.py"),
                 pathlib.Path(__file__).with_name("gateway_publish.py"),
                 pathlib.Path(__file__).with_name("service_ownership.py"),
+                pathlib.Path(__file__).with_name("service_output.py"),
                 pathlib.Path(__file__).with_name("workspace.js"),
                 pathlib.Path(__file__).with_name("workspace.css"),
             )
@@ -195,7 +196,7 @@ BUILD = build_id()
 # own mismatch after preserving unsent state. Reloading cannot replace Python module
 # objects, so automatic browser recovery MUST NOT be confused with this restart path.
 #
-# **mtime first, hash only when it moves.** Hashing 120 KB twice a second to answer a
+# **mtime first, hash only when it moves.** Hashing every loaded source file on every status request to answer a
 # question that is almost always "no" is waste; a `stat` is not. And hashing rather
 # than trusting mtime alone means a `touch`, or an edit reverted before saving, does
 # not raise a banner Terry cannot act on -- **the same reason the toolchain check
@@ -211,6 +212,7 @@ CODE_FILES = (
     pathlib.Path(__file__).with_name("workspace_config.py"),
     pathlib.Path(__file__).with_name("gateway_publish.py"),
     pathlib.Path(__file__).with_name("service_ownership.py"),
+    pathlib.Path(__file__).with_name("service_output.py"),
     pathlib.Path(__file__).with_name("workspace.js"),
     pathlib.Path(__file__).with_name("workspace.css"),
 )
@@ -668,6 +670,7 @@ def _handoff_board(
         child = subprocess.Popen(  # noqa: S603 -- fixed module and canonical owned board
             arguments,
             stdin=subprocess.DEVNULL,
+            **service_output.child_output(),
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             env=environment,
         )
@@ -1086,7 +1089,7 @@ def start_autopush(
 
 # Far below the time a human takes to switch windows, and a stat() against a local file
 # rather than anything on a network.
-POLL_MS = 400
+POLL_MS = 5000
 
 # The 12-hour pivot, named so the meridiem arithmetic reads as a rule.
 NOON = 12
@@ -1175,6 +1178,42 @@ def source_checkout_board_problem(path: pathlib.Path) -> str:
 class RevisionConflict(board_state.BoardError):
     """A command was based on a board snapshot that is no longer current."""
 
+    code = "board_revision_conflict"
+
+
+class CardRevisionConflict(RevisionConflict):
+    """An existing-card intent no longer names the same persisted card state."""
+
+    code = "card_revision_conflict"
+
+
+def card_version(board: board_state.Board, item: board_state.Item) -> str:
+    """Bind optimistic card edits to every persisted field, including audit history."""
+    identity = item.id
+    state = {
+        "item": item.to_json(),
+        "links": [link.to_json() for link in board.links if identity in (link.frm, link.to)],
+        "relationships": [
+            event.to_json()
+            for event in board.relationship_history
+            if identity in (event.frm, event.to)
+        ],
+        "children": sorted(child.id for child in board.items if child.parent == identity),
+        "parents": [
+            event.to_json()
+            for event in board.parent_history
+            if identity in (event.child, event.frm, event.to)
+        ],
+        "subjects": [
+            event.to_json() for event in board.subject_history if event.item_id == identity
+        ],
+        "details": [event.to_json() for event in board.detail_history if event.item_id == identity],
+        "archives": [
+            event.to_json() for event in board.archive_history if event.item_id == identity
+        ],
+    }
+    return hashlib.sha256(json.dumps(state, sort_keys=True).encode("utf-8")).hexdigest()
+
 
 class BoardStore:
     """Serialize commands and publish only completely admitted disk snapshots."""
@@ -1188,9 +1227,14 @@ class BoardStore:
         self._external_policy = policy is not None
         self._mutex = threading.RLock()
         self.admission_error: str | None = None
+        self.read_at: float | None = None
+        self._admitted_bytes: bytes | None = None
+        self._admitted_policy: board_state.TransitionPolicy | None = None
+        self._admitted_board: board_state.Board | None = None
+        self._content_version: str | None = None
         self._board = self._admit(policy)
         self.policy = self._board.policy
-        self._policy_observation = self.policy
+        self._policy_observation: board_state.TransitionPolicy = self.policy
 
     @staticmethod
     def _verify_candidate(candidate: board_state.Board) -> bool:
@@ -1219,14 +1263,42 @@ class BoardStore:
     def _read_admitted(self, policy: board_state.TransitionPolicy | None) -> board_state.Board:
         """Retry boundedly when reconciliation meets a concurrent revision change."""
         for _attempt in range(3):
-            candidate = board_state.load(self.path, policy, install_context=False)
+            data = self.path.read_bytes()
+            read_at = time.time()
+            if (
+                data == self._admitted_bytes
+                and policy is self._admitted_policy
+                and self._admitted_board is not None
+            ):
+                self.read_at = read_at
+                return self._admitted_board
+            candidate = board_state.load_bytes(data, self.path, policy)
             if not self._verify_candidate(candidate):
+                digest = hashlib.sha256(data)
+                digest.update(b"\0")
+                digest.update(
+                    json.dumps(candidate.policy.to_json(), sort_keys=True).encode("utf-8")
+                )
+                self._admitted_bytes = data
+                self._admitted_policy = policy
+                self._admitted_board = candidate
+                self._content_version = digest.hexdigest()
+                self.read_at = read_at
                 return candidate
             try:
-                return self._reconcile_candidate(policy, candidate.revision)
+                self._reconcile_candidate(policy, candidate.revision)
+                # Bind the replacement's actual bytes, not the pre-repair candidate.
+                self._invalidate_admission()
             except RevisionConflict:
                 continue
         raise board_state.BoardError("disk snapshot kept changing during admission; retry")
+
+    def _invalidate_admission(self) -> None:
+        """Never bind previously read bytes to a later transaction's board."""
+        self._admitted_bytes = None
+        self._admitted_policy = None
+        self._admitted_board = None
+        self._content_version = None
 
     def _admit(self, policy: board_state.TransitionPolicy | None) -> board_state.Board:
         """Parse, verify, and transactionally reconcile before publication."""
@@ -1257,17 +1329,60 @@ class BoardStore:
         with self._mutex:
             return self._board.browser_user if browser else self._board.cli_user
 
+    def browser_css(self) -> str:
+        """Read and admit disk without copying a full board for credential metadata."""
+        with self._mutex:
+            board = self._admit(self.policy if self._external_policy else None)
+            self._board = board
+            self.policy = board.policy
+            return user_css(board)
+
+    def attachment_metadata(
+        self, reference: str, attachment_id: str
+    ) -> tuple[int, attachments.Attachment]:
+        """Admit membership and return only its immutable file metadata.
+
+        The frozen attachment contains scalar values; callers cannot mutate the
+        accepted board. Blob I/O and integrity hashing remain outside this mutex.
+        """
+        with self._mutex:
+            board = self._admit(self.policy if self._external_policy else None)
+            self._board = board
+            self.policy = board.policy
+            item = board.find(reference)
+            file = next(file for file in item.attachments if file.id == attachment_id)
+            return item.ticket, file
+
+    def disk_status(self) -> tuple[str | None, float, str, float | None, str | None, int]:
+        """Return one protected admission and its successful file-read timestamp."""
+        with self._mutex:
+            previous_read = self.read_at
+            try:
+                message = self.reload_policy_if_changed(raise_on_error=True)
+                mtime = self.path.stat().st_mtime
+                stamp = (
+                    dt.datetime.fromtimestamp(mtime, tz=dt.UTC).astimezone().strftime("%H:%M:%S")
+                )
+            except OSError, board_state.BoardError, ValueError, RecursionError:
+                self.read_at = previous_read
+                raise
+            return message, mtime, stamp, self.read_at, self._content_version, self._board.revision
+
     def execute(
         self,
         expected_revision: int,
         command: Callable[[board_state.Board], str],
         *,
         outcome: board_state.SaveOutcome | None = None,
+        card_precondition: tuple[str, str] | None = None,
+        card_response: tuple[str, dict[str, str]] | None = None,
     ) -> tuple[str, int]:
         """Apply one command under the file lock and commit one new revision."""
         if outcome is not None:
             outcome.state = "uncommitted"
         with self._mutex:
+            # Even a failed save can have an uncertain replacement outcome.
+            self._invalidate_admission()
             active = self.policy if self._external_policy else None
             with board_state.edit(
                 self.path, active, install_context=False, outcome=outcome
@@ -1277,6 +1392,14 @@ class BoardStore:
                         f"board revision is {candidate.revision}, not "
                         f"{expected_revision}; refresh and try again"
                     )
+                if card_precondition is not None:
+                    reference, expected_card = card_precondition
+                    try:
+                        item = candidate.find(reference)
+                    except board_state.BoardError as exc:
+                        raise CardRevisionConflict("card changed; refresh before editing") from exc
+                    if card_version(candidate, item) != expected_card:
+                        raise CardRevisionConflict("card changed; refresh before editing")
                 result = command(candidate)
                 promoted = candidate.enforce_dependency_priorities(candidate.cli_user)
                 if promoted:
@@ -1287,6 +1410,9 @@ class BoardStore:
                         "command would leave an invalid board: " + "; ".join(problems)
                     )
                 candidate.revision += 1
+                if card_response is not None:
+                    reference, metadata = card_response
+                    metadata["cardVersion"] = card_version(candidate, candidate.find(reference))
                 committed = copy.deepcopy(candidate)
             # Replacement may succeed even when lock cleanup or publication raises.
             self._publish_candidate(committed)
@@ -1294,6 +1420,7 @@ class BoardStore:
 
     def _publish_candidate(self, committed: board_state.Board) -> None:
         """Publish the isolated board prepared before irreversible replacement."""
+        self._invalidate_admission()
         self._board = committed
         self.policy = committed.policy
 
@@ -1309,7 +1436,15 @@ class BoardStore:
         )
 
     def upload(
-        self, expected_revision: int, ref: str, name: object, encoded: object, actor: str
+        self,
+        expected_revision: int,
+        ref: str,
+        name: object,
+        encoded: object,
+        actor: str,
+        *,
+        card_precondition: tuple[str, str] | None = None,
+        card_response: tuple[str, dict[str, str]] | None = None,
     ) -> tuple[str, int, attachments.Attachment]:
         """Remove new bytes only after a definitely uncommitted snapshot failure."""
         try:
@@ -1342,7 +1477,13 @@ class BoardStore:
         outcome = board_state.SaveOutcome()
         with self._mutex:
             try:
-                result, revision = self.execute(expected_revision, attach, outcome=outcome)
+                result, revision = self.execute(
+                    expected_revision,
+                    attach,
+                    outcome=outcome,
+                    card_precondition=card_precondition,
+                    card_response=card_response,
+                )
             except BaseException as failure:
                 if created_path is not None and outcome.state == "uncommitted":
                     try:
@@ -2645,40 +2786,227 @@ move any card whoever owns it. Click to hand it over."></button>
 let API_TOKEN = '%TOKEN%';
 let API_PREFIX = '%API_PREFIX%';
 
-async function apiGet(path) {
-  const response = await fetch(path, {cache: 'no-store', signal: AbortSignal.timeout(20000)});
+async function apiGet(path, signal) {
+  const response = await fetch(path, {cache: 'no-store', signal: signal || AbortSignal.timeout(20000)});
   const value = await response.json();
   if (!response.ok)
     throw new Error(value.error || 'The service could not be reached (' + response.status + ').');
   return value;
 }
 
-async function apiPost(path, body) {
-  const epoch = window.workspaceEpoch;
-  const prefix = API_PREFIX;
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + API_TOKEN,
-      'Content-Type': 'application/json',
-      'If-Match': '"revision-' + data.revision + '"',
-    },
-    body: JSON.stringify(body),
-  });
-  const read = response.json.bind(response);
-  response.json = async () => {
-    const out = await read();
-    if (epoch !== window.workspaceEpoch) {
-      if (response.ok && window.WorkspaceUI) window.WorkspaceUI.reconcile(prefix, path, body);
-      out.workspaceBoardChanged = true;
+// Pending browser intent is separate from acknowledged state and revision.
+const mutationQueues = new Map(), revisionFloors = new Map(), localActions = [];
+const ACTION_STORAGE_KEY = 'localswim-pending-actions-v1';
+try {
+  for (const saved of JSON.parse(sessionStorage.getItem(ACTION_STORAGE_KEY) || '[]')) {
+    if (saved && typeof saved.prefix === 'string' && saved.body && typeof saved.path === 'string'
+        && typeof saved.cardId === 'string' && typeof saved.kind === 'string'
+        && (!saved.field || typeof saved.body[saved.field] === 'string'
+          || saved.kind === 'move' && typeof saved.body.to === 'string')) {
+      saved.phase = 'unknown'; localActions.push(saved);
+      if (Number.isInteger(saved.confirmedRevision))
+        revisionFloors.set(saved.prefix, Math.max(revisionFloors.get(saved.prefix) || 0, saved.confirmedRevision));
     }
-    return out;
+  }
+} catch (_) {}
+function rememberActions() {
+  try { sessionStorage.setItem(ACTION_STORAGE_KEY, JSON.stringify(localActions)); } catch (_) {}
+}
+function snapshotItem(snapshot, id) {
+  return [...(snapshot.lanes || []).flatMap(lane => lane.items || []),
+    ...(snapshot.retiredItems || [])].find(item => item.id === id);
+}
+function actionTarget(action) {
+  const value = action.body[action.field];
+  return action.kind === 'move' ? action.body.to : action.kind === 'assign' ? action.body.owner
+    : action.kind === 'subject' ? value.trim().replace(/\\s+/g, ' ')
+    : action.kind === 'detail' ? value.replace(/\\n+$/, '') : value;
+}
+function describeAction(prefix, path, body) {
+  const parts = path.slice(prefix.length).split('/').filter(Boolean);
+  const kind = parts.length === 1 && parts[0] === 'cards' ? 'add' : parts[2];
+  return {id:crypto.randomUUID(), prefix,path,body:{...body},kind,
+    cardId:kind === 'add' ? body.id : decodeURIComponent(parts[1] || ''),
+    field:({subject:'subject',detail:'detail',assign:'owner',priority:'priority',move:'state'})[kind],
+    phase:'pending'};
+}
+function projectActions(snapshot, prefix) {
+  const projected = JSON.parse(JSON.stringify(snapshot));
+  for (const action of localActions.filter(action => action.prefix === prefix)) {
+    let item = snapshotItem(projected, action.cardId);
+    if (action.kind === 'add' && !item) {
+      const lane = (projected.lanes || []).find(lane => lane.state === action.body.state);
+      if (!lane) continue;
+      item = {id:action.cardId,ticket:'pending',...action.body,detailRaw:action.body.detail,
+        detail:'',comments:[],history:[],links:[],attachments:[],draggable:false}; lane.items.push(item);
+    }
+    if (!item || item.archived) continue;
+    if (action.field && action.project !== false) {
+      const value = actionTarget(action);
+      if (action.kind === 'detail') {
+        item.detailRaw = value;
+        item.detail = value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      } else item[action.field] = value;
+      if (action.kind === 'move') {
+        const lane = projected.lanes.find(lane => lane.state === value);
+        if (lane) {
+          for (const source of projected.lanes) source.items = source.items.filter(card => card.id !== item.id);
+          item.laneLabel = lane.label; lane.items.push(item);
+        }
+      }
+    }
+    item.localPending = action.phase === 'unknown' ? 'Unconfirmed' : 'Saving…';
+  }
+  return projected;
+}
+function repaintActions() {
+  if (!authoritativeData) return;
+  data = projectActions(authoritativeData, API_PREFIX); HAY.clear(); paint();
+}
+function forgetAction(action) {
+  const index = localActions.indexOf(action); if (index >= 0) localActions.splice(index,1);
+  rememberActions();
+}
+function confirmAddIntent(prefix, body) {
+  if (window.WorkspaceUI) window.WorkspaceUI.reconcile(prefix, prefix + '/cards', body);
+  if (prefix !== API_PREFIX || typeof mkAttempt === 'undefined' || !mkAttempt
+      || mkAttempt.id !== body.id) return;
+  mkAttempt.confirmed = true;
+  if (mkOpen && sameMakeDraft(makeDraft(), mkAttempt.draft)) closeMake(true);
+}
+function acknowledgeSnapshot(snapshot, prefix) {
+  if (prefix !== API_PREFIX || !Number.isInteger(snapshot.revision) || snapshot.error) return false;
+  if (snapshot.revision < (revisionFloors.get(prefix) || 0)
+      || authoritativeData && snapshot.revision < authoritativeData.revision) return false;
+  authoritativeData = snapshot;
+  for (const action of [...localActions]) {
+    if (action.prefix !== prefix) continue;
+    if (Number.isInteger(action.confirmedRevision) && snapshot.revision >= action.confirmedRevision) {
+      if (action.kind === 'add') confirmAddIntent(prefix, action.body);
+      forgetAction(action); continue;
+    }
+    if (action.phase !== 'unknown') continue;
+    const item = snapshotItem(snapshot, action.cardId);
+    if (action.kind === 'add' && item || action.field && item
+        && item[action.field === 'detail' ? 'detailRaw' : action.field] === actionTarget(action)) {
+      if (action.kind === 'add') confirmAddIntent(prefix, action.body);
+      forgetAction(action);
+    } else if (action.field && (!item || item.archived || item.cardVersion !== action.cardVersion)) {
+      forgetAction(action);
+      toast('An unconfirmed edit conflicts with the current card. Your draft is preserved.', true);
+    } else {
+      // Once a fresh read is available, uncertainty must not hide authoritative fields.
+      action.project = false; rememberActions();
+    }
+  }
+  return true;
+}
+
+async function apiPost(path, body, pinnedCardVersion) {
+  const epoch = window.workspaceEpoch, prefix = API_PREFIX, token = API_TOKEN;
+  if (pinnedCardVersion === null) return {ok:false,status:409,json:async () => ({error:
+    'This restored draft has no original card version. Reopen the editor before saving; your text is preserved.'})};
+  if (path === prefix + '/cards' && !body.id) body = {...body,id:'card-' + crypto.randomUUID()};
+  const signature = value => JSON.stringify({...value,id:undefined});
+  const duplicate = localActions.find(action => action.prefix === prefix && action.path === path
+    && signature(action.body) === signature(body));
+  if (duplicate) return {ok:false,status:409,json:async () => ({intentPending:true,error:
+    'This action is still saving or unconfirmed. Its draft is preserved; inspect the board before submitting again.'})};
+  const action = describeAction(prefix,path,body), baseline = authoritativeData || data;
+  const original = snapshotItem(baseline,action.cardId);
+  action.cardVersion = pinnedCardVersion || (original && original.cardVersion);
+  localActions.push(action); rememberActions(); repaintActions();
+  const previous = mutationQueues.get(prefix) || Promise.resolve();
+  const execute = async () => {
+    let revision = baseline.revision, uncertain = false, wasUncertain = false, result;
+    // Our own earlier serialized actions may advance this card; external changes must not.
+    if (action.predecessor && action.predecessor.confirmedVersion) action.cardVersion = action.predecessor.confirmedVersion;
+    if (prefix === API_PREFIX && authoritativeData) revision = authoritativeData.revision;
+    const send = async () => {
+      const response = await fetch(path,{method:'POST',signal:AbortSignal.timeout(20000),
+        headers:{'Authorization':'Bearer ' + token,'Content-Type':'application/json',
+          'If-Match':'"revision-' + revision + '"',
+          ...(action.cardVersion ? {'If-Match-Card':'"' + action.cardVersion + '"'} : {})},body:JSON.stringify(body)});
+      const out = await response.json();
+      if (response.status >= 500) throw new Error('Mutation outcome unconfirmed');
+      if (!out || typeof out !== 'object' || Array.isArray(out)) throw new Error('Invalid mutation response');
+      return {response,out};
+    };
+    const reread = async () => {
+      const latest = await apiGet(prefix + '/board');
+      if (latest.error || !Number.isInteger(latest.revision)
+          || latest.revision < Math.max(revision || 0, revisionFloors.get(prefix) || 0))
+        throw new Error('Board readback has not reached the acknowledged revision');
+      if (epoch === window.workspaceEpoch) acknowledgeSnapshot(latest,prefix);
+      revision = latest.revision; return snapshotItem(latest,action.cardId);
+    };
+    const satisfied = item => action.kind === 'add' ? !!item : !!item && !!action.field
+      && item[action.field === 'detail' ? 'detailRaw' : action.field] === actionTarget(action);
+    // Never send a queued stale edit merely because another local command advanced revision.
+    const current = prefix === API_PREFIX && authoritativeData && snapshotItem(authoritativeData,action.cardId);
+    if (action.field && current && current.cardVersion !== action.cardVersion) {
+      result = {response:{ok:false,status:409},out:{error:'This card changed before your edit was saved. Your draft is preserved.'}};
+    } else { try { result = await send(); } catch (_) { uncertain = true; wasUncertain = true; } }
+    if (!uncertain && result.out.code === 'card_revision_conflict') {
+      result.out.error = 'This card changed before your edit was saved. Your draft is preserved.';
+    } else if (uncertain || result.response.status === 412) {
+      try {
+        const item = await reread();
+        if (uncertain && satisfied(item)) {
+          uncertain = false; result = {response:{ok:true,status:200},out:{revision,result:'Confirmed by board readback'}};
+        } else if (action.kind === 'add' && !item || item && (!item.archived
+          || action.kind === 'unarchive')
+          && (!uncertain || action.field) && typeof action.cardVersion === 'string'
+          && item.cardVersion === action.cardVersion) {
+          try { result = await send(); uncertain = false; } catch (_) { uncertain = true; wasUncertain = true; }
+        } else if (action.field || action.kind === 'add') {
+          uncertain = false; result = {response:{ok:false,status:409},out:{error:
+            'This card changed or is no longer active. Your attempted edit is preserved; review it before trying again.'}};
+        }
+      } catch (_) { uncertain = true; }
+    }
+    // A refused retry says nothing definitive about an earlier lost response.
+    // One final read may prove the original intent; it never causes a third POST.
+    if (wasUncertain && !uncertain && !result.response.ok) {
+      try {
+        const item = await reread();
+        if (satisfied(item)) result = {response:{ok:true,status:200},
+          out:{revision,result:'Confirmed by board readback'}};
+        else uncertain = true;
+      } catch (_) { uncertain = true; }
+    }
+    if (uncertain) {
+      action.phase = 'unknown'; rememberActions(); if (epoch === window.workspaceEpoch) repaintActions();
+      return {ok:false,status:0,json:async () => ({error:
+        'Outcome unconfirmed. Your draft is preserved. Inspect the board before trying again.',
+        workspaceBoardChanged:epoch !== window.workspaceEpoch})};
+    }
+    if (result.response.ok) {
+      action.phase = 'confirming'; action.confirmedRevision = result.out.revision;
+      if (Number.isInteger(result.out.revision)) revisionFloors.set(prefix,
+        Math.max(revisionFloors.get(prefix) || 0, result.out.revision));
+      action.confirmedVersion = result.out.cardVersion;
+      if (action.kind === 'add') confirmAddIntent(prefix, action.body);
+      try {
+        await reread(); forgetAction(action);
+      } catch (_) { action.phase = 'unknown'; rememberActions(); }
+      if (epoch !== window.workspaceEpoch && window.WorkspaceUI) window.WorkspaceUI.reconcile(prefix,path,body);
+    } else forgetAction(action);
+    if (epoch === window.workspaceEpoch && prefix === API_PREFIX) {
+      seen = null; repaintActions(); tick(true);
+    }
+    return {ok:result.response.ok,status:result.response.status,
+      json:async () => ({...result.out,workspaceBoardChanged:epoch !== window.workspaceEpoch})};
   };
-  return response;
+  const earlier = localActions.filter(item => item !== action && item.prefix === prefix && item.cardId === action.cardId).at(-1);
+  // Keep a nonserialized predecessor reference; storage contains only stable intent fields.
+  if (earlier) Object.defineProperty(action,'predecessor',{value:earlier});
+  const running = previous.catch(() => {}).then(execute); mutationQueues.set(prefix,running);
+  try { return await running; } finally { if (mutationQueues.get(prefix) === running) mutationQueues.delete(prefix); }
 }
 
 function acceptRevision(out) {
-  if (Number.isInteger(out.revision)) data.revision = out.revision;
+  if (Number.isInteger(out.revision)) data.revision = Math.max(data.revision || 0, out.revision);
 }
 
 // **The repaint counter is GONE, deliberately.** It only moved when the file
@@ -2713,6 +3041,7 @@ let drafts = (staleReloadState && staleReloadState.drafts
               && typeof staleReloadState.drafts === 'object')
   ? staleReloadState.drafts : {};
 let data = {lanes: [], edges: [], counts: {}, error: null};
+let authoritativeData = null;
 // **Card #0063. Off on every load, which is what "by default" means.** It lives here
 // rather than in localStorage on purpose: a board that remembered being unhidden would
 // need a second decision about when to forget, and Terry asked for a default rather
@@ -2784,7 +3113,7 @@ function startSubjectEdit() {
   const it = itemById(openId);
   if (!it || editing) return;
   editing = 'subject';
-  subjectEdit = {};
+  subjectEdit = {cardVersion:it.cardVersion};
   const box = document.getElementById('p-subject-edit');
   box.disabled = false;
   // **Seeded from `data`, never from the rendered heading.** The heading is text the
@@ -2810,7 +3139,7 @@ async function saveSubject() {
   box.disabled = true;
   try {
     const res = await apiPost(prefix + '/cards/' + encodeURIComponent(source) + '/subject',
-                              {subject: wanted});
+                              {subject: wanted}, session.cardVersion);
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
@@ -2838,6 +3167,7 @@ function startDetailEdit() {
   const it = itemById(openId);
   if (!it || editing) return;
   editing = 'detail';
+  detailEditVersion = it.cardVersion;
   // **`detailRaw`, never `detail`.** The rendered form has been through `inline()` --
   // escaped, with the markdown-ish bits turned into tags -- and editing THAT would
   // store HTML, one round trip from unreadable.
@@ -2847,22 +3177,24 @@ function startDetailEdit() {
   document.getElementById('p-detail-text').focus();
 }
 
+let detailEditVersion = null;
 async function saveDetail() {
   const area = document.getElementById('p-detail-text');
   const save = document.getElementById('p-detail-save');
   const wanted = area.value;
+  const source = openId, epoch = window.workspaceEpoch;
   if (!wanted.trim()) { toast('A description cannot be blank', true); return; }
   save.disabled = true;
   try {
     const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(openId) + '/detail',
-                              {detail: wanted});
+                              {detail: wanted}, detailEditVersion);
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) { toast(out.error || 'Edit refused', true); return; }
     toast(out.result);
     seen = null;
-    closeEditors();
+    if (openId === source && epoch === window.workspaceEpoch && area.value === wanted) closeEditors();
   } catch (err) {
     toast('Could not reach the board: ' + err, true);
   } finally {
@@ -3045,11 +3377,11 @@ function relRow(word, ref) {
   return row;
 }
 
-async function mutateRelationship(source, body, controls) {
+async function mutateRelationship(source, body, controls, pinnedCardVersion) {
   for (const control of controls) control.disabled = true;
   try {
     const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/link';
-    const res = await apiPost(path, body);
+    const res = await apiPost(path, body, pinnedCardVersion);
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
@@ -3082,7 +3414,7 @@ function editableRelationshipRow(it, ref) {
     await mutateRelationship(
       it.id,
       {kind: ref.kind, other: ref.id, remove: true},
-      [kind, target, remove],
+      [kind, target, remove], it.cardVersion,
     );
   });
   kind.addEventListener('change', async () => {
@@ -3091,7 +3423,7 @@ function editableRelationshipRow(it, ref) {
     const changed = await mutateRelationship(
       it.id,
       {kind: wanted, other: ref.id, replaces: ref.kind},
-      [kind, target, remove],
+      [kind, target, remove], it.cardVersion,
     );
     if (!changed) kind.value = ref.kind;
     kind.blur();
@@ -3103,6 +3435,7 @@ function editableRelationshipRow(it, ref) {
 let relationshipDraft = null;
 
 function newRelationshipRow(it) {
+  const draft = relationshipDraft;
   const target = relationshipTargetSelect(it.id, relationshipDraft.other);
   if (!target) return null;
   const row = document.createElement('div');
@@ -3127,9 +3460,9 @@ function newRelationshipRow(it) {
     const added = await mutateRelationship(
       it.id,
       {kind: kind.value, other: target.value},
-      [kind, target, add, cancel],
+      [kind, target, add, cancel], draft.cardVersion,
     );
-    if (added) relationshipDraft = null;
+    if (added && relationshipDraft === draft) relationshipDraft = null;
   });
   row.append(kind, target, add, cancel);
   return row;
@@ -3163,7 +3496,7 @@ document.getElementById('p-rel-add').addEventListener('click', () => {
   const it = itemById(openId);
   if (!it) return;
   if (!allItems(it.id).length) { toast('There is no other card to relate', true); return; }
-  relationshipDraft = {source: it.id, kind: 'blocks', other: null};
+  relationshipDraft = {source: it.id, kind: 'blocks', other: null, cardVersion: it.cardVersion};
   paintRelations(it);
   const kind = document.querySelector('#p-rel .rel-new .rel-kind');
   if (kind) kind.focus();
@@ -3179,10 +3512,10 @@ function attachmentImage(file) {
   return ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.mediaType);
 }
 
-async function attachmentCommand(source, action, body) {
+async function attachmentCommand(source, action, body, pinnedCardVersion) {
   try {
     const path = API_PREFIX + '/cards/' + encodeURIComponent(source) + '/' + action;
-    const res = await apiPost(path, body);
+    const res = await apiPost(path, body, pinnedCardVersion);
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
@@ -3235,7 +3568,7 @@ function paintAttachments(it) {
       cover.textContent = selected ? 'Clear cover' : 'Set cover';
       cover.addEventListener('click', async () => {
         cover.disabled = true;
-        await attachmentCommand(it.id, 'cover', {attachmentId: selected ? null : file.id});
+        await attachmentCommand(it.id, 'cover', {attachmentId: selected ? null : file.id}, it.cardVersion);
         cover.disabled = false;
       });
       actions.append(cover);
@@ -3244,7 +3577,7 @@ function paintAttachments(it) {
     remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove ' + file.name);
     remove.addEventListener('click', async () => {
       remove.disabled = true;
-      await attachmentCommand(it.id, 'attachment', {remove: true, attachmentId: file.id});
+      await attachmentCommand(it.id, 'attachment', {remove: true, attachmentId: file.id}, it.cardVersion);
       remove.disabled = false;
     });
     actions.append(remove); row.append(actions); box.append(row);
@@ -3265,6 +3598,7 @@ document.getElementById('p-upload').addEventListener('click', () => {
 });
 document.getElementById('p-upload-file').addEventListener('change', async (ev) => {
   const source = openId;
+  const cardVersion = itemById(source)?.cardVersion;
   const epoch = window.workspaceEpoch;
   const file = ev.target.files[0];
   const upload = document.getElementById('p-upload');
@@ -3278,7 +3612,7 @@ document.getElementById('p-upload-file').addEventListener('change', async (ev) =
   try {
     const bytes = await fileBase64(file);
     if (epoch !== window.workspaceEpoch) return;
-    await attachmentCommand(source, 'attachment', {name: file.name, data: bytes});
+    await attachmentCommand(source, 'attachment', {name: file.name, data: bytes}, cardVersion);
   } catch (err) { attachmentRefusal(String(err)); }
   finally { upload.disabled = false; ev.target.value = ''; }
 });
@@ -3370,7 +3704,7 @@ function openCard(id) {
     }
   }
   // **NEVER write to this control while Terry is inside it.** paint() calls openCard()
-  // on every board change, twice a second, and assigning `.value` to a select whose
+  // on every rendered board change, and assigning `.value` to a select whose
   // dropdown is open closes it. That is #0029's defect wearing a different hat: a
   // repaint may redraw anything the SERVER has a copy of, and an interaction in
   // progress is the one thing it does not.
@@ -3383,7 +3717,7 @@ function openCard(id) {
   // **No leading hash, for the same reason the card face strips it** -- #0021. The two
   // MUST agree; a number that gains a `#` when you open the card is two conventions.
   document.getElementById('p-tix').textContent = it.ticket.replace('#', '');
-  // **#0029's rule, third surface.** paint() reopens the card twice a second, so a
+  // **#0029's rule, third surface.** paint() can reopen the card after a refresh, so a
   // field being edited MUST NOT be rewritten underneath the person typing in it. The
   // priority select guards on focus; these guard on `editing`, because a textarea can
   // lose focus to its own Save button and still hold unsent text.
@@ -3539,6 +3873,7 @@ document.getElementById('find').addEventListener('input', ev => {
 // the one whose own comment says dropping it makes the text come back on reopen and
 // "invites Terry to send it twice". Card #0039.
 async function postComment() {
+  const source = openId, epoch = window.workspaceEpoch;
   const text = document.getElementById('say').value.trim();
   // **This guard is why Enter on an empty box is safe for free.** It predates the
   // key binding and covers it without a second check.
@@ -3549,6 +3884,8 @@ async function postComment() {
     if (out.workspaceBoardChanged) return false;
   acceptRevision(out);
   if (!res.ok) { toast(out.error || 'Comment refused', true); return; }
+  if (epoch !== window.workspaceEpoch || openId !== source
+      || document.getElementById('say').value.trim() !== text) return;
   document.getElementById('say').value = '';
   // **The stash MUST be dropped too, or the text just sent comes back on reopen** --
   // which reads as the comment having failed, and invites Terry to send it twice.
@@ -3627,15 +3964,20 @@ document.getElementById('p-owner').addEventListener('click', async () => {
 // the owner toggle does it: a repaint between opening the card and choosing cannot
 // make this send the wrong thing. On refusal the control is put back from `data`
 // rather than left showing a value the board never accepted.
+let priorityEditVersion, priorityEditSession;
+document.getElementById('p-pri').addEventListener('focus', () => {
+  priorityEditSession = {};
+  priorityEditVersion = itemById(openId)?.cardVersion;
+});
 document.getElementById('p-pri').addEventListener('change', async (ev) => {
   if (!openId) return;
-  const changingId = openId;
+  const changingId = openId, session = priorityEditSession;
   const pri = ev.target;
   const wanted = pri.value;
   pri.disabled = true;
   try {
     const res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(changingId) + '/priority',
-                              {priority: wanted});
+                              {priority: wanted}, priorityEditVersion);
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
@@ -3645,6 +3987,8 @@ document.getElementById('p-pri').addEventListener('change', async (ev) => {
       if (it) pri.value = it.priority;
       return;
     }
+    if (openId === changingId && priorityEditSession === session)
+      priorityEditVersion = out.cardVersion;
     if (typeof out.priority === 'string') {
       const saved = itemById(changingId);
       const selected = (data.priorities || []).find(p => p.id === out.priority);
@@ -3702,7 +4046,7 @@ document.getElementById('say').addEventListener('keydown', ev => {
 //
 // **`mkOpen` is still kept**, because the lane a card is being written for has to
 // outlive the repaint too.
-let mkOpen = null;
+let mkOpen = null, mkAttempt = null;
 
 function mkDirty() {
   return !!(document.getElementById('mk-subject').value.trim()
@@ -3711,6 +4055,7 @@ function mkDirty() {
 }
 
 function openMake(lane) {
+  mkAttempt = null;
   mkOpen = lane.state;
   document.getElementById('mk-where').textContent =
     'It will be created in ' + lane.label + ', by ' + userLabel(data.browserUser) + '.';
@@ -3752,7 +4097,7 @@ function closeMake(force) {
       && !window.confirm('Discard this card? What you typed will be lost.')) {
     return;
   }
-  mkOpen = null;
+  mkOpen = null; mkAttempt = null;
   document.getElementById('mk-subject').value = '';
   document.getElementById('mk-detail').value = '';
   document.getElementById('mk-relations').replaceChildren();
@@ -3780,6 +4125,21 @@ document.getElementById('mk-subject').addEventListener('keydown', ev => {
   }
 });
 
+function restoreMakeAttempt(saved) {
+  mkAttempt = saved && typeof saved.id === 'string' && saved.draft ? saved : null;
+  if (mkAttempt && snapshotItem(authoritativeData || data, mkAttempt.id))
+    confirmAddIntent(API_PREFIX, {...mkAttempt.draft, id:mkAttempt.id});
+}
+function makeDraft() {
+  return {state:mkOpen,subject:document.getElementById('mk-subject').value.trim(),
+    detail:document.getElementById('mk-detail').value,priority:document.getElementById('mk-priority').value,
+    owner:document.getElementById('mk-owner').value,
+    links:relationshipSpecs(document.getElementById('mk-relations'))};
+}
+function sameMakeDraft(left, right) {
+  return ['state','subject','detail','priority','owner'].every(key => left[key] === right[key])
+    && JSON.stringify(left.links || []) === JSON.stringify(right.links || []);
+}
 async function submitMake() {
   const subject = document.getElementById('mk-subject').value.trim();
   if (!mkOpen || !subject) {
@@ -3788,24 +4148,30 @@ async function submitMake() {
     return;
   }
   const go = document.getElementById('mk-go');
+  const sourceLane = mkOpen, epoch = window.workspaceEpoch;
+  const submitted = makeDraft();
+  if (mkAttempt && (mkAttempt.confirmed || !sameMakeDraft(submitted, mkAttempt.draft))) {
+    toast(mkAttempt.confirmed ? 'This card was created. Your changed draft is preserved; open a new form to add another card.'
+      : 'The original card creation is unconfirmed. Your changed draft is preserved; inspect that card before adding another.', true);
+    return;
+  }
+  if (!mkAttempt) mkAttempt = {id:'card-' + crypto.randomUUID(), draft:submitted, confirmed:false};
+  const attempt = mkAttempt;
   go.disabled = true;
   try {
-    const res = await apiPost(API_PREFIX + '/cards', {
-        state: mkOpen,
-        subject: subject,
-        detail: document.getElementById('mk-detail').value,
-        priority: document.getElementById('mk-priority').value,
-        owner: document.getElementById('mk-owner').value,
-        links: relationshipSpecs(document.getElementById('mk-relations')),
-    });
+    const res = await apiPost(API_PREFIX + '/cards', {...submitted, id:attempt.id});
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
-    if (!res.ok) { toast(out.error || 'Card refused', true); return; }
+    if (!res.ok) {
+      if (res.status > 0 && !out.intentPending && mkAttempt === attempt) mkAttempt = null;
+      toast(out.error || 'Card refused', true); return;
+    }
     // **Only cleared once the server has it.** Clearing on click would throw the
     // text away on a refusal, which is the same defect as the repaint wipe
     // arriving through the submit path instead.
-    closeMake(true);
+    if (epoch === window.workspaceEpoch && mkOpen === sourceLane
+        && sameMakeDraft(makeDraft(), submitted)) closeMake(true);
     toast(out.result);
     seen = null;
   } catch (err) {
@@ -3829,6 +4195,10 @@ function card(item) {
     + '<span class="tix"></span></div>'
     + '<button type="button" class="subject card-open"></button>'
     + (item.comments.length ? '<span class="marks"></span>' : '');
+  if (item.localPending) {
+    const pending = document.createElement('span'); pending.className = 'local-pending';
+    pending.textContent = item.localPending; pending.setAttribute('role','status'); d.appendChild(pending);
+  }
   // **No leading hash.** Display only -- find() still takes 0003, #0003, 3 or the
   // slug, because he may paste a hash from an older message or a commit.
   d.querySelector('.tix').textContent = item.ticket.replace('#', '');
@@ -3886,7 +4256,7 @@ function card(item) {
     if (independentControl(ev.target)) { ev.preventDefault(); return; }
     dragged = true;
     ev.dataTransfer.setData('text/plain',
-      JSON.stringify({id: item.id, from: item.state}));
+      JSON.stringify({id: item.id, from: item.state, cardVersion: item.cardVersion}));
     ev.dataTransfer.effectAllowed = 'move';
     d.classList.add('dragging');
   });
@@ -3936,7 +4306,7 @@ function laneEl(lane) {
   // word for it: "I like 'Unhide' vs 'Show' or 'Display' here."
   //
   // **The state is in memory, not in localStorage, and that is the point of "by
-  // default".** paint() runs twice a second and MUST NOT re-hide what Terry just
+  // default".** paint() runs after refreshed data arrives and MUST NOT re-hide what Terry just
   // unhid, which `unhideOld` handles. A reload starting hidden again is the requirement
   // rather than a shortcoming.
   const hiding = (lane.oldCount || 0) > 0;
@@ -3993,7 +4363,7 @@ function laneEl(lane) {
       }
       attempted = true;
       res = await apiPost(API_PREFIX + '/cards/' + encodeURIComponent(payload.id) + '/move',
-                          {to: lane.state});
+                          {to: lane.state}, payload.cardVersion);
       const out = await res.json();
       if (!out || typeof out !== 'object' || Array.isArray(out))
         throw new Error('Invalid move response');
@@ -4103,7 +4473,7 @@ function playFlip(before) {
 //      Claude sends one when it moves a card to Needs Terry.
 //
 // **It fires on a RISE, not on a non-zero value.** A notification that repeats every
-// 400ms while a count sits at one is the boy-who-cried-wolf failure this project
+// on each poll while a count sits at one is the boy-who-cried-wolf failure this project
 // keeps guarding against, and it would be worse than silence.
 let lastCta = null;
 let boardTitle = document.title;
@@ -4328,7 +4698,7 @@ function paint() {
   playFlip(before);
   // **REAPPLIED AFTER EVERY REPAINT, and forgetting this is the obvious bug.** `paint()`
   // rebuilds every card, so a filtered board would silently un-filter itself the next
-  // time Terry moved a card or Claude wrote a comment -- 400 ms later, with his query
+  // time Terry moved a card or Claude wrote a comment -- at the next refresh, with his query
   // still sitting in the box. Card #0061.
   applyFilter();
   if (focusId) restoreCardFocus(focusId);
@@ -4410,7 +4780,7 @@ let fileMs = 0;
 // `/api/v001/status` route performs a real `board_state.load()`, and its `ok` field
 // is what this keys on -- not the HTTP status, because a socket answering proves the
 // process is up and nothing about the file.
-const LIVE_MS  = 5000;   // Terry's number: "read that file within last 5 seconds".
+const LIVE_MS  = 10000;   // Allow one missed five-second poll before reporting staleness.
 
 // **What THIS TAB is running, frozen at load time.** The server stamps it into the HTML,
 // so it describes the JavaScript the browser actually has -- not what the checkout says
@@ -4430,7 +4800,7 @@ let codeStale = false;
 let restarting = false;
 let restartProblem = null;
 let pushState = null;
-const WARN_MS  = 15000;  // ~37 polls missed at 400ms. Nothing benign lasts this long.
+const WARN_MS  = 15000;  // Three five-second polling intervals.
 
 // **The dot's 2s breathing cycle is CSS, not JavaScript, and it is cosmetic.**
 // **Do not "fix" the poll rate to match it.** The badge claims Python read the
@@ -4477,6 +4847,7 @@ function saveStaleReloadState() {
     drafts: drafts,
     openId: openId,
     editing: editing,
+    editCardVersion: editing === 'subject' ? subjectEdit?.cardVersion : detailEditVersion,
     query: query,
     unhideOld: unhideOld,
   };
@@ -4492,6 +4863,8 @@ function saveStaleReloadState() {
       detail: document.getElementById('mk-detail').value,
       priority: document.getElementById('mk-priority').value,
       owner: document.getElementById('mk-owner').value,
+      links: relationshipSpecs(document.getElementById('mk-relations')),
+      ...(mkAttempt ? {attempt:mkAttempt} : {}),
     };
   }
   try {
@@ -4511,9 +4884,11 @@ function restoreStaleReloadState() {
     openCard(saved.openId);
     if (saved.editing === 'subject') {
       startSubjectEdit();
+      subjectEdit.cardVersion = saved.editCardVersion || null;
       document.getElementById('p-subject-edit').value = saved.editValue || '';
     } else if (saved.editing === 'detail') {
       startDetailEdit();
+      detailEditVersion = saved.editCardVersion || null;
       document.getElementById('p-detail-text').value = saved.editValue || '';
     }
   }
@@ -4525,6 +4900,9 @@ function restoreStaleReloadState() {
       document.getElementById('mk-detail').value = saved.make.detail || '';
       document.getElementById('mk-priority').value = saved.make.priority || '';
       document.getElementById('mk-owner').value = saved.make.owner || '';
+      const relations = document.getElementById('mk-relations'); relations.replaceChildren();
+      for (const spec of saved.make.links || []) addRelationshipRow(relations, spec, null);
+      restoreMakeAttempt(saved.make.attempt);
     }
   }
 }
@@ -4689,27 +5067,21 @@ function renderLive() {
   dot.classList.toggle('alive', live);
 }
 
-// **POLLING IS THE DESIGN, not a fallback for missing file watching.** Terry:
-// "I hope inotify or equivalent works and we get realtime update, but the timer
-// also actively polling will keep blood pressure low."
-//
-// **A push socket would be worse here, and for his own reason.** A WebSocket or
-// SSE stream that goes quiet is indistinguishable from one that is working and
-// has nothing to say -- which is the crashed-dashboard failure again, wearing a
-// different protocol. **A poll that must answer every 400ms cannot go quiet
-// without the circle noticing.**
-//
-// 400ms is realtime as far as an eye is concerned, and the cost is one `stat`
-// plus a 12 KB JSON parse against a local file.
-let pollingEpoch = null;
-async function tick() {
+// **POLLING IS THE DESIGN,** with five-second selected-board updates.
+// Requests never overlap for the selected epoch; navigation aborts superseded reads.
+// User actions queue an immediate follow-up when an existing poll is in flight.
+let pollingEpoch = null, pollingController = null, pollingQueued = false;
+async function tick(force = false) {
   if (window.localswimWorkspace && !window.workspaceReady) return;
   const epoch = window.workspaceEpoch;
-  if (pollingEpoch === epoch) return;
+  if (pollingEpoch === epoch) { pollingQueued = pollingQueued || force; return; }
+  if (pollingController) pollingController.abort();
+  pollingController = new AbortController();
+  const signal = AbortSignal.any([pollingController.signal, AbortSignal.timeout(20000)]);
   pollingEpoch = epoch;
   const prefix = API_PREFIX;
   try {
-    const meta = await apiGet(prefix + '/status');
+    const meta = await apiGet(prefix + '/status', signal);
     if (epoch !== window.workspaceEpoch) return;
     if (meta.error && window.WorkspaceUI) throw new Error(meta.error);
     // **Captured before the ok check**, because a stale tab and an unreadable board
@@ -4732,12 +5104,15 @@ async function tick() {
         throw new Error(meta.error || 'The board service could not read this board.');
       renderLive(); return;
     }
+    if (Number.isFinite(meta.readAt)) lastOk = meta.readAt * 1000;
     fileMs = meta.mtime * 1000;
-    if (meta.mtime !== seen) {
-      const snapshot = await apiGet(prefix + '/board');
+    const marker = typeof meta.contentVersion === 'string' ? meta.contentVersion : meta.mtime;
+    if (marker !== seen) {
+      const snapshot = await apiGet(prefix + '/board', signal);
       if (epoch !== window.workspaceEpoch) return;
       if (snapshot.error && !(snapshot.lanes || []).length) throw new Error(snapshot.error);
-      data = snapshot;
+      if (!acknowledgeSnapshot(snapshot, prefix)) return;
+      data = projectActions(authoritativeData || snapshot, prefix);
       // **The search cache MUST die with the data that filled it.** Card #0061. A card
       // that gains a comment keeps its id, so a cache keyed on the id alone would go on
       // answering from the text that card had a minute ago -- and a search for a
@@ -4747,10 +5122,9 @@ async function tick() {
       restoreStaleReloadState();
       if (window.WorkspaceUI) window.WorkspaceUI.loaded();
       // Commit the snapshot marker only after the UI successfully renders it.
-      seen = meta.mtime;
+      seen = marker;
     }
-    // Only a real answer moves this. It is the whole signal.
-    lastOk = Date.now();
+    // Freshness belongs to the successful file read, independently of paint.
   } catch (e) {
     // Superseded requests cannot replace another board's content or recovery state.
     if (epoch === window.workspaceEpoch && window.WorkspaceUI) {
@@ -4763,7 +5137,10 @@ async function tick() {
     }
     // Failed requests do not advance lastOk or the successfully rendered snapshot marker.
   } finally {
-    if (pollingEpoch === epoch) pollingEpoch = null;
+    if (pollingEpoch === epoch) {
+      pollingEpoch = null; pollingController = null;
+      if (pollingQueued) { pollingQueued = false; queueMicrotask(() => tick()); }
+    }
   }
   if (epoch === window.workspaceEpoch) renderLive();
 }
@@ -4825,7 +5202,8 @@ def payload() -> bytes:
     # **Drift is reported to the page, not swallowed.** `verify()` replays each item's
     # history; a mismatch means something changed a state without going through
     # `move()`, and that is exactly the news a board must not keep to itself.
-    drift = board.verify()
+    # live_snapshot has already replayed the audits for these exact bytes.
+    drift: list[str] = []
     # Retain archived cards for relationship lookups and existing open drawers.
     # Only active cards contribute to lane rendering, counts, and search matches.
     order = board_state.blocking_order(board)
@@ -4871,6 +5249,7 @@ def payload() -> bytes:
     def render_item(item: board_state.Item, lane_label: str) -> dict[str, object]:
         return {
             "id": item.id,
+            "cardVersion": card_version(board, item),
             "ticket": item.label,
             "state": item.state,
             "laneLabel": lane_label,
@@ -4891,8 +5270,8 @@ def payload() -> bytes:
             **({"archived": True} if item.archived else {}),
             "priorityLabel": policy.priority_label.get(item.priority, ""),
             # **Card #0063.** Computed on the SERVER so one clock decides it, and
-            # so the 24-hour rule lives in exactly one place. The page re-fetches
-            # twice a second, so a card ages out on its own without a reload.
+            # so the 24-hour rule lives in exactly one place. Age markers are recomputed
+            # when a refreshed board payload is rendered.
             **({"old": True} if is_old(item) else {}),
             "detail": inline(item.detail),
             # **The RAW text as well as the rendered form, card #0082.** `detail`
@@ -5289,13 +5668,30 @@ def execute_priority_batch(
 
 
 def execute_http_command(
-    store: BoardStore, expected: int, parts: list[str], body: board_state.JsonObject, actor: str
+    store: BoardStore,
+    expected: int,
+    parts: list[str],
+    body: board_state.JsonObject,
+    actor: str,
+    *,
+    expected_card: str | None = None,
+    response_metadata: dict[str, str] | None = None,
 ) -> tuple[str, int, str | None, attachments.Attachment | None]:
     """Run one atomic command and capture its committed response fields."""
     is_card = len(parts) == CARD_COMMAND_PARTS and parts[0] == "cards"
+    precondition = (parts[1], expected_card) if is_card and expected_card is not None else None
+
+    capture = (parts[1], response_metadata) if is_card and response_metadata is not None else None
+
     if is_card and parts[2] == "attachment" and body.get("remove") is not True:
         result, revision, uploaded = store.upload(
-            expected, parts[1], body["name"], body["data"], actor
+            expected,
+            parts[1],
+            body["name"],
+            body["data"],
+            actor,
+            card_precondition=precondition,
+            card_response=capture,
         )
         return result, revision, None, uploaded
     effective_priority: str | None = None
@@ -5315,23 +5711,44 @@ def execute_http_command(
             effective_priority = board.find(parts[1]).priority
         return result
 
-    result, revision = store.execute(expected, mutate)
+    result, revision = store.execute(
+        expected, mutate, card_precondition=precondition, card_response=capture
+    )
     return result, revision, effective_priority, None
 
 
 def _http_command_response(
-    store: BoardStore, expected: int, parts: list[str], body: board_state.JsonObject, actor: str
+    store: BoardStore,
+    expected: int,
+    parts: list[str],
+    body: board_state.JsonObject,
+    actor: str,
+    *,
+    expected_card: str | None = None,
 ) -> board_state.JsonObject:
     """Keep the ordinary command response envelope stable."""
+    metadata: dict[str, str] = {}
     result, revision, effective_priority, uploaded = execute_http_command(
-        store, expected, parts, body, actor
+        store, expected, parts, body, actor, expected_card=expected_card, response_metadata=metadata
     )
     response: board_state.JsonObject = {"result": result, "revision": revision}
+    response.update(metadata)
     if effective_priority is not None:
         response["priority"] = effective_priority
     if uploaded is not None:
         response["attachment"] = cast("board_state.JsonObject", uploaded.to_json())
     return response
+
+
+def _command_error_response(error: ValueError | OSError) -> tuple[board_state.JsonObject, int]:
+    """Keep uncertain storage failures distinct from definite validation refusals."""
+    if isinstance(error, OSError):
+        return {
+            "error": "mutation outcome is unknown; inspect before retrying",
+            "code": "mutation_outcome_unknown",
+        }, 503
+    code = 413 if isinstance(error, attachments.AttachmentTooLargeError) else 409
+    return {"error": str(error)}, code
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -5444,10 +5861,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
-            board = live_snapshot()
-            item = board.find(command[1])
-            file = next(file for file in item.attachments if file.id == command[3])
-            blob = attachments.read_blob(BOARD_PATH, item.ticket, file)
+            store = STORE
+            if store is None:
+                raise board_state.BoardError("board store is not initialized")
+            ticket, file = store.attachment_metadata(command[1], command[3])
+            blob = attachments.read_blob(store.path, ticket, file)
         except OSError, ValueError, StopIteration:
             self.send_error(404)
             return
@@ -5481,9 +5899,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # truncated or half-written file passes `stat` and fails `load`. And a
         # server answering HTTP proves only that the socket is up.
         #
-        # **`ok` is the field the dot keys on.** Parsing 12 KB of JSON at 2.5 Hz
-        # is nothing, and it is the difference between a signal that means
-        # something and one that looks reassuring.
+        # **`ok` is the field the dot keys on.** Actual byte reads and validated admission distinguish a current file
+        # from a reachable service. Unchanged bytes reuse prior admission.
         # **THE EMBEDDED POLICY IS RE-READ HERE TOO.** Terry's standing order is
         # that a tool able to detect its own staleness resolves it. Schema 4 keeps
         # lane labels, IDs, and permissions in the same snapshot as the state, so
@@ -5492,14 +5909,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         try:
             if STORE is not None:
-                reloaded = STORE.reload_policy_if_changed(raise_on_error=True)
+                reloaded, mtime, stamp, read_at, content_version, revision = STORE.disk_status()
             else:
                 reloaded = board_state.reload_rules_if_changed()
                 live_snapshot()
+                mtime = BOARD_PATH.stat().st_mtime
+                stamp = (
+                    dt.datetime.fromtimestamp(mtime, tz=dt.UTC).astimezone().strftime("%H:%M:%S")
+                )
+                read_at = time.time()
+                content_version = None
+                revision = None
             if reloaded:
                 print(f"  {reloaded}", flush=True)
-            mtime = BOARD_PATH.stat().st_mtime
-            stamp = dt.datetime.fromtimestamp(mtime, tz=dt.UTC).astimezone().strftime("%H:%M:%S")
         except (OSError, board_state.BoardError, ValueError, RecursionError) as exc:
             # **`build` rides on the FAILURE path too.** An unreadable board and a
             # stale tab are independent problems, and the page must be able to tell
@@ -5509,6 +5931,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "ok": False,
                     "mtime": 0,
                     "stamp": "unreadable",
+                    "readAt": STORE.read_at if STORE is not None else None,
                     **code_meta,
                     "push": push_status(),
                     "error": str(exc),
@@ -5518,7 +5941,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # **`codeStale` rides on BOTH paths, like `build` and for the same
         # reason.** An unreadable board and a stale process are independent
         # failures, and either can be true while the other is.
-        self._json({"ok": True, "mtime": mtime, "stamp": stamp, **code_meta, "push": push_status()})
+        self._json(
+            {
+                "ok": True,
+                "mtime": mtime,
+                "stamp": stamp,
+                "readAt": read_at,
+                "contentVersion": content_version,
+                "revision": revision,
+                **code_meta,
+                "push": push_status(),
+            }
+        )
 
     def do_GET(self) -> None:
         if not self._admit_transport():
@@ -5539,11 +5973,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }
             )
         elif route == API_PREFIX + "/browser-session":
-            board = live_snapshot()
+            if STORE is None:
+                raise board_state.BoardError("board store is not initialized")
             self._json(
                 {
                     "token": BROWSER_TOKEN,
-                    "userCSS": user_css(board),
+                    "userCSS": STORE.browser_css(),
                     "boardIdentity": hashlib.sha256(
                         str(BOARD_PATH.resolve()).casefold().encode("utf-8")
                     ).hexdigest(),
@@ -5554,7 +5989,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif route == "/favicon.svg":
             # **Cached, unlike everything else here.** The no-store rule on `_send`
             # exists so a live view never shows a stale board; an icon is not the board
-            # and re-fetching it twice a second would be silly.
+            # and re-fetching it during routine polling would be wasteful.
             blob = FAVICON.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "image/svg+xml")
@@ -5622,6 +6057,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._json({"result": "board service shutdown scheduled", "push": detail})
 
+    def _card_precondition(self, *, is_card: bool) -> tuple[bool, str | None]:
+        """Contain malformed optional card preconditions before command admission."""
+        value = self.headers.get("If-Match-Card")
+        if value is None:
+            return True, None
+        if not is_card or re.fullmatch(r'"[0-9a-f]{64}"', value) is None:
+            self._json({"error": "If-Match-Card must quote a cardVersion on a card command"}, 400)
+            return False, None
+        return True, value[1:-1]
+
+    def _command_body(
+        self, *, is_card: bool, is_permissions: bool
+    ) -> tuple[board_state.JsonObject | None, str | None]:
+        """Validate an optional card token before reading its command body."""
+        valid, expected_card = self._card_precondition(is_card=is_card)
+        if not valid:
+            return None, None
+        return self._read_json(unique_fields=is_permissions), expected_card
+
     def do_POST(self) -> None:  # explicit REST dispatch
         """Execute one authenticated, revision-checked domain command."""
         route = self.path.partition("?")[0]
@@ -5650,7 +6104,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if expected is None:
             self._json({"error": "If-Match must name the expected board revision"}, 428)
             return
-        body = self._read_json(unique_fields=is_permissions)
+        body, expected_card = self._command_body(
+            is_card=is_card_command, is_permissions=is_permissions
+        )
         if body is None:
             return
 
@@ -5672,36 +6128,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 elif is_priority_batch:
                     response = execute_priority_batch(store, expected, body, actor)
                 else:
-                    response = _http_command_response(store, expected, command_parts, body, actor)
+                    response = _http_command_response(
+                        store, expected, command_parts, body, actor, expected_card=expected_card
+                    )
             except KeyError as exc:
                 self._json({"error": f"missing field {exc}"}, 400)
                 return
             except RevisionConflict as exc:
-                self._json({"error": str(exc)}, 412)
+                self._json({"error": str(exc), "code": exc.code}, 412)
                 return
             except (ValueError, OSError) as exc:
-                code = 413 if isinstance(exc, attachments.AttachmentTooLargeError) else 409
-                self._json({"error": str(exc)}, code)
+                error, code = _command_error_response(exc)
+                self._json(error, code)
                 return
 
-        print(f"  {response['result']}", flush=True)
         self._json(response)
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002, ARG002
-        # **The parameter names are the base class's and MUST NOT be renamed.** A
-        # parameter name is part of an override's contract, because a caller may pass
-        # it by keyword. Both lint codes here are forced by a signature this code does
-        # not own.
-        #
-        # The poll runs twice a second, so logging every request would bury anything
-        # worth reading. Only a real data fetch prints.
-        #
-        # **`args[0]` is NOT always a string.** `send_error` routes through `log_error`
-        # with `("code %d, message %s", 404, ...)`, an int first, and an unguarded `in`
-        # test raises inside the handler and closes the socket with no response.
-        first = args[0] if args else ""
-        if isinstance(first, str) and API_PREFIX + "/board" in first:
-            print(f"  Served {first.split()[1] if ' ' in first else first}", flush=True)
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        """Keep routine requests off the service output path."""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -5750,25 +6194,31 @@ def _serve_owned_board(args: argparse.Namespace, lease: service_ownership.Writer
         raise SystemExit(f"ERROR: {problem}")
 
     port = board_state.DEFAULT_PORT if args.port is None else args.port
-    print(f"Serving {BOARD_PATH}")
     try:
         STORE = BoardStore(BOARD_PATH)
         board = STORE.snapshot()
-        if args.port is None:
-            port = board.port
-        print(f"  project   : {board.project or '(unnamed)'}")
-        for lane in board.lanes():
-            if lane.items:
-                print(f"      {lane.label:<20} {len(lane.items):>2}  [{lane.owner_label}]")
         drift = board.verify()
-        if drift:
-            print(f"  DRIFT: {len(drift)} item(s) disagree with their own history:")
-            for problem in drift:
-                print(f"      {problem}")
-        _report_rule_gaps(board.policy)
     except (board_state.BoardError, OSError, json.JSONDecodeError) as exc:
         STORE = None
         raise SystemExit(f"ERROR: board admission failed: {exc}") from exc
+
+    if args.port is None:
+        port = board.port
+    _run_board_server(args, port, lease, board, drift)
+
+
+def _print_board_startup(board: board_state.Board, port: int, drift: list[str]) -> None:
+    """Describe an admitted board only after its listener and output are ready."""
+    print(f"Serving {BOARD_PATH}")
+    print(f"  project   : {board.project or '(unnamed)'}")
+    for lane in board.lanes():
+        if lane.items:
+            print(f"      {lane.label:<20} {len(lane.items):>2}  [{lane.owner_label}]")
+    if drift:
+        print(f"  DRIFT: {len(drift)} item(s) disagree with their own history:")
+        for problem in drift:
+            print(f"      {problem}")
+    _report_rule_gaps(board.policy)
 
     bad_edges = board.policy.check_edges()
     if bad_edges:
@@ -5787,21 +6237,22 @@ def _serve_owned_board(args: argparse.Namespace, lease: service_ownership.Writer
     print(f"  {browser.label} may drag:")
     for a, b in board.policy.edges_for(board.browser_user):
         print(f"      {a} -> {b}")
-    # **A DAEMON thread, so Ctrl+C still stops the server.** A push in flight is a
-    # `git` subprocess that finishes on its own; the worst case at shutdown is a commit
-    # that lands without its push, and the next --autopush start reconciles it because
-    # the loop begins armed.
-    _run_board_server(args, port, lease)
 
 
 def _run_board_server(
-    args: argparse.Namespace, port: int, lease: service_ownership.WriterLease
+    args: argparse.Namespace,
+    port: int,
+    lease: service_ownership.WriterLease,
+    board: board_state.Board,
+    drift: list[str],
 ) -> None:
     server = BoardHttpServer((HOST, port), Handler)
     port = server.server_address[1]
     worker: threading.Thread | None = None
     served = False
     try:
+        service_output.configure()
+        _print_board_startup(board, port, drift)
         publish_service(BOARD_PATH, port)
         worker = start_autopush(BOARD_PATH, enabled=args.autopush)
         print(f"Listening on {HOST}:{port}. Press Ctrl+C to stop.", flush=True)

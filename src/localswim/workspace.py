@@ -1,6 +1,8 @@
 """Loopback workspace gateway over independent, sole-writer board services."""
 
 import contextlib
+import copy
+import hashlib
 import html
 import http.client
 import http.server
@@ -24,6 +26,7 @@ from . import (
     attachments,
     board_state,
     gateway_publish,
+    service_output,
     service_ownership,
     workspace_config,
 )
@@ -42,11 +45,14 @@ MAX_ATTACHMENT_ENTITY_BYTES = 10 * 1024 * 1024
 UPSTREAM_READ_BYTES = 64 * 1024
 UPSTREAM_RESPONSE_REJECTED = "board service response rejected"
 POST_OUTCOME_UNKNOWN = "board command outcome is unknown; inspect board before retrying"
-# Discovery only: roughly five times the largest representative 1.7 MB snapshot.
+# Discovery only: bounded headroom above the qualified 20 MiB snapshots.
 # This is not a board-service payload or attachment limit.
-MAX_CANDIDATE_BYTES = 8 * 1024 * 1024
+MAX_CANDIDATE_BYTES = 32 * 1024 * 1024
 # One request may recover from two ordinary atomic snapshot replacements.
 MAX_DISCOVERY_REFRESHES = 2
+# Metadata is a hint, never proof against an in-place write with restored times.
+# Hash unchanged bytes periodically without reparsing unchanged JSON.
+CANDIDATE_RECHECK_SECONDS = 5.0
 START_WAIT_SECONDS = 15.0
 START_POLL_SECONDS = 0.1
 REQUEST_TIMEOUT = 5.0
@@ -107,11 +113,18 @@ class Endpoint:
 
 @dataclass
 class _Candidate:
-    """One request's discovered file identity, never a durable authorization."""
+    """Request-local file identity, rechecked before each sensitive use."""
 
     path: pathlib.Path
     identity: os.stat_result
     refreshes: int = 0
+    digest: bytes = b""
+
+
+def _file_signature(identity: os.stat_result) -> tuple[int, ...]:
+    return tuple(
+        getattr(identity, field) for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+    )
 
 
 def _read_candidate(path: pathlib.Path) -> _Candidate | None:
@@ -126,6 +139,8 @@ def _read_candidate(path: pathlib.Path) -> _Candidate | None:
             if not stat.S_ISREG(identity.st_mode) or identity.st_size > MAX_CANDIDATE_BYTES:
                 return None
             blob = stream.read(MAX_CANDIDATE_BYTES + 1)
+        if _file_signature(identity) != _file_signature(path.stat()):
+            return None
         if len(blob) > MAX_CANDIDATE_BYTES:
             return None
         raw = cast("board_state.JsonValue", json.loads(blob.decode("utf-8")))
@@ -134,7 +149,7 @@ def _read_candidate(path: pathlib.Path) -> _Candidate | None:
             and raw.get("schema") == board_state.SCHEMA
             and all(field in raw for field in ("project", "items", "policy"))
         ):
-            return _Candidate(path, identity)
+            return _Candidate(path, identity, digest=hashlib.sha256(blob).digest())
     except OSError, ValueError, RecursionError:
         pass
     return None
@@ -158,6 +173,14 @@ class Workspace:
         self._bookkeeping_lock = threading.Lock()
         self._board_locks: dict[pathlib.Path, threading.Lock] = {}
         self._closed = False
+        # One refresher per workspace coalesces concurrent parse/summary work.
+        # Entries are hints only: targeted containment and identity checks remain live.
+        self._cache_lock = threading.RLock()
+        self._recognition: dict[pathlib.Path, tuple[tuple[int, ...], bool, bytes, float]] = {}
+        self._summaries: dict[pathlib.Path, tuple[tuple[int, ...], board_state.JsonObject]] = {}
+        self._sessions: dict[
+            pathlib.Path, tuple[board_state.JsonObject, tuple[int, ...], bytes, Endpoint]
+        ] = {}
 
     def _board_lock(self, path: pathlib.Path) -> threading.Lock:
         # Never acquire a board lock while holding bookkeeping. Once acquired,
@@ -170,6 +193,7 @@ class Workspace:
 
     def _paths(self) -> dict[str, _Candidate]:
         found: dict[str, _Candidate] = {}
+        seen: set[pathlib.Path] = set()
         for directory, names, filenames in os.walk(self.root, followlinks=False):
             parent = pathlib.Path(directory)
             names[:] = sorted(
@@ -191,9 +215,18 @@ class Workspace:
                     continue
                 if path.is_symlink() or not path.resolve().is_relative_to(self.root):
                     continue
-                if candidate := _read_candidate(path):
+                seen.add(path)
+                try:
+                    candidate = self._candidate(path)
+                except OSError, ValueError, RecursionError:
+                    continue
+                if candidate is not None:
                     key = path.relative_to(self.root).with_suffix("").as_posix()
                     found[key] = candidate
+        with self._cache_lock:
+            for cached in (self._recognition, self._summaries, self._sessions):
+                for path in cached.keys() - seen:
+                    cached.pop(path, None)
         return found
 
     def _checked_path(self, candidate: _Candidate) -> pathlib.Path:
@@ -256,9 +289,89 @@ class Workspace:
             raise _DiscoveryChangedError("workspace board changed during discovery; retry")
         return canonical
 
+    def _candidate(self, path: pathlib.Path) -> _Candidate | None:
+        """Recognize one safe file, sharing only unchanged metadata-bound work."""
+        with self._cache_lock:
+            try:
+                candidate = _Candidate(path, path.stat())
+                self._unchanged_path(candidate)
+                signature = _file_signature(candidate.identity)
+                saved = self._recognition.get(path)
+                if saved is not None and saved[0] == signature:
+                    if time.monotonic() - saved[3] < CANDIDATE_RECHECK_SECONDS:
+                        candidate.digest = saved[2]
+                        return candidate if saved[1] else None
+                    if candidate.identity.st_size > MAX_CANDIDATE_BYTES:
+                        return None
+                    # A bounded byte read detects timestamp-preserving edits. The
+                    # digest permits retaining summaries for unchanged content.
+                    if self._fingerprint(candidate) == saved[2]:
+                        self._recognition[path] = (*saved[:3], time.monotonic())
+                        candidate.digest = saved[2]
+                        return candidate if saved[1] else None
+                fresh = _read_candidate(path)
+                self._unchanged_path(candidate)
+                if fresh is not None and _file_signature(fresh.identity) != signature:
+                    raise _DiscoveryChangedError("workspace board changed during discovery; retry")
+                self._recognition[path] = (
+                    signature,
+                    fresh is not None,
+                    (fresh.digest if fresh else self._fingerprint(candidate))
+                    if candidate.identity.st_size <= MAX_CANDIDATE_BYTES
+                    else b"",
+                    time.monotonic(),
+                )
+                self._summaries.pop(path, None)
+                return fresh
+            except OSError:
+                self._recognition.pop(path, None)
+                self._summaries.pop(path, None)
+                return None
+
+    def _fingerprint(self, candidate: _Candidate) -> bytes:
+        """Hash bounded bytes without reparsing unchanged recognized or foreign JSON."""
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(candidate.path, flags), "rb") as stream:
+            identity = os.fstat(stream.fileno())
+            if not stat.S_ISREG(identity.st_mode):
+                raise ValueError("workspace board path is not a regular file")
+            if _file_signature(identity) != _file_signature(candidate.identity):
+                raise _DiscoveryChangedError("workspace board changed during discovery; retry")
+            blob = stream.read(MAX_CANDIDATE_BYTES + 1)
+        self._unchanged_path(candidate)
+        return hashlib.sha256(blob).digest()
+
     def _resolve(self, key: str) -> _Candidate:
-        candidate = self._paths().get(key)
+        # Reconstruct only canonical catalog keys. Never let a cached listing grant
+        # access to hidden directories, attachments, aliases or escaped paths.
+        parts = key.split("/")
+        if not key or any(
+            not part
+            or part.startswith(".")
+            or (part == "attachments" and index < len(parts) - 1)
+            or "\\" in part
+            or ":" in part
+            for index, part in enumerate(parts)
+        ):
+            raise ValueError("unknown workspace board")
+        path = self.root.joinpath(*parts).with_name(parts[-1] + ".json")
+        # Discovery accepts case-insensitive JSON suffixes on every platform.
+        if not path.exists() and path.parent.is_dir():
+            path = next(
+                (
+                    entry
+                    for entry in reversed(sorted(path.parent.iterdir()))
+                    if entry.stem == parts[-1] and entry.suffix.lower() == ".json"
+                ),
+                path,
+            )
+        if path.name == workspace_config.CONFIG_FILENAME:
+            raise ValueError("unknown workspace board")
+        candidate = self._candidate(path)
         if candidate is None:
+            raise ValueError("unknown workspace board")
+        canonical = self._unchanged_path(candidate)
+        if canonical.relative_to(self.root).with_suffix("").as_posix() != key:
             raise ValueError("unknown workspace board")
         return candidate
 
@@ -267,26 +380,29 @@ class Workspace:
         return self._checked_path(self._resolve(key))
 
     def resolve_endpoint(self, key: str) -> tuple[pathlib.Path, Endpoint]:
-        """Resolve and acquire a scoped endpoint using one request-local scan."""
+        """Resolve only the requested safe candidate and acquire its endpoint."""
         candidate = self._resolve(key)
         path = self._checked_path(candidate)
         return path, self._endpoint(candidate)
 
-    def catalog(self) -> board_state.JsonObject:
-        """Read attention counts without starting services or changing snapshots."""
-        boards: list[board_state.JsonValue] = []
-        for key, candidate in self._paths().items():
-            path = candidate.path
+    def _summary(self, candidate: _Candidate) -> board_state.JsonObject:
+        with self._cache_lock:
+            path = self._checked_path(candidate)
+            signature = _file_signature(candidate.identity)
+            saved = self._summaries.get(path)
+            if saved is not None and saved[0] == signature:
+                return copy.deepcopy(saved[1])
             counts: board_state.JsonObject = {"blocked": 0, "needsHuman": 0, "review": 0}
             entry: board_state.JsonObject = {
-                "key": key,
+                "key": path.relative_to(self.root).with_suffix("").as_posix(),
                 "project": path.stem,
                 "counts": counts,
                 "lastCardEditMs": None,
             }
             try:
                 path = self._checked_path(candidate)
-                board = board_state.load(path)
+                board = board_state.load(path, install_context=False)
+                self._unchanged_path(candidate)
                 entry["project"] = board.project or path.stem
                 entry["lastCardEditMs"] = last_card_edit_ms(board)
                 counts.update(
@@ -306,8 +422,29 @@ class Workspace:
                         ),
                     }
                 )
-            except (OSError, ValueError, RecursionError) as exc:
+            except RecursionError:
+                entry["error"] = "workspace board nesting is too deep"
+            except (OSError, ValueError) as exc:
                 entry["error"] = str(exc)
+            if "error" not in entry:
+                self._summaries[path] = (_file_signature(candidate.identity), copy.deepcopy(entry))
+            return entry
+
+    def catalog(self) -> board_state.JsonObject:
+        """Read attention counts without starting services or changing snapshots."""
+        boards: list[board_state.JsonValue] = []
+        for candidate in self._paths().values():
+            entry: board_state.JsonObject
+            try:
+                entry = self._summary(candidate)
+            except (OSError, ValueError, RecursionError) as exc:
+                entry = {
+                    "key": candidate.path.relative_to(self.root).with_suffix("").as_posix(),
+                    "project": candidate.path.stem,
+                    "counts": {"blocked": 0, "needsHuman": 0, "review": 0},
+                    "lastCardEditMs": None,
+                    "error": str(exc),
+                }
             boards.append(entry)
         return {
             "root": str(self.root),
@@ -326,10 +463,29 @@ class Workspace:
     def _existing(self, path: pathlib.Path) -> Endpoint | None:
         try:
             raw = service_ownership.service_descriptor(path)
-            return self._browser_endpoint(path, cast("int", raw["port"]))
+            signature = _file_signature(path.stat())
+            with self._cache_lock:
+                recognized = self._recognition.get(path)
+                digest = recognized[2] if recognized is not None else b""
+                saved = self._sessions.get(path)
+            if (
+                saved is not None
+                and saved[:3] == (raw, signature, digest)
+                and service_ownership.writer_busy(path)
+            ):
+                return saved[3]
+            self._sessions.pop(path, None)
+            endpoint = self._browser_endpoint(path, cast("int", raw["port"]))
+            if endpoint is not None and service_ownership.service_descriptor(path) == raw:
+                if _file_signature(path.stat()) != signature:
+                    return None
+                self._sessions[path] = (raw, signature, digest, endpoint)
+                return endpoint
+            return None
         except ServiceUpgradePendingError:
             raise
         except OSError, ValueError, http.client.HTTPException:
+            self._sessions.pop(path, None)
             return None
 
     def _browser_endpoint(self, path: pathlib.Path, port: int) -> Endpoint | None:
@@ -405,22 +561,21 @@ class Workspace:
 
     def endpoint(self, path: pathlib.Path) -> Endpoint:
         """Reuse a matching live writer, otherwise launch one on an ephemeral port."""
-        path = path.resolve()
-        candidate = next(
-            (candidate for candidate in self._paths().values() if candidate.path == path), None
-        )
-        if candidate is None:
-            msg = "board is outside the workspace"
-            raise ValueError(msg)
+        path = pathlib.Path(os.path.abspath(path))
+        if not path.is_relative_to(self.root) or path.suffix.lower() != ".json":
+            raise ValueError("board is outside the workspace")
+        try:
+            candidate = self._resolve(path.relative_to(self.root).with_suffix("").as_posix())
+        except ValueError as exc:
+            raise ValueError("board is outside the workspace or undiscovered") from exc
         return self._endpoint(candidate)
 
     def _endpoint(self, candidate: _Candidate) -> Endpoint:
         path = self._checked_path(candidate)
-        try:
-            board_state.load(path)
-        except RecursionError as exc:
-            raise ValueError("workspace board nesting is too deep") from exc
         with self._board_lock(path):
+            summary = self._summary(candidate)
+            if "error" in summary:
+                raise ValueError(str(summary["error"]))
             self._checked_path(candidate)
             with self._bookkeeping_lock:
                 if self._closed:
@@ -858,6 +1013,8 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
                 headers["Content-Type"] = "application/json"
                 if revision := self.headers.get("If-Match"):
                     headers["If-Match"] = revision
+                if (card_revision := self.headers.get("If-Match-Card")) is not None:
+                    headers["If-Match-Card"] = card_revision
             try:
                 connection.request("POST" if write else "GET", target, body=body, headers=headers)
                 with connection.getresponse() as response:
@@ -976,10 +1133,11 @@ def serve(root: pathlib.Path, port: int = DEFAULT_PORT, *, autopush: bool = Fals
     """Run one gateway; independently owned board services remain available on exit."""
     workspace = Workspace(root, autopush=autopush)
     server = WorkspaceServer((api_endpoint.HOST, port), workspace)
-    print(f"Workspace {workspace.root}", flush=True)
-    print(f"  view: http://{api_endpoint.HOST}:{server.server_address[1]}/", flush=True)
-    workspace.start_publishing()
     try:
+        service_output.configure()
+        print(f"Workspace {workspace.root}", flush=True)
+        print(f"  view: http://{api_endpoint.HOST}:{server.server_address[1]}/", flush=True)
+        workspace.start_publishing()
         server.serve_forever()
     finally:
         server.server_close()
