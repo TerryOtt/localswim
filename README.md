@@ -1037,6 +1037,56 @@ git config core.hooksPath .githooks
 GitHub Actions runs the same gate on pushes and pull requests. Text files are enforced
 as UTF-8 with LF endings by .editorconfig, .gitattributes and the gate.
 
+## One owning chat for board changes
+
+For the simplest owner notification path, use the running board service's built-in
+notifications. It needs no separate watcher, monitor pool or optional monitor extra.
+Each board has one destination chat. New settings default to disabled.
+
+```console
+localswim-cli BOARD notifications status --json
+localswim-cli BOARD notifications target THREAD_UUID
+localswim-cli BOARD notifications enable
+localswim-cli BOARD notifications disable
+```
+
+`BOARD` is the board snapshot path; `THREAD_UUID` is the destination Codex chat's
+UUID. Setting a target preserves the enabled state, so an already enabled board
+can hand off to a new owner with `target`. A newly configured target stays disabled
+until `enable`; enabling requires a target. `disable` retains the target.
+**Production notifications and legacy monitors must stay off until explicitly
+activated by Terry.** The commands above document the interface, not an activation
+instruction.
+
+Settings belong to the service's OS profile, outside board JSON. On Windows they
+live under `%LOCALAPPDATA%/localswim/notifications/`; other systems use their user
+configuration directory. Use the CLI against the live service rather than editing
+those files. Status uses a CLI-authenticated GET with validated board identity;
+a setting change follows that check with one POST. Configuration does not change
+board revisions, history or existing monitor target, cursor and pending files.
+
+After a committed human edit, the writer submits only bounded metadata: board
+identity/label, activity interval and ticket numbers. Automation-only edits produce
+no owner notice. A background worker combines bursts until 15 seconds of quiet,
+then loads the current enabled state and destination and calls the public
+`codex queue` CLI once. It sends no card titles, descriptions, comments or credentials.
+On Windows, the service's PATH must resolve native `codex.exe`; command wrappers
+are refused so delivery can bound and stop its own child process.
+The writer performs no notification configuration reads, delivery I/O or subprocess
+launches. Notification failure cannot turn a committed edit into a failed edit.
+
+Delivery is best effort within the board service's process lifetime. There is no
+durable cursor, startup catch-up or delivery retry; shutdown or a failed delivery
+can lose a pending notice. A timeout can follow an accepted enqueue, so do not
+blindly resend. An accepted result means queued, not that the owner finished work.
+One Terry-authorized live idle-chat test against V2 M14 observed an immediate
+turn/wake and `QUEUE_TEST_RECEIVED`; that bounded observation is not a general
+completion guarantee. Receiving a notice does not authorize ticket work or bypass
+board gates.
+
+The older monitor interfaces below remain available for compatibility. Configuring
+the built-in path neither starts them nor migrates or changes their saved state.
+
 ## Shared board-write monitor
 
 Install the optional monitor extra with `uv sync --locked --extra monitor` or

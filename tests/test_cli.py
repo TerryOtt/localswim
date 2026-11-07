@@ -124,6 +124,11 @@ HELP_PATHS = [
     ("lane", "migrate-id"),
     ("lane", "rename-label"),
     ("lane", "retire"),
+    ("notifications",),
+    ("notifications", "status"),
+    ("notifications", "target"),
+    ("notifications", "enable"),
+    ("notifications", "disable"),
 ]
 
 

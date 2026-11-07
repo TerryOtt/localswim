@@ -4662,6 +4662,98 @@ def migrate_lane(path: pathlib.Path, source: str, destination: str) -> str:
     )
 
 
+def _notification_request(port: int, token: str, body: JsonObject | None) -> JsonObject:
+    """Read bounded settings without redirects, private errors or mutation replay."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    outcome = (
+        "notification configuration outcome is unknown; inspect status before retrying"
+        if body is not None
+        else "notification settings unavailable; nothing changed"
+    )
+
+    def unique(pairs: list[tuple[str, JsonValue]]) -> JsonObject:
+        result: JsonObject = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        connection.request(
+            "GET" if body is None else "POST",
+            API_PREFIX + "/notifications",
+            body=data,
+            headers=headers,
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            if 400 <= response.status < 500:
+                raise BoardError("notification configuration request refused")
+            raise BoardError(outcome)
+        content = response.read(4097)
+        if len(content) > 4096:
+            raise ValueError
+        raw = cast("JsonValue", json.loads(content, object_pairs_hook=unique))
+        if not isinstance(raw, dict):
+            raise ValueError
+        return raw
+    except (OSError, http.client.HTTPException, ValueError, RecursionError) as error:
+        raise BoardError(outcome) from error
+    finally:
+        with contextlib.suppress(OSError, http.client.HTTPException):
+            connection.close()
+
+
+def configure_remote_notifications(
+    path: pathlib.Path, body: JsonObject | None = None
+) -> JsonObject:
+    """Use metadata-only identity checks before configuring the writer's one recipient."""
+    from uuid import UUID
+
+    from . import service_ownership
+
+    try:
+        descriptor = service_ownership.service_descriptor(path, require_cli_token=True)
+    except (OSError, ValueError, RecursionError) as error:
+        raise BoardError("board notification service unavailable") from error
+    port = cast("int", descriptor["port"])
+    token = cast("str", descriptor["token"])
+
+    def validate(value: JsonObject) -> JsonObject:
+        if (
+            set(value) != {"schema", "boardIdentity", "threadId", "enabled"}
+            or type(value["schema"]) is not int
+            or value["schema"] != 1
+            or value["boardIdentity"] != service_ownership.board_identity(path)
+            or type(value["enabled"]) is not bool
+            or (value["threadId"] is not None and not isinstance(value["threadId"], str))
+        ):
+            raise BoardError("notification configuration identity or metadata is invalid")
+        target = value["threadId"]
+        if isinstance(target, str):
+            try:
+                if str(UUID(target)) != target:
+                    raise ValueError
+            except ValueError as error:
+                raise BoardError("notification target metadata is invalid") from error
+        return value
+
+    current = validate(_notification_request(port, token, None))
+    if body is None:
+        return current
+    try:
+        return validate(_notification_request(port, token, body))
+    except BoardError as error:
+        raise BoardError(
+            "notification configuration was not confirmed; inspect status before retrying"
+        ) from error
+
+
 def _service_descriptor(path: pathlib.Path) -> JsonObject:
     """Validate board-bound metadata and live identity before any CLI dispatch."""
     from . import service_ownership  # ownership imports board types

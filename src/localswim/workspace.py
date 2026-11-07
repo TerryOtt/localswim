@@ -931,6 +931,8 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
+        if status >= 400:
+            api_endpoint.finish_refused_post(self)
 
     def _json(self, value: object, status: int = 200) -> None:
         self._send(json.dumps(value).encode("utf-8"), "application/json", status)

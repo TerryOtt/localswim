@@ -10,6 +10,8 @@ native board monitoring is an optional extra.
   policy checks, storage helpers, and reporting primitives.
 - `src/localswim/attachments.py` owns attachment metadata, replayable audit,
   bounded file validation, safe storage paths, and immutable file integrity.
+- `src/localswim/notifications.py` owns opt-in service-owned notification settings and the
+  bounded in-memory worker; `codex_signal.py` owns one public Codex queue delivery.
 - `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
@@ -64,6 +66,10 @@ native board monitoring is an optional extra.
   Bound incomplete HTTP input during drain with one absolute two-second budget,
   observed within a 100 ms read poll plus scheduling; trickling must not reset it.
   Preserve 30-second ordinary inactivity/response timeouts and non-daemon joins.
+  For refused POSTs, send and half-close the response before discarding unread raw
+  input within both 64 KiB and an absolute 200 ms budget. Use the shared helper in
+  board and gateway handlers; never parse, forward or replay discarded bytes. Keep
+  test HTTP requests single-attempt so lost responses cannot replay mutations.
   Transport expiry must never release ownership while an admitted command can save;
   it does not impose a duration bound on command, disk or publisher work.
 - Board files can contain private identities, descriptions, comments, and history.
@@ -586,6 +592,27 @@ detached from Codex so it continues running when the chat or Codex app closes.
 - Keep launch logs in private runtime storage with a separate pair per launch.
   Inspect both task state and the actual listener during restart recovery; ending
   a task can leave a gateway child running.
+
+## Built-in owner notifications
+
+- Lead new one-owner guidance with `localswim-cli BOARD notifications status --json`,
+  `target THREAD_UUID`, `enable`, and `disable`; this is a service-owned path, not
+  another watcher or pool. New settings default disabled; target changes preserve
+  enabled state and disable retains the target.
+- Production notifications and legacy monitors MUST remain off until Terry explicitly
+  activates them. Do not launch a monitor or change existing target, cursor or pending
+  files as part of configuring this path.
+- Keep settings outside board JSON in the live service account's OS profile. Use the
+  CLI-authenticated, identity-validated GET before a single configuration POST; never
+  replay an uncertain POST or edit the settings files as a substitute for the API.
+- Submit bounded human-only committed metadata to the memory worker. Preserve the
+  15-second quiet window, current-target lookup at send, and no notification settings
+  reads, delivery I/O or subprocess work on the writer path. No card prose or credentials.
+- Preserve process-lifetime best effort: no durable cursor, catch-up or retries.
+  `codex queue` acceptance means queued, not completed work. The authorized live idle
+  V2 M14 test observed an immediate turn/wake and `QUEUE_TEST_RECEIVED`; do not claim
+  notices necessarily await a manually initiated next turn or generalize that test
+  into a completion guarantee. Notices do not authorize work past ticket gates.
 
 ## Local inception-board coordination
 

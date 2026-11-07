@@ -198,13 +198,14 @@ class ActivityFeed:
 
     def publish(
         self, board: board_state.Board, previous: HistoryPosition, *, predecessor: bool
-    ) -> None:
+    ) -> list[board_state.JsonObject]:
         """Optional postcommit publication; caller contains failures after replacement."""
         data = (json.dumps(board.to_json(), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         stamp = bind_written(self.path, data)
         events = appended_events(board, previous)
         self.append(events, complete=predecessor and stamp is not None and bool(events))
         self.stamp = stamp
+        return events
 
     def query(
         self, start: dt.datetime, end: dt.datetime | None, cursor: str | None = None

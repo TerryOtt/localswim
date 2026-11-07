@@ -80,6 +80,7 @@ domain extraction, new audit rules, a generation protocol or supported backup re
 | `src/localswim/cli.py` | Click command tree, contextual help, and command-to-service dispatch. |
 | `src/localswim/attachments.py` | Bounded attachment metadata, audit replay, raster detection, safe paths, flushed file writes, and content integrity. |
 | `src/localswim/api_endpoint.py` | Loopback HTTP server, transactional store, REST boundary, embedded HTML/CSS/JavaScript, live reload, and optional Git publishing. |
+| `src/localswim/notifications.py` / `codex_signal.py` | Opt-in service-owned owner notification settings, bounded background bursts and one public Codex queue enqueue. |
 | `src/localswim/service_ownership.py` | Per-board lifetime writer ownership and the shared startup/restart gate. |
 | `src/localswim/workspace.py` | Directory discovery, workspace catalog and loopback gateway, board-service reuse and startup, and SPA deep-link serving. |
 | `src/localswim/workspace_config.py` | Schema-1 gateway preferences, strict validation, atomic storage, and cross-process revisions. |
@@ -745,6 +746,13 @@ Admission atomically leaves the phase under its transport lock; response writes
 restore the ordinary socket-operation timeout, including early refusals and downloads.
 Short or expired bodies never enter command execution.
 
+Board and gateway application POST error responses use `finish_refused_post()`: flush
+the response, half-close its write side, then discard raw receive bytes within
+64 KiB and an absolute 200 ms deadline. This prevents unread or late request data
+from resetting ordinary Windows refusal responses. It does not parse, authorize,
+forward or replay that data, and cannot guarantee delivery against unlimited
+uploads. Test HTTP helpers make one attempt, including on connection aborts.
+
 Non-daemon request workers are still joined before publisher shutdown, listener
 handoff and writer-lease release. An admitted command retains that ownership through
 save even if sending its response fails. The read budget adds a poll/scheduling
@@ -1227,6 +1235,49 @@ Keep each fact in the narrowest durable place:
 When a schema, route, invariant, or workflow changes, update every affected layer in
 the same change. Do not copy the full transition table into another document; link
 to the authoritative data so it cannot drift.
+
+## Built-in owner notification boundary
+
+The simple one-owner path belongs to the live board service, not a new watcher or
+pool. `api_endpoint.py` creates one `notifications.NotificationDispatcher` at service
+setup and closes it at shutdown. After a successful human mutation commit it hands
+off bounded immutable metadata (board identity/label, interval and at most 128 ticket
+numbers, with truncation indicated). Automation-only edits are excluded. Submission
+only merges one pending burst under a short condition lock: no settings load,
+notification I/O or subprocess work runs on the writer path.
+
+`notifications.py` owns per-OS-profile, per-board settings and the bounded in-memory
+background worker. The worker waits for 15 seconds of quiet and loads the current
+target/enabled state at delivery. `codex_signal.py` validates the fixed metadata
+schema and invokes public `codex queue --thread UUID --message MESSAGE` once with
+a five-second delivery budget and bounded cleanup of its own CLI child. It never
+logs raw errors or launches/resumes a chat through a separate session API.
+Windows requires native `codex.exe` on the service's PATH and refuses command
+wrappers; other platforms resolve `codex` normally.
+
+This is process-lifetime best effort: no persistent cursor, journal, catch-up or
+retry. Pending bursts disappear on shutdown; failed or uncertain deliveries are
+dropped. Acceptance means queued, not consumed or work completed. One authorized
+live idle V2 M14 test observed an immediate turn/wake and `QUEUE_TEST_RECEIVED`;
+do not describe delivery as necessarily waiting for a manually started next turn
+or claim that test proves all destination behavior.
+
+The CLI group is `localswim-cli BOARD notifications`: `status --json`,
+`target THREAD_UUID`, `enable`, and `disable`. New settings default disabled;
+`target` preserves enabled state, `enable` requires a target, and `disable` retains
+it. CLI-credential-only GET/POST `/api/v001/notifications` reads/writes the running
+service account's settings, outside board JSON. The client validates identity in
+the initial GET before sending exactly one configuration POST; no board read,
+revision mutation or uncertain POST replay is needed. Atomic settings writes are
+serialized by a separate service configuration lock. Windows uses
+`%LOCALAPPDATA%/localswim/notifications/<identity-hash>.json`; macOS uses
+`~/Library/Application Support/localswim/notifications/`, and other platforms use
+`$XDG_CONFIG_HOME/localswim/notifications/` or `~/.config/localswim/notifications/`.
+
+Production notifications and legacy monitors remain off until Terry explicitly
+activates them. The new path does not touch existing monitor target/cursor/pending
+files, launch monitors, or migrate legacy ownership. Preserve the compatibility
+contracts below.
 
 ## Shared monitor ownership
 

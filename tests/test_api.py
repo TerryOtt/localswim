@@ -105,35 +105,20 @@ def request_json(
     request = urllib.request.Request(
         url, data=data, headers=headers, method="POST" if body is not None else "GET"
     )
-    for attempt in range(2):
-        try:
-            with urllib.request.urlopen(request, timeout=5) as response:
-                return response.status, json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            with exc:
-                return exc.code, json.loads(exc.read())
-        except ConnectionAbortedError:
-            if attempt:
-                raise
-            time.sleep(0.02)
-    raise AssertionError("request retry fell through")
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return exc.code, json.loads(exc.read())
 
 
 def assert_http_error(request: urllib.request.Request, expected: int) -> None:
-    """Assert an HTTP refusal, retrying one transient Windows socket abort."""
-    for attempt in range(2):
-        try:
-            with pytest.raises(urllib.error.HTTPError) as caught:
-                urllib.request.urlopen(request, timeout=5)
-        except ConnectionAbortedError:
-            if attempt:
-                raise
-            time.sleep(0.02)
-        else:
-            with caught.value:
-                assert caught.value.code == expected
-            return
-    raise AssertionError("request retry fell through")
+    """Assert a single HTTP refusal without replaying an uncertain request."""
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urllib.request.urlopen(request, timeout=5)
+    with caught.value:
+        assert caught.value.code == expected
 
 
 def test_board_and_status_reads(api: RunningApi) -> None:
@@ -663,6 +648,8 @@ def test_dirty_build_id_includes_source_fingerprint(
             "service_output.py",
             "activity_feed.py",
             "monitor_activity_client.py",
+            "notifications.py",
+            "codex_signal.py",
             "workspace.js",
             "workspace.css",
         )
@@ -686,6 +673,8 @@ def test_dirty_build_id_includes_source_fingerprint(
         "service_output.py",
         "activity_feed.py",
         "monitor_activity_client.py",
+        "notifications.py",
+        "codex_signal.py",
         "workspace.js",
         "workspace.css",
     ):

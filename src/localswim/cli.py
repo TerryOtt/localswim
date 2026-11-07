@@ -8,6 +8,7 @@ import json
 import pathlib
 import sys
 import urllib.parse
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -85,6 +86,57 @@ def _positive_count(_context: click.Context, _parameter: click.Parameter, value:
 def cli(context: click.Context, board: pathlib.Path) -> None:
     """Inspect or update BOARD through explicit commands."""
     context.obj = CliContext(board)
+
+
+def _notification_config(
+    context: CliContext, body: board_state.JsonObject | None = None
+) -> board_state.JsonObject:
+    return _board_call(lambda: board_state.configure_remote_notifications(context.board, body))
+
+
+def _print_notification_config(value: board_state.JsonObject, *, as_json: bool = False) -> None:
+    if as_json:
+        click.echo(json.dumps(value, ensure_ascii=False))
+    else:
+        state = "enabled" if value["enabled"] else "disabled"
+        click.echo(f"  notifications: {state}; target: {value['threadId'] or 'not configured'}")
+
+
+@cli.group("notifications", no_args_is_help=True)
+def notification_commands() -> None:
+    """Configure the one owning chat; configuration never edits the board."""
+
+
+@notification_commands.command("status")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_obj
+def notification_status(context: CliContext, *, as_json: bool) -> None:
+    """Read recipient and enabled state through the running service."""
+    _print_notification_config(_notification_config(context), as_json=as_json)
+
+
+@notification_commands.command("target")
+@click.argument("thread_id", type=click.UUID)
+@click.pass_obj
+def notification_target(context: CliContext, thread_id: uuid.UUID) -> None:
+    """Replace the destination at milestone handoff, preserving enabled state."""
+    _print_notification_config(
+        _notification_config(context, {"action": "target", "threadId": str(thread_id)})
+    )
+
+
+@notification_commands.command("enable")
+@click.pass_obj
+def notification_enable(context: CliContext) -> None:
+    """Explicitly enable best-effort delivery for the configured recipient."""
+    _print_notification_config(_notification_config(context, {"action": "enable"}))
+
+
+@notification_commands.command("disable")
+@click.pass_obj
+def notification_disable(context: CliContext) -> None:
+    """Disable delivery without clearing the recipient."""
+    _print_notification_config(_notification_config(context, {"action": "disable"}))
 
 
 @cli.group("board", no_args_is_help=True)

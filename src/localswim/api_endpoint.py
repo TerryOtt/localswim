@@ -83,7 +83,15 @@ import urllib.parse
 import uuid
 from typing import TYPE_CHECKING, cast
 
-from . import activity_feed, attachments, board_state, service_output, service_ownership
+from . import (
+    activity_feed,
+    attachments,
+    board_state,
+    codex_signal,
+    notifications,
+    service_output,
+    service_ownership,
+)
 
 if TYPE_CHECKING:
     import socketserver
@@ -155,6 +163,8 @@ def build_id() -> str:
                 pathlib.Path(__file__).with_name("service_output.py"),
                 pathlib.Path(__file__).with_name("activity_feed.py"),
                 pathlib.Path(__file__).with_name("monitor_activity_client.py"),
+                pathlib.Path(__file__).with_name("notifications.py"),
+                pathlib.Path(__file__).with_name("codex_signal.py"),
                 pathlib.Path(__file__).with_name("workspace.js"),
                 pathlib.Path(__file__).with_name("workspace.css"),
             )
@@ -217,6 +227,8 @@ CODE_FILES = (
     pathlib.Path(__file__).with_name("service_output.py"),
     pathlib.Path(__file__).with_name("activity_feed.py"),
     pathlib.Path(__file__).with_name("monitor_activity_client.py"),
+    pathlib.Path(__file__).with_name("notifications.py"),
+    pathlib.Path(__file__).with_name("codex_signal.py"),
     pathlib.Path(__file__).with_name("workspace.js"),
     pathlib.Path(__file__).with_name("workspace.css"),
 )
@@ -500,7 +512,11 @@ class BoardHttpServer(http.server.ThreadingHTTPServer):
         self._reading: set[socket.socket] = set()
         self._drain_deadline: float | None = None
         self._drain_timer: threading.Timer | None = None
+        self._notification_store: BoardStore | None = None
         super().__init__(server_address, handler)
+        self._notification_store = STORE
+        if self._notification_store is not None:
+            self._notification_store.start_notifications()
 
     def process_request(
         self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
@@ -570,9 +586,13 @@ class BoardHttpServer(http.server.ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
-            if self._drain_timer is not None:
-                self._drain_timer.cancel()
-                self._drain_timer.join()
+            try:
+                if self._drain_timer is not None:
+                    self._drain_timer.cancel()
+                    self._drain_timer.join()
+            finally:
+                if self._notification_store is not None:
+                    self._notification_store.close_notifications()
 
 
 _shutdown_requested = threading.Event()
@@ -1228,6 +1248,7 @@ class BoardStore:
         policy: board_state.TransitionPolicy | None = None,
     ) -> None:
         self.path = path
+        self._notification_identity = service_ownership.board_identity(path)
         self._external_policy = policy is not None
         self._mutex = threading.RLock()
         self.admission_error: str | None = None
@@ -1236,10 +1257,82 @@ class BoardStore:
         self._admitted_policy: board_state.TransitionPolicy | None = None
         self._admitted_board: board_state.Board | None = None
         self._content_version: str | None = None
+        self._notifications: notifications.NotificationDispatcher | None = None
+        self._notification_config_lock = threading.Lock()
         self._board = self._admit(policy)
         self.policy = self._board.policy
         self._policy_observation: board_state.TransitionPolicy = self.policy
         self._monitor_feed = activity_feed.ActivityFeed(self.path, self._admitted_bytes or b"")
+
+    def start_notifications(self) -> None:
+        """Prepare the idle worker during service setup, before serving writes."""
+        if self._notifications is not None:
+            return
+        try:
+            self._notifications = notifications.NotificationDispatcher(
+                self._notification_identity, codex_signal.deliver
+            )
+        except Exception:  # noqa: BLE001 -- optional nudges cannot prevent board startup
+            self._notifications = None
+
+    def close_notifications(self) -> None:
+        """Drop best-effort pending work and bound worker cleanup at service exit."""
+        dispatcher, self._notifications = self._notifications, None
+        if dispatcher is not None:
+            with contextlib.suppress(Exception):
+                dispatcher.close(timeout=1)
+
+    def notification_settings(
+        self, action: str = "status", thread_id: str | None = None
+    ) -> notifications.NotificationSettings:
+        """Configure the service account's target without taking the board write lock."""
+        identity = self._notification_identity
+        with self._notification_config_lock:
+            if action == "status":
+                return notifications.load_settings(identity)
+            if action == "target":
+                return notifications.save_target(identity, thread_id)
+            if action == "enable":
+                if notifications.load_settings(identity).thread_id is None:
+                    raise ValueError("set a notification target before enabling delivery")
+                return notifications.set_enabled(identity, True)
+            if action == "disable":
+                return notifications.set_enabled(identity, False)
+        raise ValueError("unknown notification configuration action")
+
+    def _submit_notification(
+        self,
+        committed: board_state.Board,
+        events: list[board_state.JsonObject],
+        previous_project: str,
+    ) -> None:
+        """Hand off only small committed values; no settings or delivery I/O here."""
+        dispatcher = self._notifications
+        if dispatcher is None or (not events and committed.project == previous_project):
+            return
+        try:
+            instants = [
+                board_state.parse_activity_bound(str(event["at"]), "notification")
+                for event in events
+            ] or [dt.datetime.now(dt.UTC)]
+            tickets = {
+                value
+                for event in events
+                for key in ("ticket", "otherTicket", "parentFromTicket", "parentToTicket")
+                if type(value := event.get(key)) is int and value > 0
+            }
+            dispatcher.submit(
+                notifications.NotificationEvent(
+                    board_identity=self._notification_identity,
+                    label=" ".join(committed.project.split())[:160] or "localswim",
+                    since=min(instants).astimezone(dt.UTC).isoformat(),
+                    until=max(instants).astimezone(dt.UTC).isoformat(),
+                    tickets=tuple(sorted(tickets)[: notifications.MAX_TICKETS]),
+                    truncated=len(tickets) > notifications.MAX_TICKETS,
+                )
+            )
+        except Exception:  # noqa: BLE001 -- a committed edit remains successful if handoff fails
+            return
 
     @staticmethod
     def _verify_candidate(candidate: board_state.Board) -> bool:
@@ -1381,6 +1474,7 @@ class BoardStore:
         outcome: board_state.SaveOutcome | None = None,
         card_precondition: tuple[str, str] | None = None,
         card_response: tuple[str, dict[str, str]] | None = None,
+        notification_actor: str | None = None,
     ) -> tuple[str, int]:
         """Apply one command under the file lock and commit one new revision."""
         if outcome is not None:
@@ -1403,6 +1497,7 @@ class BoardStore:
                 # rather than trusting only the observation before acquiring it.
                 predecessor = self._monitor_feed.observe() and predecessor
                 history_position = activity_feed.position(candidate)
+                previous_project = candidate.project
                 if card_precondition is not None:
                     reference, expected_card = card_precondition
                     try:
@@ -1430,10 +1525,22 @@ class BoardStore:
                 predecessor = self._monitor_feed.observe() and predecessor
             # Replacement may succeed even when lock cleanup or publication raises.
             self._publish_candidate(committed)
+            events: list[board_state.JsonObject] = []
             try:
-                self._monitor_feed.publish(committed, history_position, predecessor=predecessor)
+                events = self._monitor_feed.publish(
+                    committed, history_position, predecessor=predecessor
+                )
             except Exception:  # noqa: BLE001 -- metadata cannot turn a committed command into refusal
                 self._monitor_feed.stamp = None
+            if (
+                notification_actor == committed.browser_user
+                and notification_actor != committed.cli_user
+                and any(
+                    user.id == notification_actor and user.user_class == board_state.HUMAN
+                    for user in committed.users
+                )
+            ):
+                self._submit_notification(committed, events, previous_project)
             return result, committed.revision
 
     def monitor_activity(
@@ -1457,7 +1564,9 @@ class BoardStore:
             raise board_state.BoardError("permission grants require an embedded board policy")
         actors, create, moves = permission_grant_specs(body)
         return self.execute(
-            expected, lambda board: board.grant_permissions(actors, create, moves, actor)
+            expected,
+            lambda board: board.grant_permissions(actors, create, moves, actor),
+            notification_actor=actor,
         )
 
     def upload(
@@ -1508,6 +1617,7 @@ class BoardStore:
                     outcome=outcome,
                     card_precondition=card_precondition,
                     card_response=card_response,
+                    notification_actor=actor,
                 )
             except BaseException as failure:
                 if created_path is not None and outcome.state == "uncommitted":
@@ -5688,7 +5798,7 @@ def execute_priority_batch(
         ]
         return result
 
-    result, revision = store.execute(expected, mutate)
+    result, revision = store.execute(expected, mutate, notification_actor=actor)
     response.update(result=result, revision=revision)
     return response
 
@@ -5738,7 +5848,11 @@ def execute_http_command(
         return result
 
     result, revision = store.execute(
-        expected, mutate, card_precondition=precondition, card_response=capture
+        expected,
+        mutate,
+        card_precondition=precondition,
+        card_response=capture,
+        notification_actor=actor,
     )
     return result, revision, effective_priority, None
 
@@ -5777,6 +5891,38 @@ def _command_error_response(error: ValueError | OSError) -> tuple[board_state.Js
     return {"error": str(error)}, code
 
 
+def finish_refused_post(handler: http.server.BaseHTTPRequestHandler) -> None:
+    """Deliver an early refusal before boundedly discarding unread TCP input.
+
+    Closing a socket with an unread POST body can reset the connection on Windows
+    before the client receives the refusal. Half-close the response first; never
+    parse, authorize or replay the discarded bytes. Buffered rfile bytes need no
+    draining because they have already left the kernel's receive buffer.
+    """
+    if handler.command != "POST":
+        return
+    handler.close_connection = True
+    connection = cast("socket.socket", handler.connection)
+    with contextlib.suppress(OSError):
+        handler.wfile.flush()
+        previous_timeout = connection.gettimeout()
+        connection.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + 0.2
+        remaining = 64 * 1024
+        try:
+            while remaining > 0:
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    break
+                connection.settimeout(budget)
+                chunk = connection.recv(min(8192, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        finally:
+            connection.settimeout(previous_timeout)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     """The page, the board, a timestamp to poll, the fonts, and three write routes."""
 
@@ -5788,7 +5934,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def finish(self) -> None:
         try:
-            super().finish()
+            try:
+                if getattr(self, "_refused_post", False):
+                    finish_refused_post(self)
+            finally:
+                super().finish()
         finally:
             if isinstance(self.server, BoardHttpServer):
                 self.server.finish_transport(self.connection)
@@ -5814,9 +5964,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.end_headers()
         self.wfile.write(body)
+        if code >= 400 and self.command == "POST":
+            # finish() runs after do_POST releases the mutation admission gate.
+            self.close_connection = True
+            self._refused_post = True
 
     def _json(self, obj: object, code: int = 200) -> None:
         self._send(json.dumps(obj).encode("utf-8"), "application/json", code)
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        """Apply the same close boundary to parser and unknown-route refusals."""
+        super().send_error(code, message, explain)
+        if self.command == "POST":
+            self._refused_post = True
 
     def _redirect(self, location: str) -> None:
         self.send_response(307)
@@ -5874,6 +6034,60 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return int(raw)
         except ValueError:
             return None
+
+    def _notifications_request(self, *, write: bool = False) -> None:
+        """Read or replace one recipient through the CLI credential only."""
+        if self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
+            self._json({"error": "notification configuration requires the CLI credential"}, 401)
+            return
+        store = STORE
+        if store is None:
+            self._json({"error": "board service is not initialized"}, 503)
+            return
+        action, target = "status", None
+        if write:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= notifications.MAX_CONFIG_BYTES:
+                    raise ValueError
+            except ValueError:
+                self._json({"error": "notification configuration body exceeds its bound"}, 400)
+                return
+            body = self._read_json(unique_fields=True)
+            if body is None or not self._admit_transport():
+                return
+            if body.get("action") == "target" and set(body) == {"action", "threadId"}:
+                target = body["threadId"]
+                try:
+                    if not isinstance(target, str) or str(uuid.UUID(target)) != target:
+                        raise ValueError
+                except ValueError, AttributeError:
+                    self._json(
+                        {"error": "notification target must be a canonical thread UUID"}, 409
+                    )
+                    return
+                action = "target"
+            elif set(body) == {"action"} and body["action"] in ("enable", "disable"):
+                action = cast("str", body["action"])
+            else:
+                self._json({"error": "invalid notification configuration action"}, 409)
+                return
+        try:
+            settings = store.notification_settings(action, target)
+        except notifications.NotificationConfigError, OSError:
+            self._json({"error": "notification settings unavailable"}, 503)
+            return
+        except ValueError as error:
+            self._json({"error": str(error)}, 409)
+            return
+        self._json(
+            {
+                "schema": 1,
+                "boardIdentity": settings.board_identity,
+                "threadId": settings.thread_id,
+                "enabled": settings.enabled,
+            }
+        )
 
     def _attachment_get(self, route: str) -> None:
         """Serve only an active card attachment, forcing generic files to download."""
@@ -6000,6 +6214,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             )
         elif route == API_PREFIX + "/monitor-activity":
             self._monitor_activity_get()
+        elif route == API_PREFIX + "/notifications":
+            self._notifications_request()
         elif route == API_PREFIX + "/browser-session":
             if STORE is None:
                 raise board_state.BoardError("board store is not initialized")
@@ -6136,11 +6352,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None, None
         return self._read_json(unique_fields=is_permissions), expected_card
 
+    def _control_post(self, route: str) -> bool:
+        if route == API_PREFIX + "/notifications":
+            self._notifications_request(write=True)
+            return True
+        if route == API_PREFIX + "/shutdown":
+            self._shutdown_post()
+            return True
+        return False
+
     def do_POST(self) -> None:  # explicit REST dispatch
         """Execute one authenticated, revision-checked domain command."""
         route = self.path.partition("?")[0]
-        if route == API_PREFIX + "/shutdown":
-            self._shutdown_post()
+        if self._control_post(route):
             return
         parts = [urllib.parse.unquote(part) for part in route.strip("/").split("/")]
         command_parts = parts[len(API_PARTS) :] if parts[: len(API_PARTS)] == API_PARTS else []

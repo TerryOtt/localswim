@@ -363,8 +363,10 @@ def test_response_captured_before_another_writer_commit(
         current: api_endpoint.BoardStore,
         expected: int,
         command: Callable[[board_state.Board], str],
+        *,
+        notification_actor: str | None = None,
     ) -> tuple[str, int]:
-        result = original(current, expected, command)
+        result = original(current, expected, command, notification_actor=notification_actor)
         original(current, result[1], lambda candidate: candidate.set_priority("a", "P0", "terry"))
         return result
 
