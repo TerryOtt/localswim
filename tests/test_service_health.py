@@ -65,16 +65,20 @@ class ProbeConnection:
             raise self.error
 
 
-def install_connection(monkeypatch: pytest.MonkeyPatch, connection: ProbeConnection) -> None:
+def install_connection(
+    monkeypatch: pytest.MonkeyPatch, connection: ProbeConnection, *, timeout: int = 1
+) -> None:
+    expected_timeout = timeout
+
     def connect(host: str, port: int, *, timeout: int) -> ProbeConnection:
-        assert (host, port, timeout) == ("127.0.0.1", 12345, 1)
+        assert (host, port, timeout) == ("127.0.0.1", 12345, expected_timeout)
         return connection
 
     monkeypatch.setattr(service_ownership.http.client, "HTTPConnection", connect)
 
 
 def assert_private(result: service_ownership.ServiceHealth, path: pathlib.Path) -> None:
-    serialized = json.dumps(result.to_json())
+    serialized = json.dumps(result.to_json()) + repr(result)
     assert SENTINEL not in serialized
     assert str(path) not in serialized
     assert "boardIdentity" not in serialized
@@ -424,3 +428,158 @@ def test_monitor_discovery_failure_is_unresolved(tmp_path: pathlib.Path) -> None
     assert result.probe_mode == "discovery"
     assert result.phase == "descriptor_read"
     assert_private(result, tmp_path / SENTINEL)
+
+
+@pytest.mark.parametrize("advertised", [False, True])
+def test_cli_preflight_returns_same_descriptor_after_single_admission_probe(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, advertised: bool
+) -> None:
+    path = tmp_path / SENTINEL / "board.json"
+    write_descriptor(path, monitor=advertised)
+    descriptor = service_ownership.service_descriptor(path, require_cli_token=True)
+    reads = 0
+
+    def read_once(board: pathlib.Path) -> board_state.JsonValue:
+        nonlocal reads
+        assert board == path
+        reads += 1
+        return descriptor
+
+    monkeypatch.setattr(service_ownership, "read_service_metadata", read_once)
+    connection = ProbeConnection(
+        json.dumps({"boardIdentity": service_ownership.board_identity(path)}).encode()
+    )
+    install_connection(monkeypatch, connection, timeout=5)
+    raw, result = service_ownership.probe_cli_preflight(path)
+    assert raw is descriptor
+    assert reads == 1
+    assert result.healthy
+    assert result.probe_mode == "cli_preflight"
+    assert connection.requests == [("GET", "/api/v001/browser-session")]
+    assert connection.read_limits == [service_ownership.MAX_METADATA_BYTES + 1]
+    assert connection.closed
+    assert_private(result, path)
+
+
+@pytest.mark.parametrize("token", [None, "", True, 1, {}, []])
+def test_cli_preflight_requires_existing_cli_token_contract(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, token: board_state.JsonValue
+) -> None:
+    path = tmp_path / SENTINEL
+    write_descriptor(path)
+    descriptor = board_state.service_descriptor_path(path)
+    metadata = json.loads(descriptor.read_text(encoding="utf-8"))
+    metadata["token"] = token
+    descriptor.write_text(json.dumps(metadata), encoding="utf-8")
+    connection = ProbeConnection(b"{}")
+    install_connection(monkeypatch, connection, timeout=5)
+    raw, result = service_ownership.probe_cli_preflight(path)
+    assert raw is None
+    assert (result.phase, result.code, result.probe_mode) == (
+        "descriptor_validation",
+        "descriptor_invalid",
+        "cli_preflight",
+    )
+    assert not connection.requests
+    assert_private(result, path)
+
+
+@pytest.mark.parametrize(
+    "error,phase,error_type",
+    [
+        (FileNotFoundError(SENTINEL), "descriptor_read", "missing"),
+        (PermissionError(SENTINEL), "descriptor_read", "permission"),
+        (OSError(SENTINEL), "descriptor_read", "os_error"),
+        (ValueError(SENTINEL), "descriptor_validation", "invalid_metadata"),
+        (RecursionError(SENTINEL), "descriptor_validation", "recursion_error"),
+    ],
+)
+def test_cli_preflight_descriptor_failures_return_only_safe_health(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    phase: str,
+    error_type: str,
+) -> None:
+    path = tmp_path / SENTINEL
+
+    def fail(_path: pathlib.Path) -> board_state.JsonValue:
+        raise error
+
+    monkeypatch.setattr(service_ownership, "read_service_metadata", fail)
+    raw, result = service_ownership.probe_cli_preflight(path)
+    assert raw is None
+    assert result.phase == phase
+    assert result.error_type == error_type
+    assert result.probe_mode == "cli_preflight"
+    assert_private(result, path)
+
+
+@pytest.mark.parametrize("stage", ["connect_request", "response_headers", "response_read"])
+@pytest.mark.parametrize(
+    "error,error_type",
+    [
+        (TimeoutError(SENTINEL), "timeout"),
+        (ConnectionRefusedError(SENTINEL), "connection_refused"),
+        (ConnectionResetError(SENTINEL), "connection_reset"),
+        (http.client.IncompleteRead(SENTINEL.encode()), "http_error"),
+    ],
+)
+def test_cli_preflight_transport_failures_do_not_retry_or_return_descriptor(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    error: Exception,
+    error_type: str,
+) -> None:
+    path = tmp_path / SENTINEL
+    write_descriptor(path)
+    connection = ProbeConnection(b"{}")
+    connection.stage, connection.error = stage, error
+    install_connection(monkeypatch, connection, timeout=5)
+    raw, result = service_ownership.probe_cli_preflight(path)
+    assert raw is None
+    assert result.phase == stage
+    assert result.error_type == error_type
+    assert result.probe_mode == "cli_preflight"
+    assert connection.requests == [("GET", "/api/v001/browser-session")]
+    assert connection.closed
+    assert_private(result, path)
+
+
+@pytest.mark.parametrize(
+    "body,status,stage,phase",
+    [
+        (b"[", 200, None, "metadata_decode"),
+        (b" " * 65537, 200, None, "metadata_decode"),
+        (b"{}", 503, None, "http_status"),
+        (b"{}", 200, None, "metadata_validation"),
+        (b'{"boardIdentity":"other"}', 200, None, "identity"),
+        (None, 200, "response_close", "response_close"),
+        (b"[", 200, "response_close", "metadata_decode"),
+    ],
+)
+def test_cli_preflight_response_or_close_failure_hides_descriptor(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes | None,
+    status: int,
+    stage: str | None,
+    phase: str,
+) -> None:
+    path = tmp_path / SENTINEL
+    write_descriptor(path)
+    if body is None:
+        body = json.dumps({"boardIdentity": service_ownership.board_identity(path)}).encode()
+    connection = ProbeConnection(body, status)
+    connection.stage = stage
+    install_connection(monkeypatch, connection, timeout=5)
+    raw, result = service_ownership.probe_cli_preflight(path)
+    assert raw is None
+    assert not result.healthy
+    assert result.phase == phase
+    assert result.http_status == status
+    assert result.probe_mode == "cli_preflight"
+    assert connection.requests == [("GET", "/api/v001/browser-session")]
+    assert connection.closed
+    assert_private(result, path)

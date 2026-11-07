@@ -874,6 +874,16 @@ An explicit revision skips the snapshot revision fetch, but still requires that
 identity check. CLI commands continue to use the CLI credential; reading session
 identity does not grant browser authority.
 
+A refused CLI identity preflight appends `; preflight=<JSON>` to the existing
+`nothing changed` error. The JSON reports the original check's phase, fixed
+code/error category, elapsed milliseconds, `cli_preflight` probe mode, and
+validated port/HTTP status when available. It excludes descriptor contents,
+paths, credentials, response bodies and raw exception text. The check still uses
+one admission-aware browser-session GET with the existing five-second socket
+timeout. Failure stops dispatch; diagnostics add no retry or follow-up probe.
+Later revision-fetch errors and uncertain POST outcomes retain their separate
+messages and must not be interpreted as preflight failures.
+
 Descriptor files must be regular files. Service-acquisition descriptor, browser-session
 and status metadata reads are limited to 64 KiB and reject malformed or excessively
 nested JSON.

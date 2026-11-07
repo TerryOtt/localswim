@@ -213,6 +213,13 @@ native board monitoring is an optional extra.
   Preserve known refusal status if its body is unreadable; unusable successful
   mutation and shutdown results require unknown-outcome inspection before retry.
   Never replay a POST to obtain a readable result.
+  CLI preflight failures append sanitized `preflight` JSON from that original
+  check: fixed phase/code/error category, elapsed milliseconds, probe mode and
+  validated port/status only. Preserve its five-second admission-aware identity
+  GET and required CLI token validation. Diagnostics must not add a retry,
+  follow-up probe or authenticated dispatch after failure. Keep later revision
+  reads and uncertain POST outcomes distinct; never expose paths, credentials,
+  raw response bodies or exception text in preflight metadata.
   Serialize endpoint recovery per canonical board. Keep child/launch-ID bookkeeping
   brief; never wait for board acquisition, network, process startup or cleanup under
   that shared lock. Explicit close freezes new acquisitions and retains each exact

@@ -71,7 +71,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
-from http import HTTPStatus
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Self, cast
 
@@ -4654,27 +4653,12 @@ def _service_descriptor(path: pathlib.Path) -> JsonObject:
     """Validate board-bound metadata and live identity before any CLI dispatch."""
     from . import service_ownership  # ownership imports board types
 
-    try:
-        raw = service_ownership.service_descriptor(path, require_cli_token=True)
-        connection = http.client.HTTPConnection("127.0.0.1", cast("int", raw["port"]), timeout=5)
-        try:
-            connection.request("GET", API_PREFIX + "/browser-session")
-            response = connection.getresponse()
-            session = service_ownership.decode_service_metadata(
-                response.read(service_ownership.MAX_METADATA_BYTES + 1)
-            )
-            if (
-                response.status != HTTPStatus.OK
-                or not isinstance(session, dict)
-                or session.get("boardIdentity") != service_ownership.board_identity(path)
-            ):
-                raise ValueError("service board identity mismatch")
-        finally:
-            connection.close()
-    except (OSError, ValueError, http.client.HTTPException) as exc:
+    raw, health = service_ownership.probe_cli_preflight(path)
+    if not health.healthy or raw is None:
         raise BoardError(
             "board service is not running or its metadata/identity is unavailable; nothing changed"
-        ) from exc
+            "; preflight=" + json.dumps(health.to_json(), sort_keys=True)
+        )
     return raw
 
 

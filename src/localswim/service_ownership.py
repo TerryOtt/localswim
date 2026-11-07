@@ -317,7 +317,9 @@ HEALTH_ERROR_TYPES = frozenset(
         "recursion_error",
     }
 )
-HEALTH_PROBE_MODES = frozenset({"readiness", "lifecycle_identity", "legacy_readiness", "discovery"})
+HEALTH_PROBE_MODES = frozenset(
+    {"readiness", "lifecycle_identity", "legacy_readiness", "discovery", "cli_preflight"}
+)
 
 
 @dataclass(frozen=True)
@@ -395,18 +397,28 @@ def _health_error_type(error: BaseException) -> str:
 
 def probe_service_health(path: pathlib.Path) -> ServiceHealth:
     """Identify the failed stage of the existing bounded correct-board GET probe."""
-    return _probe_health(path, lifecycle=False)
+    return _probe_health(path, lifecycle=False)[1]
 
 
 def probe_monitor_lifecycle(path: pathlib.Path) -> ServiceHealth:
     """Probe advertised immutable identity, falling back only for legacy services."""
-    return _probe_health(path, lifecycle=True)
+    return _probe_health(path, lifecycle=True)[1]
 
 
-def _probe_health(path: pathlib.Path, *, lifecycle: bool) -> ServiceHealth:
+def probe_cli_preflight(
+    path: pathlib.Path,
+) -> tuple[board_state.JsonObject | None, ServiceHealth]:
+    """Return a CLI-capable descriptor only after its admission-aware identity probe."""
+    return _probe_health(path, lifecycle=False, cli_preflight=True)
+
+
+def _probe_health(
+    path: pathlib.Path, *, lifecycle: bool, cli_preflight: bool = False
+) -> tuple[board_state.JsonObject | None, ServiceHealth]:
     started = time.monotonic()
     phase = "descriptor_read"
-    probe_mode = "discovery" if lifecycle else "readiness"
+    probe_mode = "cli_preflight" if cli_preflight else "discovery" if lifecycle else "readiness"
+    descriptor: board_state.JsonObject | None = None
     port: int | None = None
     http_status: int | None = None
     connection: http.client.HTTPConnection | None = None
@@ -431,7 +443,7 @@ def _probe_health(path: pathlib.Path, *, lifecycle: bool) -> ServiceHealth:
             phase = "descriptor_validation"
             raise
         phase = "descriptor_validation"
-        descriptor = _validate_service_descriptor(path, raw)
+        descriptor = _validate_service_descriptor(path, raw, require_cli_token=cli_preflight)
         port = cast("int", descriptor["port"])
         endpoint = board_state.API_PREFIX + "/browser-session"
         if lifecycle:
@@ -445,7 +457,9 @@ def _probe_health(path: pathlib.Path, *, lifecycle: bool) -> ServiceHealth:
             else:
                 probe_mode = "legacy_readiness"
         phase = "connect_request"
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", port, timeout=5 if cli_preflight else 1
+        )
         connection.request("GET", endpoint)
         phase = "response_headers"
         response = connection.getresponse()
@@ -472,7 +486,8 @@ def _probe_health(path: pathlib.Path, *, lifecycle: bool) -> ServiceHealth:
                 if phase == "complete":
                     phase = "response_close"
                     failure_type = _health_error_type(error)
-    return result(failure_type)
+    health = result(failure_type)
+    return (descriptor if health.healthy else None), health
 
 
 def _valid_probe_metadata(metadata: board_state.JsonValue, probe_mode: str) -> bool:
