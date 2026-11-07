@@ -94,12 +94,13 @@ uv run --frozen pytest -q `
 Do not invoke `.venv/Scripts/...` directly. See `AGENTS.md` for the Git sandbox flags,
 full gate, publishing authority, and project invariants.
 
-## Optional monitor dependency decision
+## Retired legacy watcher commands
 
-The shared board monitor uses the explicitly selected `watchfiles==1.3.0` MIT
-package for native filesystem notifications. It is isolated in the `monitor` extra
-so Click remains the sole core runtime dependency. Install with
-`uv sync --locked --extra monitor` for checkout use or
-`uv tool install 'localswim[monitor]'` for the installed command. Its transitive
-dependencies are pinned in `uv.lock`. Importing core localswim modules does not
-require the extra; invoking monitoring without it reports an installation hint.
+Legacy watcher and pool commands and the optional native watching dependency are
+removed. Use `uv sync --locked` for the project environment; there is no monitor
+extra to install. Stale watcher launchers and module invocations fail immediately
+with guidance to use shared `localswim-cli BOARD notifications` commands.
+
+Built-in owner notifications and the bounded `activity monitor-between` metadata
+query remain part of the core package. Retirement preserves legacy runtime files
+and historical qualification evidence; it does not activate notifications.

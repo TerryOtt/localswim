@@ -4,7 +4,7 @@
 
 localswim is a Python 3.15 application, built and run with uv, that serves a local
 swimlane board from one JSON snapshot. Click is its sole core runtime dependency;
-native board monitoring is an optional extra.
+legacy watcher commands and their optional native watching dependency are removed.
 
 - `src/localswim/board_state.py` owns the board model, validation, serialization,
   policy checks, storage helpers, and reporting primitives.
@@ -12,7 +12,7 @@ native board monitoring is an optional extra.
   bounded file validation, safe storage paths, and immutable file integrity.
 - `src/localswim/notifications.py` owns opt-in service-owned notification settings and the
   bounded in-memory worker; `codex_signal.py` owns one public Codex queue delivery.
-- `src/localswim/monitor.py` owns optional shared board-write monitoring and graceful reload.
+- `src/localswim/monitor.py` retains only the retired watcher refusal entry point.
 - `src/localswim/cli.py` owns the Click command tree and command-to-service boundary.
 - `src/localswim/api_endpoint.py` owns the loopback HTTP service and its embedded
   browser UI. It is the sole writer while a board is live.
@@ -494,9 +494,10 @@ listener closes (one in-flight read may finish); the first returning view wakes 
 producers and resnapshots. A five-second heartbeat performs no JSON I/O and does not
 confirm sync. Preserve bounded latest-only
 process memory without journal, deltas or replay. On shutdown wake streams, close
-upstream connections and join workers before releasing the writer lease. Display Last
-confirmed sync as the time the browser last accepted and rendered an authoritative
-snapshot, independently of connection state, with fixed-width fields and at least
+upstream connections and join workers before releasing the writer lease. Show the
+connection indicator green while the stream is open and for ten seconds after a
+disconnection; repeated failed reconnects do not extend that grace. Surface board
+read errors independently. Keep the clock and fixed-width time fields with at least
 two hour digits. Server readAt is a separate successful file-read/admission diagnostic.
 Admission reuse requires identical observed bytes and accepted policy; metadata alone
 cannot hide timestamp-preserving invalid edits.
@@ -627,7 +628,7 @@ uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD no
   start/connect request, set target, enable and verify status. At milestone handoff,
   retarget to the authorized new owner and verify. Target preserves enabled state;
   disable retains the target. No optional monitor extra or second process is needed.
-- Honor explicit shutdown. Production notifications and legacy monitors stay off
+- Honor explicit shutdown. Production notifications stay off
   until Terry requests activation; documentation changes, service restarts and board
   launches alone do not enable delivery. An explicit start/connect request supplies
   activation authority without another confirmation.
@@ -644,9 +645,9 @@ uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD no
 - A notice does not authorize work past ticket gates. Inspect sanitized activity
   metadata first using its interval/tickets, then focused cards as needed. Proven
   complete, nonempty Bot-only activity requires no card inspection or work resumption.
-- Legacy watchers/pools are compatibility-only. Keep them off, preserve existing
-  target/cursor/pending/lock files, and use their documented cooperative lifecycle
-  only when separately authorized. Do not run both notification paths for one board.
+- Legacy watcher startup is retired. Preserve existing
+  target/cursor/pending/lock files. Legacy startup and stop commands are removed;
+  use the service-owned notification path.
 - Shared service source belongs to this maintainer. Other projects keep runtime,
   test outputs, caches and worktrees outside `C:\Projects\localswim`; their launchers
   and CLI commands must delegate to the shared implementation.
@@ -661,65 +662,23 @@ duplicate. Board reads and mutations go through `localswim-cli`, never a direct 
 edit. The service runs with `--autopush` because this board's private state-store
 repository is its durable snapshot.
 
-Production monitors stay off. Honor explicit shutdown: never restart a monitor merely
-because the board service is running. Preserve target, cursor, pending alerts and locks.
-For explicitly authorized legacy compatibility work only, use `uv sync --frozen
---extra monitor` and `uv run --frozen --extra monitor localswim-monitor-pool --manifest FILE`
-from `C:\Projects\localswim`. These commands are not the built-in owner path.
-Keep active global tool environments intact; use that shared runner in the detached
-task wrapper. For multiple boards, use the released pool with a schema-1 manifest
-of existing single-board argument arrays (maximum 1 MiB/256 members). Board, status,
-target, lifetime-lock and derived request-lock paths must be distinct and alias checked.
-Polling requires explicit `--allow-polling`; backend choice is exposed. `--stop`
-cooperatively drains only exact owner UUIDs in the manifest. Migrate only after release
-and explicit authorization, preserving original thread targets and state; never
-force-kill owners.
+Legacy watcher and pool commands, implementations and optional native watching
+dependency are removed. The old modules are refusal stubs solely so stale launchers
+and module invocations fail clearly and immediately. Every invocation, including
+help, reload, polling and stop requests, must fail before input parsing or runtime
+side effects. Do not add an opt-out or compatibility startup path. Use shared
+`localswim-cli BOARD notifications` commands.
 
-The single-board `localswim-monitor` remains available. Use the shared installed
-command or `uv run --frozen --extra monitor localswim-monitor` in this checkout.
-Keep its board-specific thread target, port and distinct runtime paths. Launch detached
-and hidden with regular stdout/stderr log files established before Python starts. The
-helper handles unsafe pipes; this does not change the pre-interpreter boundary. Use
-cooperative reload after package updates only when authorized; preserve targets,
-cursors and pending alerts. Never force-terminate legacy watchers; follow their
-documented graceful lifecycle.
+Preserve existing target, cursor, pending-alert, status and persistent lock files.
+Retirement does not migrate settings, modify boards or kill processes. Historical
+qualification reports retain their original source/protocol binding.
 
-Use an OS-owned on-demand Task Scheduler task for a Windows background pool,
-without an automatic login trigger unless explicitly requested. Keep its wrapper
-and private logs outside shared source. Creating or starting that task requires
-explicit activation authority; this implementation leaves production monitors off.
-
-The monitor never reads board content. Debounce defaults to 15 seconds; bounded
-activity queries and delivery are serial and independent of filesystem intake. Lifecycle
-and cheap metadata reconciliation run every 30 seconds, with no idle filesystem reads.
-Attribution uses `localswim-cli BOARD activity monitor-between START END --json
-[--cursor CURSOR]` for bounded writer-owned metadata without board parsing or browser
-preflight. Only complete, nonempty all-automation results suppress alerts; unknown,
-empty, incomplete and failed queries alert. Keep legacy `activity between` available.
-The writer records a post-commit byte verification read. Metadata covers committed and
-admitted state, has in-memory ring gaps, and fails open after restart; it is not a durable
-journal and cannot recover unsupported transient manual JSON writes overwritten outside
-the writer protocol. Never assume one notification per activity event.
-
-During handoff, `lastObservationStartedAt` is an additive conservative pre-stat overlap
-lower bound. Preserve the strict pending invariant: pending end equals
-`lastSignatureAt`. Retain bounded health diagnostics and avoid descriptor bodies,
-credentials, tokens and raw errors in logs. For queued alerts, inspect activity metadata
-first; proven automation-only events need no card inspection or work resumption. Preserve
-Terry's alerts.
-
-Ordinary startup takes the lifetime lock before validating saved same-board status.
-Refuse foreign, unreadable or inconsistent metadata without overwriting it. Retain
-pending intervals and signature gaps; never discard uncertainty to force startup.
-Queue acknowledgement before status persistence creates an at-least-once duplicate
-window. Do not promise exactly-once or power-loss delivery.
-
-Cooperative reload binds PID and owner UUID. Preserve each request UUID across
-retries/timeout cleanup and never replace a newer retarget, reload, drain or stop
-request. Serialize target read/modify/write through the persistent derived
-`<target path>.lock`, distinct from board/status/target/lifetime-lock paths. Never
-unlink either lock. Pre-UUID legacy owners retain only their documented historical
-graceful upgrade path; do not invent forced migration.
+Keep `localswim-cli BOARD activity monitor-between START END --json [--cursor CURSOR]`
+and `monitor_activity_client.py` for bounded sanitized metadata. Already queued
+alerts require metadata-first inspection: only complete, nonempty all-automation
+results prove Bot-only activity. Empty, unknown, incomplete and failed results do
+not; preserve Terry's alerts and normal ticket gates. Do not assume one activity
+event per filesystem write.
 
 ## Git in the Codex sandbox
 

@@ -149,16 +149,19 @@ def test_optimistic_intents_recover_without_blind_replay(mode: str) -> None:
 STREAM_DRIVER = r"""
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const input=JSON.parse(fs.readFileSync(0,'utf8'));let calls=[],waiters=[],paints=0;
-const context=vm.createContext({AbortController,AbortSignal,queueMicrotask,Date,
+const nodes=new Map();function el(id){if(!nodes.has(id))nodes.set(id,{textContent:'',classList:{shown:false,add(){this.shown=true},toggle(k,v){this.shown=v}}});return nodes.get(id)}
+const context=vm.createContext({AbortController,AbortSignal,queueMicrotask,Date,document:{getElementById:el},
  window:{workspaceEpoch:1},API_PREFIX:'/one',pollingEpoch:null,pollingController:null,pollingQueued:false,
  queuedMeta:null,queuedForce:false,lastOk:0,seen:'same',fileMs:0,data:{},authoritativeData:null,
- serverBuild:null,codeStale:false,restarting:false,restartProblem:null,pushState:null,streamBoardError:false,
- streamConnected:false,streamLastMessage:0,
- HAY:{clear(){}},paint(){paints++},restoreStaleReloadState(){},renderLive(){},
+ serverBuild:null,codeStale:false,restarting:false,restartProblem:null,pushState:null,streamBoardError:null,
+ streamConnected:false,streamClosedAt:null,
+ HAY:{clear(){}},paint(){paints++;vm.runInContext("renderBoardBanner()",context)},restoreStaleReloadState(){},renderLive(){},
  acknowledgeSnapshot(value){if(value.revision<2)return false;context.authoritativeData=value;return true},
  projectActions(value){return {...value,optimistic:true}},
  apiGet(path,signal){calls.push({path,signal});return new Promise(resolve=>waiters.push(resolve));}
 });
+const bannerStart=input.page.indexOf('function renderBoardBanner()'),bannerEnd=input.page.indexOf('function paint()',bannerStart);
+vm.runInContext(input.page.slice(bannerStart,bannerEnd),context);
 const start=input.page.indexOf('async function tick('),end=input.page.indexOf('\ntick();',start);
 vm.runInContext(input.page.slice(start,end),context);
 const run=code=>vm.runInContext(code,context), settle=()=>new Promise(resolve=>setImmediate(resolve));
@@ -170,6 +173,12 @@ const run=code=>vm.runInContext(code,context), settle=()=>new Promise(resolve=>s
   const pending=run("tick(false,{ok:true,contentVersion:'new'})");
   waiters.shift()({revision:2,lanes:[]});await pending;
   assert.equal(context.seen,'new');assert.ok(context.lastOk>0);assert.equal(context.data.optimistic,true);
+ }else if(input.mode==='board-error'){
+  await run("tick(false,{ok:false,error:'read failed'})");
+  assert.equal(el('banner').classList.shown,true);assert.equal(el('banner-body').textContent,'read failed');
+  run('paint()');assert.equal(el('banner').classList.shown,true);
+  assert.equal(el('banner-body').textContent,'read failed');
+  await run("tick(false,{ok:true,contentVersion:'same'})");assert.equal(el('banner').classList.shown,false);
  }else if(input.mode==='reconnect'){
   run("streamMessage({type:'connection',connected:true})");
   assert.equal(calls.length,1);assert.equal(calls[0].path,'/one/board');
@@ -198,7 +207,9 @@ const run=code=>vm.runInContext(code,context), settle=()=>new Promise(resolve=>s
 """
 
 
-@pytest.mark.parametrize("mode", ["conditional", "reconnect", "navigation", "cas", "coalesced"])
+@pytest.mark.parametrize(
+    "mode", ["conditional", "reconnect", "navigation", "cas", "coalesced", "board-error"]
+)
 def test_push_snapshots_preserve_navigation_cas_and_confirmed_sync(mode: str) -> None:
     node = shutil.which("node")
     if node is None:
@@ -411,9 +422,12 @@ for(const t of tabs){
  assert.equal(t.sources.filter(s=>!s.closed).length,1);
  const old=t.sources.at(-1);assert.equal(old.url,'/api/v001/workspace/events?board=one%2Fboard');
  old.onopen();assert.equal(t.messages.at(-1).connected,true);
+ const beforeMalformed=t.messages.length;old.listeners.status({data:'invalid'});
+ assert.equal(t.messages.length,beforeMalformed);
  old.onerror();assert.equal(t.messages.at(-1).connected,false);
  old.onopen();assert.equal(t.messages.at(-1).connected,true);
  t.window.BoardStream.select('two');assert.equal(old.closed,true);
+ assert.equal(t.messages.at(-1).connected,false);
  const count=t.messages.length;
  old.listeners.board({data:JSON.stringify({board:'one/board',status:{ok:true}})});
  old.onopen();assert.equal(t.messages.length,count);
@@ -421,8 +435,8 @@ for(const t of tabs){
  const selected=t.sources.at(-1);
  selected.listeners.board({data:JSON.stringify({board:'two',status:{ok:true}})});
  assert.equal(t.messages.at(-1).value.board,'two');
- t.handlers.pagehide();assert.equal(selected.closed,true);
- selected.onopen();assert.equal(t.messages.length,count+1);
+ t.handlers.pagehide();assert.equal(selected.closed,true);assert.equal(t.messages.at(-1).connected,false);
+ selected.onopen();assert.equal(t.messages.length,count+2);
  t.handlers.pageshow({persisted:true});assert.equal(t.sources.filter(s=>!s.closed).length,1);
 }
 assert.equal(tabs.flatMap(t=>t.sources).filter(s=>!s.closed).length,3);
@@ -472,7 +486,7 @@ const context=vm.createContext({Date:{now:()=>now},TypeError,Error,
  pinRetryAt:0,pinFailure:'',pinFailurePermanent:false,
  showWorkspaceStatus(){},projectPins(){},persist(){},renderRows(){},announce(){},
  async savePinCommand(){attempts++;if(attempts===1)throw new TypeError('offline')},
- streamLastMessage:0,window:{WorkspaceUI:{}},renderLive(){}});
+ streamClosedAt:null,window:{WorkspaceUI:{}},renderLive(){}});
 function section(source,start,end){return source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)))}
 vm.runInContext(section(input.workspace,'  async function flushPinCommands()',
  '  function queuePinCommand('),context);
@@ -515,7 +529,7 @@ def test_heartbeat_retries_only_pending_pins_after_existing_backoff() -> None:
 RECOVERY_DRIVER = r"""
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const input=JSON.parse(fs.readFileSync(0,'utf8'));let selections=0,ticks=[],errors=[];
-const context=vm.createContext({Date,streamConnected:false,streamLastMessage:0,
+const context=vm.createContext({Date,streamConnected:false,streamClosedAt:null,
  recoverOnCatalog:false,current:'one',catalog:[{key:'one'}],window:{workspaceReady:false},
  select(key,history){selections++;assert.equal(key,'one');assert.equal(history,'none');
    context.window.workspaceReady=true;context.recoverOnCatalog=false;ticks.push({force:true})},
@@ -559,3 +573,67 @@ def test_healthy_stream_recovers_transient_surface_without_replaying_mutations()
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok"
     assert "window.WorkspaceUI.error(message, true)" in api_endpoint.PAGE
+
+
+STATUS_STREAM_DRIVER = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));let now=1000;
+const sources=[],handlers={};class EventSource {constructor(){this.listeners={};sources.push(this)}
+ close(){} addEventListener(type,fn){this.listeners[type]=fn}}
+const elements=new Map();
+function el(id){if(!elements.has(id))elements.set(id,{textContent:'',title:'',dataset:{},
+ className:'',classList:{values:new Set(),toggle(k,v){v?this.values.add(k):this.values.delete(k)},
+ add(k){this.values.add(k)},remove(k){this.values.delete(k)}}});return elements.get(id)}
+const context=vm.createContext({Date:{now:()=>now},document:{getElementById:el},
+ window:{WorkspaceUI:null,addEventListener(type,fn){handlers[type]=fn}},EventSource,JSON,encodeURIComponent,
+ streamConnected:false,streamClosedAt:null,STREAM_GRACE_MS:10000,
+ lastOk:0,fileMs:0,serverBuild:null,codeStale:false,restarting:false,restartProblem:null,
+ pushState:null,PAGE_BUILD:'test',clockOf:()=>[1,':00'],agoOf:()=>[1,'second'],
+ clearStaleReloadMarker(){},tick(){},reloadForServerBuild(){return false}});
+function section(start,end){return input.page.slice(input.page.indexOf(start),input.page.indexOf(end,input.page.indexOf(start)))}
+vm.runInContext(section('function renderLive()', '// Push-driven snapshots:'),context);
+vm.runInContext(section('function streamMessage(', '\ntick();'),context);
+const message=connected=>vm.runInContext(`streamMessage({type:'connection',connected:${connected}})`,context);
+const render=()=>vm.runInContext('renderLive()',context);
+message(true);assert.equal(el('badge').textContent,'CONNECTED');assert(el('dot').classList.values.has('alive'));
+now=1000000;render();assert.equal(el('badge').textContent,'CONNECTED');
+message(false);now+=9999;render();assert.equal(el('badge').textContent,'CONNECTED');
+message(false);now++;render();assert.equal(el('badge').textContent,'RECONNECTING');
+message(true);assert.equal(el('badge').textContent,'CONNECTED');
+assert(!el('live').title.includes('Last confirmed sync'));
+assert(![...elements.keys()].some(id=>id.startsWith('live-read')));
+assert(!input.page.includes('Last confirmed sync'));assert(input.page.includes('id="live-clock"'));
+vm.runInContext(input.source,context);
+context.window.BoardStream.start('workspace',m=>context.streamMessage(m));
+sources.at(-1).onopen();context.window.BoardStream.select('next');
+now+=9999;render();assert.equal(el('badge').textContent,'CONNECTED');
+now++;render();assert.equal(el('badge').textContent,'RECONNECTING');
+sources.at(-1).onopen();assert.equal(el('badge').textContent,'CONNECTED');
+handlers.pagehide();now+=10000;render();assert.equal(el('badge').textContent,'RECONNECTING');
+handlers.pageshow({persisted:true});sources.at(-1).onopen();assert.equal(el('badge').textContent,'CONNECTED');
+process.stdout.write('ok');
+"""
+
+
+def test_connection_indicator_open_silent_disconnect_grace_and_reopen() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Optional Node.js executable is unavailable.")
+    result = subprocess.run(
+        [node, "-e", STATUS_STREAM_DRIVER],
+        input=json.dumps(
+            {
+                "page": api_endpoint.PAGE,
+                "source": pathlib.Path(api_endpoint.__file__)
+                .with_name("browser_stream.js")
+                .read_text(encoding="utf-8"),
+            }
+        ),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"

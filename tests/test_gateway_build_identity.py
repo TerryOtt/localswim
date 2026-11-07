@@ -38,7 +38,7 @@ const window={location,localswimWorkspace:!!input.workspace,history,
 const context=vm.createContext({window,location,URL,Date,document:{getElementById:element},
   sessionStorage:{setItem(k,v){stored[k]=v}},serverBuild:input.boardBuild || null,
   codeStale:!!input.boardStale,restarting:!!input.boardRestarting,restartProblem:input.boardProblem||null,
-  streamConnected:true,streamLastMessage:Date.now(),streamBoardError:false,pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,LIVE_MS:5000,WARN_MS:15000,
+  streamConnected:true,streamClosedAt:null,streamBoardError:null,pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,STREAM_GRACE_MS:10000,
   subjectEdit:null,detailEditVersion:null,mkAttempt:null,relationshipSpecs:()=>[],
   drafts:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
   STALE_RELOAD_STATE_KEY:'saved',STALE_RELOAD_QUERY:'_localswim_build',staleReloadStarted:false,
@@ -161,7 +161,7 @@ if(input.mode==='card-focus'){
   Object.assign(context,{userLabel:()=> 'Synthetic reader',measureCards:()=>new Map(),
     alignCardStarts(){},playFlip(){},applyFilter(){},focusedCardId:()=>null});
   context.document.createElement=()=>({});
-  vm.runInContext(section(input.page,'function paint()', '\n// ---- connection health'),context);
+  vm.runInContext(section(input.page,'function renderBoardBanner()', '\n// ---- connection health'),context);
   if(input.gesture){element('alerts').checked=true;await listeners.change()}
   for(const count of [0,1,1,2]){
     context.data={project:'Synthetic board',browserUser:'reader',lanes:[],counts:{blocked:count}};
@@ -323,7 +323,7 @@ if(input.mode==='card-focus'){
 }else if(input.mode==='roundtrip'){
   // A Node VM checks shipped state plumbing; these DOM seams are not a browser.
   const helpers=section(input.page,'function saveStaleReloadState()',
-    '// **Terry specified this bar himself:');
+    'function renderLive()');
   vm.runInContext(helpers,context);
   Object.assign(context,{drafts:{'other-card':'other unsent comment'},openId:'card-17',
     editing:'detail',detailEditVersion:'original-version',query:'urgent café',unhideOld:true,mkOpen:'ready_for_work'});
@@ -361,7 +361,7 @@ if(input.mode==='card-focus'){
     fields:Object.fromEntries([...freshElements].map(([key,value])=>[key,value.value]))}));
 }else{
   const helpers=section(input.page,'function saveStaleReloadState()',
-    '// **Terry specified this bar himself:');
+    'function renderLive()');
   const live=section(input.page,'function renderLive()', '// Push-driven snapshots:');
   vm.runInContext(helpers+live+'\nrenderLive();',context);
   if(input.repeat)vm.runInContext('renderLive();',context);

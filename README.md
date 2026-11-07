@@ -460,8 +460,7 @@ uv run --frozen localswim-cli boards/my-project.json lane add "Architecture Deci
 Use the supported `board shutdown` command for the specific board before offline
 maintenance, wait for its writer to exit, and restart with its existing launcher and
 configuration afterward. Do not delete locks or force-stop a writer. Preserve any
-workspace ownership and monitor target; a shared monitor upgrade uses cooperative
-`--reload`, separately from the board restart. Inspect an uncertain save before retrying.
+workspace ownership and saved notification targets. Inspect an uncertain save before retrying.
 
 Display renames and identity migrations are deliberately different operations:
 
@@ -928,9 +927,9 @@ While SSE subscribers are present, one service-wide board health producer checks
 every five seconds and one gateway catalog producer checks every ten seconds. After
 the last listener closes, producers pause I/O (an in-flight read may finish); the
 first returning view wakes them and resnapshots. Unchanged bytes reuse verified admission. Five-second stream heartbeats perform no
-JSON reads and do not confirm a successful sync. The visible Last confirmed sync
-age reflects when the browser last accepted and rendered an authoritative board
-snapshot, separately from stream connection state. The server `readAt` is a separate
+JSON reads. The connection indicator stays green while the event stream is open and
+for ten seconds after a disconnection; board read errors are shown separately.
+The server `readAt` is a separate
 diagnostic for successful file read and admission. Fixed-width time fields retain at
 least two digits for hours.
 
@@ -1071,7 +1070,7 @@ localswim-cli BOARD notifications disable
 UUID. Setting a target preserves the enabled state, so an already enabled board
 can hand off to a new owner with `target`. A newly configured target stays disabled
 until `enable`; enabling requires a target. `disable` retains the target.
-**Production notifications and legacy monitors must stay off until explicitly
+**Production notifications must stay off until explicitly
 activated by Terry.** The commands above document the interface, not an activation
 instruction.
 
@@ -1101,108 +1100,24 @@ turn/wake and `QUEUE_TEST_RECEIVED`; that bounded observation is not a general
 completion guarantee. Receiving a notice does not authorize ticket work or bypass
 board gates.
 
-The older monitor interfaces below remain available for compatibility. Configuring
-the built-in path neither starts them nor migrates or changes their saved state.
+## Retired legacy watchers
 
-## Shared board-write monitor
+Legacy watcher and pool commands have been removed, including native intake,
+reload, retarget and stop compatibility. Stale launchers and Python module invocations
+fail immediately with retirement guidance, including `--help` and `--stop`.
+No optional extra or environment switch re-enables them. Use the shared built-in
+`localswim-cli BOARD notifications` commands above.
 
-Install the optional monitor extra with `uv sync --locked --extra monitor` or
-`uv tool install --editable '.[monitor]'` from this checkout. Click remains the sole core dependency.
-The explicit optional dependency decision is `watchfiles==1.3.0` (MIT). Core CLI
-and board services do not import this package.
+Retirement preserves legacy target, cursor, pending-alert, status and lock files.
+It does not migrate settings, modify boards, kill processes or launch workers.
+Historical qualification reports retain their original source/protocol binding.
 
-Run one monitor per board with distinct runtime paths:
-
-```console
-localswim-monitor --board-path /path/to/board.json --board-label "Project board" --thread-id THREAD_UUID --port 8793 --status-path /runtime/project-status.json --target-path /runtime/project-target.json --lock-path /runtime/project.lock
-```
-
-From the shared checkout, run the pool through its frozen project environment:
-
-```console
-uv sync --frozen --extra monitor
-uv run --frozen --extra monitor localswim-monitor-pool --manifest /runtime/pool.json
-```
-
-This exposes the new command without recreating an active global tool environment.
-An existing global editable installation immediately uses the shared updated Python
-modules; installing a new global executable can wait for an authorized maintenance
-window. Use the shared `uv run` command in the OS-owned task wrapper as well.
-
-For multiple boards, use `localswim-monitor-pool --manifest FILE`. The schema-1
-manifest has a `boards` array of existing single-board argument arrays and is
-limited to 1 MiB and 256 members. Board, status, target, lifetime-lock and derived
-request-lock paths must be distinct; aliases are checked before target writes.
-Native watching subscribes once per unique parent directory; boards sharing a
-directory share that subscription. The actual selected backend is reported. Polling is visible and requires explicit `--allow-polling`. `--stop`
-cooperatively drains only exact owner UUIDs in the manifest.
-
-For example, a single member of a larger pool manifest is:
-
-```json
-{
-  "schema": 1,
-  "boards": [[
-    "--board-path", "/boards/project.json",
-    "--board-label", "Project board",
-    "--thread-id", "00000000-0000-4000-8000-000000000001",
-    "--port", "8793",
-    "--status-path", "/runtime/project-status.json",
-    "--target-path", "/runtime/project-target.json",
-    "--lock-path", "/runtime/project.lock"
-  ]]
-}
-```
-
-Add further argument arrays under `boards`, retaining each board's existing target
-and runtime paths. A cooperative stop uses
-`localswim-monitor-pool --manifest FILE --stop`; it does not retarget or start owners.
-For background launch, use hidden/detached process startup with private regular-file
-stdout/stderr redirection before Python starts. Serial work bounds read pressure;
-a slow destination can delay later queued deliveries, so stop/drain is cooperative.
-
-On Windows, use an OS-owned, on-demand Task Scheduler task for a background pool.
-Keep it without a login trigger unless the owner explicitly requests one. Its wrapper
-launches the shared executable hidden with regular stdout/stderr files in private
-runtime storage, caches the process handle, waits for exit and propagates the code.
-This follows the detached gateway pattern above. Registering or starting that task
-is a separate authorized activation step; this release creates neither.
-
-Production monitors stay off. The new binary is available only after release;
-migrate only when explicitly authorized. Preserve original thread targets, cursors
-and pending alerts. Never force-kill an owner.
-
-The single-board monitor's port and runtime paths are required. Port is a
-compatibility/startup hint; lifecycle checks follow the live descriptor and validate
-board identity. `--automation-actor` defaults to `bot`. The debounce defaults to
-15 seconds (`--quiet-seconds` accepts up to 300). Repeated launches retarget the
-existing owner; keep lock files persistent.
-
-Filesystem event intake is independent from serial, bounded activity queries and
-alert delivery. Cheap metadata reconciliation and lifecycle checks run every
-30 seconds; idle ticks do no filesystem reads. Attribution uses
-`localswim-cli BOARD activity monitor-between START END --json [--cursor CURSOR]`
-for bounded writer-owned metadata without board parsing or browser preflight. Only
-complete, nonempty results containing exclusively the configured automation actor
-suppress alerts. Unknown, empty, incomplete and failed queries alert. Keep legacy
-`activity between` available. The writer records a post-commit byte verification
-read. Metadata covers committed/admitted state; the in-memory ring may have gaps
-and fails open after restart. It is not a durable journal or a recovery path for
-unsupported transient manual JSON writes overwritten outside the writer protocol.
-Never assume one notification per activity event.
-
-No board prose or service credentials enter monitor logs or status files. Preserve
-existing lifecycle and health diagnostics, cooperative reload and lock protocols.
-During handoff, the additive `lastObservationStartedAt` provides a conservative
-pre-stat overlap lower bound; retain the strict pending invariant that the pending
-end equals `lastSignatureAt`. The legacy owner continues observing and drains pending
-work before replacement. Never use forced termination.
-
-Queued alerts are based on metadata from the same bounded query. An already queued
-alert should first inspect only its activity metadata; proven automation-only activity
-needs no card inspection or work resumption. At-least-once delivery has duplicate
-windows after queue acknowledgement and before status persistence; it is not exactly
-once and does not promise survival of sudden power loss.
+The bounded sanitized activity query remains available:
+`localswim-cli BOARD activity monitor-between START END --json [--cursor CURSOR]`.
+For an already queued alert, inspect that metadata first. Only a complete, nonempty
+result containing exclusively the configured automation actor proves automation-only
+activity; empty, unknown, incomplete or failed results do not. Preserve Human alerts
+and normal ticket gates.
 
 ## License
 

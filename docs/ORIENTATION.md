@@ -1040,10 +1040,10 @@ Important UI mechanics:
   is not a confirmed sync. Latest-only bounded
   process memory has no journal, deltas or replay. Shutdown wakes streams, closes
   upstream connections and joins workers before releasing the writer lease.
-- Last confirmed sync is the time the browser last accepted and rendered an
-  authoritative board snapshot. Keep it separate from connection state, with
-  fixed-width time fields and at least two hour digits. A heartbeat cannot advance
-  it. Stream updates are distinct from Human-only owner chat notifications.
+- The connection indicator remains green while the stream is open and for ten
+  seconds after disconnection. Board read errors are surfaced independently.
+  Keep fixed-width time fields and at least two hour digits. Stream updates are
+  distinct from Human-only owner chat notifications.
 - Server `readAt` separately records successful byte read and admission, not a
   socket response or `stat`. Exact unchanged bytes may reuse their already verified
   admission; this diagnostic advances independently of browser snapshot rendering.
@@ -1290,43 +1290,33 @@ serialized by a separate service configuration lock. Windows uses
 `~/Library/Application Support/localswim/notifications/`, and other platforms use
 `$XDG_CONFIG_HOME/localswim/notifications/` or `~/.config/localswim/notifications/`.
 
-Production notifications and legacy monitors remain off until Terry explicitly
-activates them. The new path does not touch existing monitor target/cursor/pending
-files, launch monitors, or migrate legacy ownership. Preserve the compatibility
-contracts below.
+Production notifications remain off until Terry explicitly activates them. Legacy
+watcher startup is retired. The service-owned path does not touch existing monitor
+target/cursor/pending files or migrate legacy ownership.
+Legacy commands are removed as described below.
 
-## Shared monitor ownership
+## Retired legacy watchers
 
-`src/localswim/monitor.py` owns optional `localswim-monitor`; `src/localswim/monitor_pool.py`
-owns `localswim-monitor-pool`. The pool manifest is schema 1 with a `boards` array
-of existing single-board argument arrays, limited to 1 MiB and 256 members. Board,
-status, target, lifetime-lock and derived request-lock paths are distinct and alias
-checked before target writes. Native watching uses unique parent directories;
-backend choice is exposed. Polling requires explicit `--allow-polling`. `--stop`
-cooperatively drains only exact owner UUIDs in the manifest.
+Legacy watcher/pool implementations, command registrations and optional native
+watching dependency have been removed. `src/localswim/monitor.py` and
+`src/localswim/monitor_pool.py` are minimal refusal stubs for stale executable
+launchers and Python module invocations. Every invocation fails before input parsing
+or runtime side effects, including help, reload, polling and former stop requests.
+There is no opt-out or compatibility startup path. Use shared
+`localswim-cli BOARD notifications` service-owned settings described above.
 
-Production monitors remain off. The pool binary is available after release; migration
-requires explicit authorization. Preserve original thread targets, cursors and pending
-alerts, and never force-kill an owner.
+Retirement does not migrate, rewrite or delete legacy target, cursor, pending-alert,
+status or persistent lock files, change notification settings or alter live services.
+Historical watcher qualification remains evidence for its original build; obsolete
+watcher tests are replaced by immediate refusal and no-side-effect coverage.
 
-Filesystem intake is independent from serial bounded queries and delivery. Default
-debounce is 15 seconds; cheap metadata reconciliation and lifecycle checks run every
-30 seconds, and idle ticks perform no filesystem reads. Activity attribution uses
-`localswim-cli BOARD activity monitor-between START END --json [--cursor CURSOR]` for
-bounded writer-owned metadata without board parsing or browser preflight. Only complete,
-nonempty all-automation results suppress; empty, unknown, incomplete and failed
-results alert. The legacy `activity between` command remains available. The writer
-records a post-commit byte verification read. Metadata covers committed/admitted
-state, with in-memory ring gaps and fail-open restart behavior. It is not a durable
+`localswim-cli BOARD activity monitor-between START END --json [--cursor CURSOR]`
+continues to expose bounded sanitized writer-owned metadata through the retained
+`monitor_activity_client.py`. Inspect this first for already queued alerts. Only
+complete, nonempty all-automation results prove Bot-only activity; preserve
+Human/unknown alerts and normal ticket gates. This in-memory metadata is not a durable
 journal and cannot recover unsupported transient manual JSON writes overwritten
 outside the writer protocol.
-
-The additive `lastObservationStartedAt` supplies a conservative pre-stat overlap
-lower bound during observation handoff. Preserve the strict pending invariant:
-pending end must equal `lastSignatureAt`. Existing `ownerId`, request serialization,
-cooperative reload and startup recovery semantics remain in force. No process is
-forcibly terminated. Queue acknowledgement and status persistence are separate,
-so crash recovery retains at-least-once duplicate windows.
 
 ## Private schema-5 preparation (#0129)
 

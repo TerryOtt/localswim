@@ -2787,10 +2787,6 @@ PAGE = """<!doctype html>
         class="age-slot age-value" data-reserve="00"><span id="live-card-value"></span></span> <span
         id="live-card-unit" class="age-slot"><span
         id="live-card-unit-label"></span></span> ago</span></span>
-      <span id="live-file-read">· Last confirmed sync: <span id="live-read-never">never</span><span
-        id="live-read-age" hidden><span class="age-slot age-value" data-reserve="00"><span
-        id="live-read-value"></span></span> <span id="live-read-unit" class="age-slot"><span
-        id="live-read-unit-label"></span></span> ago</span></span>
       <span id="live-clock">· <span class="age-slot age-value" data-reserve="00"><span
         id="live-clock-hour"></span></span><span id="live-clock-rest"></span></span>
     </span>
@@ -2802,7 +2798,7 @@ edit leaves the current process running and reports the failing check here."></s
     <span id="push"></span>
     <label id="alerts-wrap"><input type="checkbox" id="alerts"> Alerts</label>
     <span id="badge-slot"><span id="badge"
-      title="Green means Python read and parsed the board file in the last 5s.">LIVE</span></span>
+      title="Green means the event stream is open or disconnected less than 10 seconds ago.">LIVE</span></span>
   </div>
   <div id="banner">
     <strong id="banner-head"></strong>
@@ -4839,6 +4835,15 @@ function restoreCardFocus(id) {
   (action || document.getElementById('find')).focus({preventScroll: true});
 }
 
+function renderBoardBanner() {
+  const error = streamBoardError || data.error;
+  document.getElementById('banner').classList.toggle('show', !!error);
+  if (error) {
+    document.getElementById('banner-head').textContent = 'The board did not load.';
+    document.getElementById('banner-body').textContent = error;
+  }
+}
+
 function paint() {
   const focusId = focusedCardId();
   const laneScroll = window.WorkspaceUI ? window.WorkspaceUI.scrolls() : null;
@@ -4870,12 +4875,7 @@ function paint() {
   applyFilter();
   if (focusId) restoreCardFocus(focusId);
 
-  const banner = document.getElementById('banner');
-  banner.classList.toggle('show', !!data.error);
-  if (data.error) {
-    document.getElementById('banner-head').textContent = 'The board did not load.';
-    document.getElementById('banner-body').textContent = data.error;
-  }
+  renderBoardBanner();
 
   // **Three counters, and every one is something TERRY must do.** Nothing else
   // belongs here -- the lane headers already carry every other number, and a stat
@@ -4928,10 +4928,9 @@ function paint() {
 }
 
 // ---- connection health and confirmed snapshot age -------------------------
-// Heartbeats prove transport liveness; only accepted board snapshots confirm sync.
 let lastOk = 0, fileMs = 0;
-let streamConnected = false, streamLastMessage = 0, streamBoardError = false;
-const LIVE_MS = 45000;
+let streamConnected = false, streamClosedAt = null, streamBoardError = null;
+const STREAM_GRACE_MS = 10000;
 
 // **What THIS TAB is running, frozen at load time.** The server stamps it into the HTML,
 // so it describes the JavaScript the browser actually has -- not what the checkout says
@@ -5066,15 +5065,8 @@ function clearStaleReloadMarker() {
   window.history.replaceState(null, '', clean.toString());
 }
 
-// **Terry specified this bar himself:** "last update: HH:MM:SS - Currently:
-// HH:MM:SS [green circle]".
-//
-// **It is better than a computed age, and the reason is that it needs no
-// interpretation.** `Currently` is a wall clock the browser ticks every half
-// second. If it FREEZES, the page is dead. If the GAP between the two grows,
-// the server is dead. Both failures are visible without anyone trusting a
-// number this code calculated -- which is the whole complaint, since the
-// dashboard that burned him showed a perfectly plausible timestamp.
+// The wall clock ticks independently of network activity. Connection indicators
+// stay green while SSE is open, with ten seconds of grace after it disconnects.
 function renderLive() {
   const el = document.getElementById('live');
   const badge = document.getElementById('badge');
@@ -5082,8 +5074,8 @@ function renderLive() {
   const nowMs = Date.now();
   const [clockHour, clockRest] = clockOf(nowMs);
 
-  // **Checked BEFORE the lastOk guard**, because a stale tab and a lost stream are
-  // independent failures. A confirmed mismatch repairs itself after preserving every
+  // A stale tab and a lost stream are independent failures. A confirmed mismatch
+  // repairs itself after preserving every
   // unsent field; the red pill is reserved for a failed automatic recovery.
   //
   // **Silence here means the two ids AGREE.** An unknown build on either side is not a
@@ -5138,9 +5130,7 @@ function renderLive() {
   // **none of the three is something Terry can act on**, and a pill he cannot act on
   // becomes scenery. Same loudness rule the toolchain banner runs on.
   //
-  // **It is placed BEFORE the `lastOk` return, like `#restart`.** A lost stream and an
-  // unpushed board are independent, and hiding this one during the other is exactly
-  // the bug that put the restart flag here.
+  // Keep backup failures visible independently of stream connection health.
   const push = document.getElementById('push');
   const pushFailed = !!pushState && pushState.state === 'failed';
   if (pushFailed) {
@@ -5155,7 +5145,6 @@ function renderLive() {
   document.getElementById('live-build').textContent = buildText;
   document.getElementById('live-clock-hour').textContent = clockHour;
   document.getElementById('live-clock-rest').textContent = clockRest;
-  document.getElementById('live-read-never').hidden = !!lastOk;
   function showAge(kind, stamp) {
     const prefix = 'live-' + kind;
     document.getElementById(prefix + '-age').hidden = !stamp;
@@ -5169,23 +5158,12 @@ function renderLive() {
     return value + ' ' + label + ' ago';
   }
   const cardAge = showAge('card', lastOk && fileMs);
-  const readAge = showAge('read', lastOk);
-  el.title = [buildText, cardAge && 'Last card update: ' + cardAge,
-    'Last confirmed sync: ' + (readAge || 'never'), clockHour + clockRest]
+  el.title = [buildText, cardAge && 'Last card update: ' + cardAge, clockHour + clockRest]
     .filter(Boolean).join('  ·  ');
 
-  if (!lastOk) {
-    badge.className = 'dead';
-    badge.textContent = 'NO DATA';
-    dot.classList.add('stale');
-    dot.classList.remove('alive');
-    return;
-  }
-
-  const live = streamConnected && nowMs - streamLastMessage < LIVE_MS;
+  const live = streamConnected || (streamClosedAt !== null && nowMs - streamClosedAt < STREAM_GRACE_MS);
   badge.className = live ? '' : 'dead';
-  badge.textContent = streamBoardError ? 'BOARD ERROR' : live ? 'CONNECTED' : 'RECONNECTING';
-  if (streamBoardError) badge.className = 'dead';
+  badge.textContent = live ? 'CONNECTED' : 'RECONNECTING';
   dot.classList.toggle('stale', !live);
   dot.classList.toggle('alive', live);
 }
@@ -5213,10 +5191,15 @@ async function tick(force = false, meta = null) {
       if (meta.build) serverBuild = meta.build;
       codeStale = !!meta.codeStale; restarting = !!meta.restarting;
       restartProblem = meta.restartProblem || null; pushState = meta.push || null;
-      streamBoardError = meta.ok === false;
       if (meta.ok === false) {
         if (window.WorkspaceUI) throw new Error(meta.error || 'The board service could not read this board.');
+        streamBoardError = meta.error || 'The board service could not read this board.';
+        renderBoardBanner();
         renderLive(); return;
+      }
+      if (streamBoardError && !window.WorkspaceUI) {
+        streamBoardError = null;
+        renderBoardBanner();
       }
       if (Number.isFinite(meta.mtime)) fileMs = meta.mtime * 1000;
     }
@@ -5229,7 +5212,7 @@ async function tick(force = false, meta = null) {
       HAY.clear(); paint(); restoreStaleReloadState();
       if (window.WorkspaceUI) window.WorkspaceUI.loaded();
       // Failed, superseded or CAS-obsolete responses never advance sync confirmation.
-      seen = marker; lastOk = Date.now(); streamBoardError = false;
+      seen = marker; lastOk = Date.now();
     }
   } catch (e) {
     if (epoch === window.workspaceEpoch && window.WorkspaceUI) {
@@ -5255,13 +5238,13 @@ async function tick(force = false, meta = null) {
 
 function streamMessage(message) {
   if (message.type === 'connection') {
+    if (!message.connected && streamConnected) streamClosedAt = Date.now();
     streamConnected = message.connected;
     if (message.connected) {
-      streamLastMessage = Date.now();
+      streamClosedAt = null;
       if (!window.WorkspaceUI?.resume()) tick(true);
     }
   } else {
-    streamLastMessage = Date.now();
     if (message.type === 'status') tick(false, message.value);
     if (message.type === 'board' && window.WorkspaceUI?.selected() === message.value.board) {
       if (message.value.status.ok !== false) window.WorkspaceUI.resume();

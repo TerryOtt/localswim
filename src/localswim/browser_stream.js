@@ -4,7 +4,7 @@
   let generation = 0;
   function close() {
     generation++;
-    if (source) { source.close(); source = null; }
+    if (source) { source.close(); source = null; callback({type:'connection',connected:false}); }
   }
   function connect() {
     close(); if (!active) return;
@@ -15,8 +15,9 @@
     source.onerror = () => { if (mine === generation) callback({type:'connection',connected:false}); };
     for (const type of ['status','catalog','board','heartbeat']) source.addEventListener(type, event => {
       if (mine !== generation) return;
-      try { callback({type,value:JSON.parse(event.data)}); }
-      catch (_) { callback({type:'connection',connected:false}); }
+      let value;
+      try { value = JSON.parse(event.data); } catch (_) { return; }
+      callback({type,value});
     });
   }
   window.BoardStream = {

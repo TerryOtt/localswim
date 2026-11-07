@@ -56,10 +56,10 @@ jobs:
             "$tool_dir/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
 
       - name: Synchronize locked project environment
-        run: uv sync --locked --extra monitor
+        run: uv sync --locked
 
       - name: Run the gate
-        run: uv run --frozen --extra monitor python check.py
+        run: uv run --frozen python check.py
 
       - name: Build source and wheel distributions
         run: uv build --no-sources --clear
