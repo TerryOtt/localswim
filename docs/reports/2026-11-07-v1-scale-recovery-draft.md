@@ -83,23 +83,79 @@ delivery guarantees identical.
 
 ## What V1 changed
 
-The table describes the final accepted behavior. Five-second board polling and
-ten-second sidebar polling were useful interim repairs in #0210–#0214; #0220
-subsequently removed those browser timers.
+The following subsections describe the final accepted behavior. Five-second board
+polling and ten-second sidebar polling were useful interim repairs in
+#0210–#0214; #0220 subsequently removed those browser timers.
 
-| Area | Result |
-| --- | --- |
-| Gateway | Resolve the selected board without a workspace-wide JSON scan. Reuse unchanged recognition and sidebar summaries. Recheck path, file and writer identity; cached facts do not become authority. |
-| Board service | Reuse admission only for identical bytes and accepted policy. Centralize periodic disk-health work while subscribed; pause it when the last listener leaves. Avoid repeated parse/audit work and unnecessary full-board copies. |
-| Freshness | Separate stream connection health, successful disk admission, accepted browser snapshots and Git backup status. Use an admitted content marker so timestamp-preserving and policy-only changes are visible. |
-| Browser | Load an authoritative snapshot, then use SSE metadata to announce changes. Fetch a snapshot on a content change or reconnect; no routine browser status/catalog polling. |
-| Writes | Project pending edits locally. Enforce original card revisions inside the atomic board transaction; genuine same-card conflicts reject the second writer. |
-| Recovery | Retain stable Add identities, drafts and acknowledged revision floors. Read back uncertain outcomes before a bounded conditional retry. CLI/proxy writes and uncertain additive/compound actions are not blindly replayed. |
-| Attachments | Read only immutable attachment metadata under the board lock; perform blob reading and integrity checks outside it. Avoid copying the whole board for one image/download. |
-| Diagnostics | Keep unsafe captured output away from response/lifecycle paths. Preserve visible startup refusals and use safe output before interpreter startup in background launchers. |
-| Owner notifier | Send committed Human-edit metadata to one saved chat through a background worker. Resolve the current target at delivery; one bounded attempt, no notification journal or retry. |
-| Legacy monitors | Keep the native watcher/pool improvements available for compatibility. They are not the normal owner-notification path and remain off. |
-| Attribution | Exclude Bot commits from owner chat nudges; include both Human and Bot commits in browser updates. Keep bounded sanitized activity evidence for inspection. Unknown coverage is not proof of Bot-only activity. |
+### Gateway
+
+- Resolve the selected board without a workspace-wide JSON scan.
+- Reuse unchanged recognition and sidebar summaries.
+- Recheck path, file and writer identity; cached facts do not become authority.
+
+### Board service
+
+- Reuse admission only for identical bytes and accepted policy.
+- Centralize periodic disk-health work while subscribed; pause it when the last
+  listener leaves.
+- Avoid repeated parse/audit work and unnecessary full-board copies.
+
+### Freshness
+
+- Separate stream connection health, successful disk admission, accepted browser
+  snapshots and Git backup status.
+- Use an admitted content marker so timestamp-preserving and policy-only changes
+  are visible.
+
+### Browser
+
+- Load an authoritative snapshot, then use SSE metadata to announce changes.
+- Fetch a snapshot on a content change or reconnect; no routine browser
+  status/catalog polling.
+
+### Writes
+
+- Project pending edits locally.
+- Enforce original card revisions inside the atomic board transaction; genuine
+  same-card conflicts reject the second writer.
+
+### Recovery
+
+- Retain stable Add identities, drafts and acknowledged revision floors.
+- Read back uncertain outcomes before a bounded conditional retry.
+- CLI/proxy writes and uncertain additive/compound actions are not blindly replayed.
+
+### Attachments
+
+- Read only immutable attachment metadata under the board lock; perform blob
+  reading and integrity checks outside it.
+- Avoid copying the whole board for one image/download.
+
+### Diagnostics
+
+- Keep unsafe captured output away from response/lifecycle paths.
+- Preserve visible startup refusals and use safe output before interpreter startup
+  in background launchers.
+
+### Owner notifier
+
+- Send committed Human-edit metadata to one saved chat through a background worker.
+- Resolve the current target at delivery; one bounded attempt, no notification
+  journal or retry.
+
+### Legacy monitors
+
+- Keep the native watcher/pool improvements available for compatibility.
+- They are not the normal owner-notification path and remain off.
+
+### Attribution
+
+- Exclude Bot commits from owner chat nudges; include both Human and Bot commits
+  in browser updates.
+- Keep bounded sanitized activity evidence for inspection.
+- Unknown coverage is not proof of Bot-only activity.
+
+### Transaction and legacy feed boundaries
 
 The transaction boundary remains the **board**. A move, relationship change or
 priority reconciliation can affect several cards; those effects must commit
