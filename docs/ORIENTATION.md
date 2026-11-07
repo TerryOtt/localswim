@@ -293,9 +293,62 @@ Navigation preserves the reload query marker and other query/hash state, so the 
 proof survives a route change. Selecting another board clears only the old board's source
 warnings. Existing per-board capture and pending restoration preserve unsent drafts.
 
-The gateway/board/monitor processes launched under Codex may stop when Codex exits;
-restore the service and use Retry rather than treating cached monitor files as proof
-that a listener or monitor process is still alive.
+### Shared gateway under Codex on Windows
+
+Launch requests use the on-demand Windows task `localswim Shared Gateway`, which
+owns the gateway outside Codex's process tree. Reuse a healthy listener. To start
+the saved task:
+
+```powershell
+Start-ScheduledTask -TaskName 'localswim Shared Gateway'
+```
+
+The task runs as the signed-in user with a hidden window and no execution time
+limit. Its wrapper uses the shared installation, saved workspace root, port, and
+publishing preferences. Keep the wrapper and its per-launch log files in private
+runtime storage outside the source checkout.
+
+If recreating the wrapper, resolve the shared executable to an absolute path and
+configure `$serviceExecutable`, `$workspaceRoot`, `$port`, `$stdout`, and `$stderr`.
+Use process-level log redirection and wait on that process:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$env:PYTHONIOENCODING = 'utf-8'
+$quotedRoot = '"' + $workspaceRoot + '"'
+$launch = @{
+    FilePath = $serviceExecutable
+    ArgumentList = @($quotedRoot, '--port', [string]$port)
+    WorkingDirectory = 'C:\Projects\localswim'
+    WindowStyle = 'Hidden'
+    RedirectStandardOutput = $stdout
+    RedirectStandardError = $stderr
+    PassThru = $true
+}
+$process = Start-Process @launch
+$null = $process.Handle
+$process.WaitForExit()
+exit $process.ExitCode
+```
+
+Use a separate stdout/stderr file pair per launch. Direct process redirection keeps
+native stderr as logged data. Windows PowerShell can otherwise turn an ordinary
+native diagnostic into a terminating `NativeCommandError` under
+`$ErrorActionPreference = 'Stop'`, ending the wrapper before the error reaches its
+redirected log.
+
+Verify the task is Running, the workspace endpoint responds, and the listener's
+ancestry leads to Task Scheduler rather than Codex. Check both the task and port
+during recovery because ending a task can leave a child listener running. Inspect
+any leftover gateway and its board-writer ownership before replacing it. Use the
+board-specific graceful lifecycle for board maintenance.
+
+`/board/<board-key>` is a board entry route. The incomplete `/board` path returns
+404. Validate the workspace catalog and the intended full board route after startup.
+
+Board and monitor processes launched separately under Codex can also stop when it
+exits. Verify their live processes and listeners rather than relying on saved
+monitor status files.
 
 ## Configuration and schema ownership
 

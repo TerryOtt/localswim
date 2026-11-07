@@ -539,6 +539,13 @@ detached from Codex so it continues running when the chat or Codex app closes.
 - Verify the workspace HTTP response and the gateway's process ancestry before
   reporting success. The gateway must be owned by Windows Task Scheduler or another
   independent OS supervisor.
+- Task wrappers must use `Start-Process` with `-RedirectStandardOutput` and
+  `-RedirectStandardError`, then wait on the returned process and propagate its exit
+  code. Cache the process handle before waiting. This captures native diagnostics
+  directly in files, including under Windows PowerShell's stop-on-error setting.
+- Keep launch logs in private runtime storage with a separate pair per launch.
+  Inspect both task state and the actual listener during restart recovery; ending
+  a task can leave a gateway child running.
 
 ## Local inception-board coordination
 

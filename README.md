@@ -50,9 +50,15 @@ uv run --frozen localswim path/to/state-store --port 8810
 ~~~
 
 A directory starts the workspace; a JSON file still starts an individual board. The
-workspace defaults to **http://127.0.0.1:8810/**. It discovers schema-4 boards below the
-directory and presents one active board at a time. Existing healthy board services are
-reused; absent services start on available loopback ports. If a writer is restarting,
+workspace defaults to **http://127.0.0.1:8810/**. For Windows launches requested through
+Codex, use the on-demand `localswim Shared Gateway` task so the gateway runs
+independently of Codex. Follow the
+[detached launch and logging procedure](docs/ORIENTATION.md#shared-gateway-under-codex-on-windows)
+when starting or recreating that task.
+
+The gateway discovers schema-4 boards below the directory and presents one active
+board at a time. Existing healthy board services are reused; absent services start
+on available loopback ports. If a writer is restarting,
 the gateway waits for its rendezvous to recover instead of starting another writer.
 Recovery is serialized separately for each canonical board, so one waiting board does
 not hold up another healthy board. Explicit workspace cleanup closes new acquisitions;
