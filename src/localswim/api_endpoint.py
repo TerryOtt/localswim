@@ -2133,9 +2133,9 @@ PAGE = """<!doctype html>
      bar currently has two tiers on purpose rather than by omission. */
   #bar #live, #bar #alerts-wrap, #bar .meta { color: var(--bardim); }
   /* Fixed proportions keep each status field anchored as its text changes. */
-  #bar #live { flex: 0 1 52em; min-width: 0; display: grid; column-gap: .4em;
+  #bar #live { flex: 0 1 34em; min-width: 0; display: grid; column-gap: .4em;
                grid-template-columns: minmax(0, 8fr) minmax(0, 17fr)
-                                      minmax(0, 18fr) minmax(0, 7fr);
+                                      minmax(0, 7fr);
                white-space: nowrap; }
   #live > span { overflow: hidden; text-overflow: ellipsis; }
   #live .age-slot { display: inline-grid; }
