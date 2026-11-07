@@ -525,6 +525,21 @@ to scan (2026-10-16). Avoid walls of text.
 Apply this guidance to new descriptions, updates, progress comments and handoffs.
 Do not rewrite historical comments unless Terry requests it.
 
+## Shared gateway launch lifetime
+
+When Terry asks to launch, start, or restart the shared localswim gateway, launch it
+detached from Codex so it continues running when the chat or Codex app closes.
+
+- Reuse the on-demand Windows task `localswim Shared Gateway` and its saved shared
+  launcher. Start it with `Start-ScheduledTask -TaskName 'localswim Shared Gateway'`.
+- Preserve the workspace root, port, publishing preferences, and runtime log paths.
+  Reuse a healthy gateway and keep a single listener.
+- If the task needs recreation, use an OS-owned launch outside the Codex process
+  tree with the shared installation at `C:\Projects\localswim`.
+- Verify the workspace HTTP response and the gateway's process ancestry before
+  reporting success. The gateway must be owned by Windows Task Scheduler or another
+  independent OS supervisor.
+
 ## Local inception-board coordination
 
 Use `C:\Projects\localswim-state-store\localswim\localswim.json` as the machine-local
