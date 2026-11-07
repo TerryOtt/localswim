@@ -595,24 +595,45 @@ detached from Codex so it continues running when the chat or Codex app closes.
 
 ## Built-in owner notifications
 
-- Lead new one-owner guidance with `localswim-cli BOARD notifications status --json`,
-  `target THREAD_UUID`, `enable`, and `disable`; this is a service-owned path, not
-  another watcher or pool. New settings default disabled; target changes preserve
-  enabled state and disable retains the target.
-- Production notifications and legacy monitors MUST remain off until Terry explicitly
-  activates them. Do not launch a monitor or change existing target, cursor or pending
-  files as part of configuring this path.
-- Keep settings outside board JSON in the live service account's OS profile. Use the
-  CLI-authenticated, identity-validated GET before a single configuration POST; never
-  replay an uncertain POST or edit the settings files as a substitute for the API.
-- Submit bounded human-only committed metadata to the memory worker. Preserve the
+Use this service-owned path when Terry asks to monitor a board or connect/redirect
+its owning chat. It replaces a separate watcher/pool for the one-owner use case.
+From any project, use the shared runner with an absolute board path:
+
+```powershell
+uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD notifications status --json
+uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD notifications target THREAD_UUID
+uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD notifications enable
+uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD notifications disable
+```
+
+- Verify the board and actual owning chat ID; do not reuse a test recipient or an
+  inherited service-process chat ID. Inspect status first. For an authorized
+  start/connect request, set target, enable and verify status. At milestone handoff,
+  retarget to the authorized new owner and verify. Target preserves enabled state;
+  disable retains the target. No optional monitor extra or second process is needed.
+- Honor explicit shutdown. Production notifications and legacy monitors stay off
+  until Terry requests activation; documentation changes, service restarts and board
+  launches alone do not enable delivery. An explicit start/connect request supplies
+  activation authority without another confirmation.
+- Keep settings outside board JSON in the live service account's OS profile. Use
+  the CLI-authenticated, identity-validated metadata interface; never edit the files
+  or blindly replay an uncertain configuration POST. Inspect status first.
+- Submit bounded Human-only committed metadata to the memory worker. Preserve the
   15-second quiet window, current-target lookup at send, and no notification settings
   reads, delivery I/O or subprocess work on the writer path. No card prose or credentials.
-- Preserve process-lifetime best effort: no durable cursor, catch-up or retries.
-  `codex queue` acceptance means queued, not completed work. The authorized live idle
-  V2 M14 test observed an immediate turn/wake and `QUEUE_TEST_RECEIVED`; do not claim
-  notices necessarily await a manually initiated next turn or generalize that test
-  into a completion guarantee. Notices do not authorize work past ticket gates.
+- Preserve process-lifetime best effort: no durable notification cursor, catch-up or
+  retries; shutdown may lose pending bursts. Windows requires native `codex.exe` on
+  the service PATH. Queue acceptance is not completed work. The qualified idle-chat
+  test woke a chat immediately; do not claim delivery waits for manual input.
+- A notice does not authorize work past ticket gates. Inspect sanitized activity
+  metadata first using its interval/tickets, then focused cards as needed. Proven
+  complete, nonempty Bot-only activity requires no card inspection or work resumption.
+- Legacy watchers/pools are compatibility-only. Keep them off, preserve existing
+  target/cursor/pending/lock files, and use their documented cooperative lifecycle
+  only when separately authorized. Do not run both notification paths for one board.
+- Shared service source belongs to this maintainer. Other projects keep runtime,
+  test outputs, caches and worktrees outside `C:\Projects\localswim`; their launchers
+  and CLI commands must delegate to the shared implementation.
 
 ## Local inception-board coordination
 
@@ -626,8 +647,9 @@ repository is its durable snapshot.
 
 Production monitors stay off. Honor explicit shutdown: never restart a monitor merely
 because the board service is running. Preserve target, cursor, pending alerts and locks.
-From `C:\Projects\localswim`, expose the new command with `uv sync --frozen --extra
-monitor` and run `uv run --frozen --extra monitor localswim-monitor-pool --manifest FILE`.
+For explicitly authorized legacy compatibility work only, use `uv sync --frozen
+--extra monitor` and `uv run --frozen --extra monitor localswim-monitor-pool --manifest FILE`
+from `C:\Projects\localswim`. These commands are not the built-in owner path.
 Keep active global tool environments intact; use that shared runner in the detached
 task wrapper. For multiple boards, use the released pool with a schema-1 manifest
 of existing single-board argument arrays (maximum 1 MiB/256 members). Board, status,
