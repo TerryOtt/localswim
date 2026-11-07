@@ -305,7 +305,7 @@ native board monitoring is an optional extra.
   unsafe/invalid replacements and exhausted churn still refuse. The gateway never
   replays a POST. Guarded browser recovery follows the separate card revision rules.
   Discovery diagnostics contain fixed event labels/counts, never paths or capabilities.
-- Bound workspace reads and keep one poll in flight per navigation epoch. Show clear
+- Bound workspace reads and keep one read in flight per navigation epoch. Show clear
   recovery and Retry for failed loads; never leave Loading indefinitely or lose queued
   retries. Advance the snapshot marker only after rendering/restoration succeeds.
   Compare workspace page build identity only with gateway catalog metadata, including
@@ -477,13 +477,29 @@ The Windows `Agent Message Queue` task starts at user sign-in independently of C
   remains unchanged. Do not add private collectors, persistent watchers or production
   telemetry. Persistent notifications remain separately scoped.
 
-## Polling and optimistic browser writes
+## Browser streams and optimistic writes
 
-Terry approved five-to-ten-second eventual consistency on 2026-11-07. Use a
-five-second visible-board poll and ten-second sidebar refresh, without overlapping
-periodic requests. Keep actual file-read time separate from download/render
-completion. Admission reuse requires identical observed bytes and accepted policy;
-metadata alone cannot hide timestamp-preserving invalid edits.
+Terry clarified that this runs on localhost for one Human using one browser and
+one tab; Bot writes through the CLI. Updates within a few seconds are sufficient.
+Read the initial board, then announce persisted changes through SSE
+metadata and fetch the board when its admitted contentVersion changes or on reconnect.
+Workspace mode uses one combined catalog/selected-board stream; standalone mode uses
+one board stream. Serve `browser_stream.js` locally. Keep this separate from the
+Human-only owner chat notifier; do not add SharedWorker, cross-tab coordination,
+external services or a framework.
+
+While SSE subscribers are present, run one central board health producer every five
+seconds and one catalog producer every ten seconds. Pause producer I/O after the last
+listener closes (one in-flight read may finish); the first returning view wakes the
+producers and resnapshots. A five-second heartbeat performs no JSON I/O and does not
+confirm sync. Preserve bounded latest-only
+process memory without journal, deltas or replay. On shutdown wake streams, close
+upstream connections and join workers before releasing the writer lease. Display Last
+confirmed sync as the time the browser last accepted and rendered an authoritative
+snapshot, independently of connection state, with fixed-width fields and at least
+two hour digits. Server readAt is a separate successful file-read/admission diagnostic.
+Admission reuse requires identical observed bytes and accepted policy; metadata alone
+cannot hide timestamp-preserving invalid edits.
 
 Keep one atomic transaction and writer per board. Browser writes to existing cards
 pin `If-Match-Card` as well as the board revision. Validate the original card token

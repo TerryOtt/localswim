@@ -650,6 +650,9 @@ def test_dirty_build_id_includes_source_fingerprint(
             "monitor_activity_client.py",
             "notifications.py",
             "codex_signal.py",
+            "browser_events.py",
+            "workspace_events.py",
+            "browser_stream.js",
             "workspace.js",
             "workspace.css",
         )
@@ -675,6 +678,9 @@ def test_dirty_build_id_includes_source_fingerprint(
         "monitor_activity_client.py",
         "notifications.py",
         "codex_signal.py",
+        "browser_events.py",
+        "workspace_events.py",
+        "browser_stream.js",
         "workspace.js",
         "workspace.css",
     ):

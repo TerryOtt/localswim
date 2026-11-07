@@ -128,7 +128,8 @@ containment, hidden-directory, symlink/junction and file-identity checks. In-mem
 recognition/summary caches are optimization hints, never discovery authority.
 Filesystem identities invalidate ordinary changes immediately; a bounded five-second
 byte-digest check detects size/timestamp-preserving changes and keeps unchanged
-content out of the parser. Sidebar refresh is ten seconds. Catalog requests still
+content out of the parser. The catalog producer refreshes every ten seconds while
+subscribed. Catalog requests still
 traverse metadata and verify bytes; total file count/traversal remains unbounded.
 
 Browser capabilities are reused only while the fresh validated descriptor, board
@@ -245,7 +246,7 @@ relationship, parent, subject, detail, and archive audit arrays. Edits to archiv
 contribute recency; touching a snapshot or renaming the project does not. The shared
 stamp parser tolerates unreadable legacy values. Missing activity sorts last; future
 activity retains its exact recorded timestamp. Tooltips independently show elapsed whole
-minutes, clamped to zero for future activity. Catalog polls refresh order while reusing existing
+minutes, clamped to zero for future activity. Catalog updates refresh order while reusing existing
 row elements and preserving keyboard focus, search, list scrolling, and active selection.
 The first nonempty legacy session pin list is migrated conditionally, with duplicates
 and absent keys discarded. The gateway becomes authoritative thereafter: manual order
@@ -275,10 +276,10 @@ card's header. The card-title rename trigger is a named native button within the
 save/cancel/failure focus guards remain tied to the current edit session. Composing Enter
 does not submit, and editor Escape cancels without also closing the drawer.
 
-Workspace JSON reads use a 20-second abort deadline and one active poll per navigation
+Workspace JSON reads use a 20-second abort deadline and one active read per navigation
 epoch. Late errors from another epoch cannot replace the current board. The snapshot
 marker advances only after painting and saved-state restoration succeed. Transport,
-HTTP, and render failures show a stable recovery surface; catalog polling does not
+HTTP, and render failures show a stable recovery surface; catalog updates do not
 restart a failed selection repeatedly. Explicit Retry is queued if a catalog refresh
 is already running. Saved state remains protected until restoration succeeds, so
 closing the error view cannot overwrite drawer/editor/create drafts.
@@ -289,7 +290,7 @@ rotated by a gateway restart without retrying mutations that might have already 
 Workspace page reloads compare `PAGE_BUILD` with the normalized gateway catalog build,
 never the selected writer's build. `WorkspaceUI.pageStatus()` retains gateway source
 metadata independently of board availability; unknown or malformed identifiers never
-fall back to a board ID. `renderLive()` evaluates it even when board polling is stopped.
+fall back to a board ID. `renderLive()` evaluates it even when board updates are stopped.
 The shared `source_status()` helper supplies build, staleness, restart and refusal
 metadata to both standalone status and the workspace catalog. Proxied board status
 keeps its original diagnostics; gateway and board restart warnings are labeled separately.
@@ -849,7 +850,7 @@ The board transaction remains atomic for cross-card effects and dependencies.
 An unrelated board edit can retain a card's token, but never bypasses `If-Match`.
 
 Status `readAt` is the UNIX timestamp of the latest successful actual snapshot
-read and admission. Every poll still reads the file bytes. Identical accepted
+read and admission. Each health check still reads the file bytes. Identical accepted
 bytes under the same policy reuse prior parsing and audit results; timestamps
 and file size alone never authorize reuse. Failed health checks retain the
 previous `readAt`, and source, restart and push diagnostics remain independent.
@@ -1020,17 +1021,32 @@ changes the premise of the safety check. The Codex test command therefore uses
 ## Browser UI behavior
 
 The individual-board UI is an embedded `PAGE` string in `api_endpoint.py`. Workspace
-mode adds locally served `workspace.js` and `workspace.css`; there is no separate asset
+mode adds locally served `workspace.js` and `workspace.css`; both modes serve
+`browser_stream.js` locally. There is no separate asset
 build or browser dependency download. Inter's Latin and Latin Extended subsets are served locally
 with immutable caching; all board/page responses are no-store.
 
 Important UI mechanics:
 
-- Poll `/api/v001/status` every five seconds and refresh the workspace sidebar every ten seconds.
-  Prefer the admitted content version to detect changes, including timestamp-preserving edits.
-- Treat a successful actual byte read with valid admission, not a socket response or `stat`,
-  as proof of life. Exact unchanged bytes may reuse their already verified admission.
-  Server `readAt` advances independently of browser download/render completion.
+- Read the initial snapshot, then use one SSE stream per tab: `/api/v001/events`
+  for a standalone board, or `/api/v001/workspace/events` for the catalog and
+  selected board. Persisted Human and Bot changes produce small metadata; fetch
+  the board when its admitted `contentVersion` changes and resnapshot on reconnect.
+  This single-local-tab design needs no SharedWorker or cross-tab coordination.
+- While SSE subscribers are present, one board health producer runs every five
+  seconds and one catalog producer runs every ten seconds. After the last listener
+  closes, producers pause I/O; an in-flight read may finish. The first returning
+  view wakes them and resnapshots. The five-second heartbeat does no JSON I/O and
+  is not a confirmed sync. Latest-only bounded
+  process memory has no journal, deltas or replay. Shutdown wakes streams, closes
+  upstream connections and joins workers before releasing the writer lease.
+- Last confirmed sync is the time the browser last accepted and rendered an
+  authoritative board snapshot. Keep it separate from connection state, with
+  fixed-width time fields and at least two hour digits. A heartbeat cannot advance
+  it. Stream updates are distinct from Human-only owner chat notifications.
+- Server `readAt` separately records successful byte read and admission, not a
+  socket response or `stat`. Exact unchanged bytes may reuse their already verified
+  admission; this diagnostic advances independently of browser snapshot rendering.
 - Repaint lanes wholesale while preserving unsent comment, editor, new-card, search,
   and view state.
 - Use session storage to survive one guarded reload when the page build differs from

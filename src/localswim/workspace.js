@@ -6,7 +6,7 @@
   const preferencesRoute = '/api/v001/workspace/preferences';
   let preferences = null, pinCommands = [], savingPins = false, pinFailure = '', pinRetryAt = 0;
   let pinFailurePermanent = false;
-  let gatewayPush = null;
+  let gatewayPush = null, pendingCatalog = null;
   let gatewayStatus = normalizePageStatus(null);
   window.workspaceEpoch = 0;
   const link = document.createElement('link');
@@ -189,6 +189,13 @@
     document.getElementById('title').textContent = entry ? entry.project : current || 'Workspace';
     document.title = 'Board unavailable · localswim';
   }
+  function resume() {
+    if (recoverOnCatalog && !window.workspaceReady && current
+        && catalog.some(entry => entry.key === current && !entry.error)) {
+      select(current, 'none'); return true;
+    }
+    return false;
+  }
   function select(key, history = 'push') {
     if (!key) { error('No supported boards were found. Add a board to the workspace folder, then retry.'); return; }
     if (key === current && window.workspaceReady) return;
@@ -201,6 +208,7 @@
     pending = state.records[key] || {};
     drafts = {...(pending.drafts || {})}; query = pending.query || ''; unhideOld = !!pending.unhideOld;
     staleReloadState = null; HAY.clear(); seen = null; lastOk = 0; lastCta = null;
+    streamBoardError = false;
     data = {lanes: [], edges: [], counts: {}, actors: [], revision: 0};
     authoritativeData = null;
     codeStale = false; restarting = false; restartProblem = null;
@@ -216,7 +224,7 @@
     recoverOnCatalog = false;
     board.textContent = 'Loading ' + entry.project + '…';
     window.workspaceReady = true;
-    tick(); persist();
+    window.BoardStream.select(key); tick(true); persist();
   }
   const boardNames = new Intl.Collator('en', {sensitivity: 'accent'});
   function minutesSinceEdit(entry, now) {
@@ -468,13 +476,14 @@
     document.getElementById('ws-toggle').setAttribute('aria-label', state.collapsed ? 'Expand boards' : 'Collapse boards');
     document.getElementById('ws-toggle').setAttribute('aria-expanded', String(!state.collapsed));
   }
-  async function refresh(retry = false) {
+  async function refresh(retry = false, pushed = null) {
     retryRequested = retryRequested || retry;
-    if (refreshing) return; refreshing = true;
+    if (refreshing) { if (pushed) pendingCatalog = pushed; return; } refreshing = true;
     const retryNow = retryRequested; retryRequested = false;
     try {
-      const value = await apiGet('/api/v001/workspace');
-      const session = await apiGet('/api/v001/browser-session');
+      const value = pushed || await apiGet('/api/v001/workspace');
+      const session = pushed && initialized ? {workspaceIdentity:value.identity,token:API_TOKEN}
+        : await apiGet('/api/v001/browser-session');
       if (session.workspaceIdentity !== value.identity || typeof session.token !== 'string' || !session.token)
         throw new Error('The workspace session could not be recovered.');
       if (initialized && storageKey !== 'localswim.workspace.' + value.identity)
@@ -503,7 +512,11 @@
       if (current && !catalog.some(entry => entry.key === current && !entry.error) && window.workspaceReady) { persist(); window.workspaceEpoch++; error('This board is missing or cannot be read. Choose another board or retry.', true); }
       renderRows(); showWorkspaceStatus(); flushPinCommands(); renderLive();
     } catch (err) { document.getElementById('ws-status').textContent = String(err); if (!initialized || retryNow) error('Could not reach the workspace. Restart localswim, then Retry.'); }
-    finally { refreshing = false; if (retryRequested) refresh(); }
+    finally {
+      refreshing = false;
+      if (pendingCatalog) { const value = pendingCatalog; pendingCatalog = null; refresh(false, value); }
+      else if (retryRequested) refresh();
+    }
   }
   function reconcile(prefix, path, body) {
     const key = decodeURIComponent(prefix.split('/').pop());
@@ -530,12 +543,17 @@
     try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
   window.WorkspaceUI = {capture: persist, loaded, scrolls, restoreScroll, error, reconcile,
-    pageStatus: () => gatewayStatus};
+    pageStatus: () => gatewayStatus, selected: () => current,
+    catalog: value => refresh(false, value), resume, heartbeat: flushPinCommands};
   document.getElementById('ws-toggle').onclick = () => { finishSidebarResize(); const saved = scrolls(); state.collapsed = !state.collapsed; persist(); renderRows(); alignCardStarts(); restoreScroll(saved); };
   document.getElementById('ws-find').oninput = renderRows;
   document.addEventListener('input', persist);
   document.addEventListener('change', persist);
   window.addEventListener('beforeunload', persist);
   window.addEventListener('popstate', () => { const key = urlKey(); if (key) select(key, 'none'); });
-  refresh(); setInterval(refresh, 10000);
+  refresh();
+  window.BoardStream.start('workspace', message => {
+    if (message.type === 'connection' && message.connected) refresh();
+    streamMessage(message);
+  });
 })();

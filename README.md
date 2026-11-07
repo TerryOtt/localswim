@@ -157,7 +157,7 @@ at least 4.5:1 contrast, while configured accent colors remain unchanged for
 decorative borders. This does not declare the language of user-authored content.
 
 Unavailable or malformed boards display an error; an unknown bookmark never silently
-opens another board. Reads time out after 20 seconds, with one poll in flight for each
+opens another board. Reads time out after 20 seconds, with one read in flight for each
 board selection. If the workspace or board service stops, the page shows a recovery
 message and **Retry**, preserving saved drafts and sidebar preferences. Restart the
 workspace with the launch command above, then select Retry. A restarted gateway's
@@ -744,6 +744,7 @@ The browser and CLI use these loopback routes:
 
 ~~~text
 GET  /api/v001/status
+GET  /api/v001/events
 GET  /api/v001/browser-session
 GET  /api/v001/board
 POST /api/v001/cards
@@ -816,6 +817,7 @@ A workspace also exposes:
 
 ~~~text
 GET  /api/v001/workspace
+GET  /api/v001/workspace/events?board=<encoded-key>
 GET  /api/v001/workspace/preferences
 POST /api/v001/workspace/preferences
 GET  /api/v001/workspace/boards/<encoded-key>/status
@@ -912,15 +914,30 @@ decoration and refreshes authoritative state after a submitted move, containing
 request, response-read, and refresh failures. An uncertain move is not replayed;
 inspect the refreshed board before trying again.
 
-## Polling, pending edits, and conflicts
+## Live updates, pending edits, and conflicts
 
-Visible boards poll every five seconds; the workspace sidebar refreshes every ten
-seconds. Initial loading and completed user actions can refresh immediately. A
-request already in flight is not duplicated by the periodic timer. Unchanged board
-bytes reuse verified admission, while each health read still reads the actual file.
-The displayed file-read age uses the server's successful read time, independently
-of a later snapshot download or render. An admitted content marker also detects
-valid edits that preserve file timestamps and external-policy changes.
+The browser initially reads the current board and then receives small Server-Sent
+Event metadata for persisted Human and Bot changes. It fetches the board again when
+its admitted content version changes and resnapshots on reconnect. Workspace mode
+uses one combined stream for the catalog and selected board; standalone mode uses
+one board stream. This is designed for one local browser tab shared by a Human and
+Bot, with updates within a few seconds. It is separate from the Human-only owner
+chat notification feature.
+
+While SSE subscribers are present, one service-wide board health producer checks
+every five seconds and one gateway catalog producer checks every ten seconds. After
+the last listener closes, producers pause I/O (an in-flight read may finish); the
+first returning view wakes them and resnapshots. Unchanged bytes reuse verified admission. Five-second stream heartbeats perform no
+JSON reads and do not confirm a successful sync. The visible Last confirmed sync
+age reflects when the browser last accepted and rendered an authoritative board
+snapshot, separately from stream connection state. The server `readAt` is a separate
+diagnostic for successful file read and admission. Fixed-width time fields retain at
+least two digits for hours.
+
+Streams hold only bounded latest state in process memory, with no journal, deltas
+or replay; reconnect obtains a fresh snapshot. Shutdown wakes streams, closes upstream
+connections and joins workers before releasing the writer lease. No shared browser
+worker, cross-tab coordination, external service or framework is required.
 
 Edits, moves and new cards can appear locally with a pending indicator before they
 are persisted. Existing-card browser writes retain the card's original opaque
@@ -944,12 +961,12 @@ automatically. Validation refusals retain their existing 409/413 behavior.
 ## Live code updates
 
 The status endpoint reports snapshot health separately from source and publishing
-diagnostics. Each poll makes one protected admission attempt. Expected disk-read,
+diagnostics. Each status request makes one protected admission attempt. Expected disk-read,
 parse (including excessive JSON nesting), validation or timestamp failures return
 HTTP 200 with `ok: false`, an
 `unreadable` stamp and an error; source/build/restart and push metadata remain present.
 Retained valid memory does not make failed disk admission healthy. Restoring a valid
-snapshot allows a later poll to accept its state and policy without restarting.
+snapshot allows a later health check to accept its state and policy without restarting.
 
 The server watches its installed Python modules and workspace JavaScript/CSS assets. A valid
 change is debounced, preflighted in a child Python process and applied by gracefully

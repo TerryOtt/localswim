@@ -146,42 +146,65 @@ def test_optimistic_intents_recover_without_blind_replay(mode: str) -> None:
     assert json.loads(result.stdout) == {"ok": True}
 
 
-POLL_DRIVER = r"""
+STREAM_DRIVER = r"""
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
-const input=JSON.parse(fs.readFileSync(0,'utf8'));let calls=0,resolveStatus;
+const input=JSON.parse(fs.readFileSync(0,'utf8'));let calls=[],waiters=[],paints=0;
 const context=vm.createContext({AbortController,AbortSignal,queueMicrotask,Date,
  window:{workspaceEpoch:1},API_PREFIX:'/one',pollingEpoch:null,pollingController:null,pollingQueued:false,
- lastOk:0,seen:0,fileMs:0,data:{},authoritativeData:null,
- serverBuild:null,codeStale:false,restarting:false,restartProblem:null,pushState:null,
- HAY:{clear(){}},paint(){},restoreStaleReloadState(){},renderLive(){},
- acknowledgeSnapshot(value){context.authoritativeData=value;return true},projectActions(value){return value},
- async apiGet(path,signal){calls++;
-  if(input.mode==='overlap')return await new Promise(resolve=>resolveStatus=resolve);
-  if(input.mode==='digest')return path.endsWith('/status')?{ok:true,readAt:123,mtime:0,contentVersion:'changed-digest'}:{revision:1,lanes:[]};
-  if(path.endsWith('/status'))return {ok:input.mode!=='failedstatus',readAt:123,mtime:1};
-  throw Error('render read failed');
- }});
+ queuedMeta:null,queuedForce:false,lastOk:0,seen:'same',fileMs:0,data:{},authoritativeData:null,
+ serverBuild:null,codeStale:false,restarting:false,restartProblem:null,pushState:null,streamBoardError:false,
+ streamConnected:false,streamLastMessage:0,
+ HAY:{clear(){}},paint(){paints++},restoreStaleReloadState(){},renderLive(){},
+ acknowledgeSnapshot(value){if(value.revision<2)return false;context.authoritativeData=value;return true},
+ projectActions(value){return {...value,optimistic:true}},
+ apiGet(path,signal){calls.push({path,signal});return new Promise(resolve=>waiters.push(resolve));}
+});
 const start=input.page.indexOf('async function tick('),end=input.page.indexOf('\ntick();',start);
 vm.runInContext(input.page.slice(start,end),context);
+const run=code=>vm.runInContext(code,context), settle=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
- const first=vm.runInContext('tick()',context);
- if(input.mode==='overlap'){
-  await vm.runInContext('tick()',context);assert.equal(calls,1);
-  resolveStatus({ok:true,readAt:123,mtime:0});await first;assert.equal(calls,1);
- }else{await first;assert.equal(context.lastOk,input.mode==='failedstatus'?0:123000);
-  if(input.mode==='digest'){assert.equal(calls,2);assert.equal(context.seen,'changed-digest');}}
+ if(input.mode==='conditional'){
+  await run("tick(false,{ok:true,mtime:1,contentVersion:'same',readAt:123})");
+  assert.equal(calls.length,0);assert.equal(context.lastOk,0);
+  await run("streamMessage({type:'heartbeat',value:{}})");assert.equal(context.lastOk,0);
+  const pending=run("tick(false,{ok:true,contentVersion:'new'})");
+  waiters.shift()({revision:2,lanes:[]});await pending;
+  assert.equal(context.seen,'new');assert.ok(context.lastOk>0);assert.equal(context.data.optimistic,true);
+ }else if(input.mode==='reconnect'){
+  run("streamMessage({type:'connection',connected:true})");
+  assert.equal(calls.length,1);assert.equal(calls[0].path,'/one/board');
+  waiters.shift()({revision:2,lanes:[]});await settle();
+  run("streamMessage({type:'connection',connected:false})");
+  run("streamMessage({type:'connection',connected:true})");assert.equal(calls.length,2);
+  waiters.shift()({revision:2,lanes:[]});await settle();
+ }else if(input.mode==='navigation'){
+  const old=run('tick(true)');run("window.workspaceEpoch=2;API_PREFIX='/two'");
+  const fresh=run('tick(true)');assert.equal(calls[0].signal.aborted,true);
+  waiters[1]({revision:3,lanes:[]});await fresh;
+  waiters[0]({revision:2,lanes:[]});await old;
+  assert.equal(context.data.revision,3);assert.equal(paints,1);
+ }else if(input.mode==='cas'){
+  const pending=run("tick(false,{ok:true,contentVersion:'obsolete'})");
+  waiters.shift()({revision:1,lanes:[]});await pending;
+  assert.equal(context.lastOk,0);assert.equal(context.seen,'same');assert.equal(paints,0);
+ }else{
+  const first=run('tick(true)');run("tick(false,{ok:true,contentVersion:'latest'})");
+  waiters.shift()({revision:2,lanes:[]});await first;await settle();
+  assert.equal(calls.length,2);waiters.shift()({revision:3,lanes:[]});await settle();
+  assert.equal(context.seen,'latest');assert.equal(context.data.revision,3);
+ }
  process.stdout.write('ok');
 })().catch(error=>{console.error(error);process.exitCode=1});
 """
 
 
-@pytest.mark.parametrize("mode", ["overlap", "failedstatus", "freshread_failedrender", "digest"])
-def test_polling_is_bounded_and_file_freshness_is_independent(mode: str) -> None:
+@pytest.mark.parametrize("mode", ["conditional", "reconnect", "navigation", "cas", "coalesced"])
+def test_push_snapshots_preserve_navigation_cas_and_confirmed_sync(mode: str) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Optional Node.js executable is unavailable.")
     result = subprocess.run(
-        [node, "-e", POLL_DRIVER],
+        [node, "-e", STREAM_DRIVER],
         input=json.dumps({"page": api_endpoint.PAGE, "mode": mode}),
         capture_output=True,
         text=True,
@@ -364,3 +387,175 @@ def test_late_add_confirmation_resolves_original_form_without_duplicate(mode: st
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok"
+
+
+TRANSPORT_DRIVER = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));
+function tab(){
+ const sources=[],messages=[],handlers={};
+ class EventSource {
+  constructor(url){this.url=url;this.listeners={};this.closed=false;sources.push(this)}
+  close(){this.closed=true}
+  addEventListener(type,callback){this.listeners[type]=callback}
+ }
+ const window={addEventListener(type,callback){handlers[type]=callback}};
+ const context=vm.createContext({window,EventSource,JSON,encodeURIComponent});
+ vm.runInContext(input.source,context);
+ window.BoardStream.start('workspace',message=>messages.push(message));
+ window.BoardStream.select('one/board');
+ return {window,sources,messages,handlers};
+}
+const tabs=[tab(),tab(),tab()];
+for(const t of tabs){
+ assert.equal(t.sources.filter(s=>!s.closed).length,1);
+ const old=t.sources.at(-1);assert.equal(old.url,'/api/v001/workspace/events?board=one%2Fboard');
+ old.onopen();assert.equal(t.messages.at(-1).connected,true);
+ old.onerror();assert.equal(t.messages.at(-1).connected,false);
+ old.onopen();assert.equal(t.messages.at(-1).connected,true);
+ t.window.BoardStream.select('two');assert.equal(old.closed,true);
+ const count=t.messages.length;
+ old.listeners.board({data:JSON.stringify({board:'one/board',status:{ok:true}})});
+ old.onopen();assert.equal(t.messages.length,count);
+ assert.equal(t.sources.filter(s=>!s.closed).length,1);
+ const selected=t.sources.at(-1);
+ selected.listeners.board({data:JSON.stringify({board:'two',status:{ok:true}})});
+ assert.equal(t.messages.at(-1).value.board,'two');
+ t.handlers.pagehide();assert.equal(selected.closed,true);
+ selected.onopen();assert.equal(t.messages.length,count+1);
+ t.handlers.pageshow({persisted:true});assert.equal(t.sources.filter(s=>!s.closed).length,1);
+}
+assert.equal(tabs.flatMap(t=>t.sources).filter(s=>!s.closed).length,3);
+process.stdout.write('ok');
+"""
+
+
+def test_three_tabs_each_keep_one_stream_and_release_superseded_connections() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Optional Node.js executable is unavailable.")
+    source = (
+        pathlib.Path(api_endpoint.__file__)
+        .with_name("browser_stream.js")
+        .read_text(encoding="utf-8")
+    )
+    result = subprocess.run(
+        [node, "-e", TRANSPORT_DRIVER],
+        input=json.dumps({"source": source}),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+def test_browser_timers_only_render_local_clock_without_network_polling() -> None:
+    workspace = (
+        pathlib.Path(api_endpoint.__file__).with_name("workspace.js").read_text(encoding="utf-8")
+    )
+    assert "setInterval(tick" not in api_endpoint.PAGE
+    assert "setInterval(refresh" not in workspace
+    assert "setInterval(renderLive, 500)" in api_endpoint.PAGE
+    assert "'/status'" not in api_endpoint.PAGE
+    assert 'data-reserve="00"><span\n        id="live-clock-hour"' in api_endpoint.PAGE
+    assert "dataset.reserve = plural" in api_endpoint.PAGE
+
+
+PIN_HEARTBEAT_DRIVER = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));let now=1000,attempts=0;
+const context=vm.createContext({Date:{now:()=>now},TypeError,Error,
+ savingPins:false,preferences:{revision:1},pinCommands:[{action:'pin',key:'one'}],
+ pinRetryAt:0,pinFailure:'',pinFailurePermanent:false,
+ showWorkspaceStatus(){},projectPins(){},persist(){},renderRows(){},announce(){},
+ async savePinCommand(){attempts++;if(attempts===1)throw new TypeError('offline')},
+ streamLastMessage:0,window:{WorkspaceUI:{}},renderLive(){}});
+function section(source,start,end){return source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)))}
+vm.runInContext(section(input.workspace,'  async function flushPinCommands()',
+ '  function queuePinCommand('),context);
+context.window.WorkspaceUI.heartbeat=()=>vm.runInContext('flushPinCommands()',context);
+vm.runInContext(section(input.page,'function streamMessage(', '\ntick();'),context);
+const heartbeat=()=>vm.runInContext("streamMessage({type:'heartbeat',value:{}})",context);
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+ await vm.runInContext('flushPinCommands()',context);
+ assert.equal(attempts,1);assert.equal(context.pinRetryAt,6000);
+ now=5999;heartbeat();await settle();assert.equal(attempts,1);
+ now=6000;heartbeat();heartbeat();await settle();
+ assert.equal(attempts,2);assert.equal(context.pinCommands.length,0);
+ now=12000;heartbeat();await settle();assert.equal(attempts,2);
+ process.stdout.write('ok');
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+
+
+def test_heartbeat_retries_only_pending_pins_after_existing_backoff() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Optional Node.js executable is unavailable.")
+    workspace = (
+        pathlib.Path(api_endpoint.__file__).with_name("workspace.js").read_text(encoding="utf-8")
+    )
+    result = subprocess.run(
+        [node, "-e", PIN_HEARTBEAT_DRIVER],
+        input=json.dumps({"page": api_endpoint.PAGE, "workspace": workspace}),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+RECOVERY_DRIVER = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));let selections=0,ticks=[],errors=[];
+const context=vm.createContext({Date,streamConnected:false,streamLastMessage:0,
+ recoverOnCatalog:false,current:'one',catalog:[{key:'one'}],window:{workspaceReady:false},
+ select(key,history){selections++;assert.equal(key,'one');assert.equal(history,'none');
+   context.window.workspaceReady=true;context.recoverOnCatalog=false;ticks.push({force:true})},
+ tick(force,meta){ticks.push({force,meta})},renderLive(){}});
+function section(source,start,end){return source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)))}
+vm.runInContext(section(input.workspace,'  function resume()', '  function select('),context);
+context.window.WorkspaceUI={resume:()=>vm.runInContext('resume()',context),selected:()=> 'one',heartbeat(){}};
+vm.runInContext(section(input.page,'function streamMessage(', '\ntick();'),context);
+const healthy=()=>vm.runInContext("streamMessage({type:'board',value:{board:'one',status:{ok:true,contentVersion:'same'}}})",context);
+healthy();assert.equal(selections,0); // A nonrecoverable surface is preserved.
+context.recoverOnCatalog=true;
+context.catalog=[{key:'one',error:'missing'}];healthy();assert.equal(selections,0);
+context.catalog=[{key:'one'}];
+vm.runInContext("streamMessage({type:'board',value:{board:'one',status:{ok:false}}})",context);
+assert.equal(selections,0);
+healthy();assert.equal(selections,1);assert.equal(context.window.workspaceReady,true);
+assert.equal(ticks.at(-1).meta.contentVersion,'same');
+context.window.workspaceReady=false;context.recoverOnCatalog=true;ticks=[];
+vm.runInContext("streamMessage({type:'connection',connected:true})",context);
+assert.equal(selections,2);assert.equal(ticks.length,1);assert.equal(ticks[0].force,true);
+process.stdout.write('ok');
+"""
+
+
+def test_healthy_stream_recovers_transient_surface_without_replaying_mutations() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Optional Node.js executable is unavailable.")
+    workspace = (
+        pathlib.Path(api_endpoint.__file__).with_name("workspace.js").read_text(encoding="utf-8")
+    )
+    result = subprocess.run(
+        [node, "-e", RECOVERY_DRIVER],
+        input=json.dumps({"page": api_endpoint.PAGE, "workspace": workspace}),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+    assert "window.WorkspaceUI.error(message, true)" in api_endpoint.PAGE

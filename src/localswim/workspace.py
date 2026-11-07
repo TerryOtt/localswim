@@ -25,10 +25,12 @@ from . import (
     api_endpoint,
     attachments,
     board_state,
+    browser_events,
     gateway_publish,
     service_output,
     service_ownership,
     workspace_config,
+    workspace_events,
 )
 
 if TYPE_CHECKING:
@@ -763,6 +765,16 @@ class WorkspaceServer(http.server.ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], workspace: Workspace) -> None:
         self.workspace = workspace
         super().__init__(address, WorkspaceHandler)
+        self.events = workspace_events.WorkspaceEvents(
+            workspace, lambda: {**workspace.catalog(), **api_endpoint.source_status(self)}
+        )
+
+    def server_close(self) -> None:
+        """Wake streams and stop upstream relays before joining HTTP workers."""
+        # TCPServer invokes this during a failed bind, before events exists.
+        if hasattr(self, "events"):
+            self.events.close()
+        super().server_close()
 
 
 def _rebase(value: board_state.JsonValue, prefix: str) -> board_state.JsonValue:
@@ -977,7 +989,7 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
 
     def _proxy(self, route: str, *, write: bool = False) -> None:
         encoded_key, separator, tail = route.removeprefix(BOARD_PREFIX).partition("/")
-        if not separator or not tail or tail == "shutdown":
+        if not separator or not tail or tail in {"shutdown", "events"}:
             self._json({"error": "unknown workspace route"}, 404)
             return
         if write and self.headers.get("Authorization") != "Bearer " + self.workspace.token:
@@ -1081,7 +1093,29 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
         except ValueError, TypeError, RecursionError:
             self._json({"error": "invalid preferences command"}, 400)
         else:
+            cast("WorkspaceServer", self.server).events.wake_catalog()
             self._json(snapshot.to_json())
+
+    def _events_get(self) -> None:
+        """Stream one shared catalog plus the explicitly selected board statuses."""
+        try:
+            key = workspace_events.selected_board(urllib.parse.urlsplit(self.path).query)
+        except ValueError:
+            self._json({"error": "invalid workspace events selection"}, 400)
+            return
+        events = cast("WorkspaceServer", self.server).events
+        try:
+            mailbox = events.subscribe(key)
+        except ValueError:
+            self._json({"error": "unknown workspace board"}, 404)
+            return
+        except OSError, http.client.HTTPException:
+            self._json({"error": "board service unavailable"}, 503)
+            return
+        try:
+            browser_events.stream_browser_events(self, mailbox, events.stop_event)
+        finally:
+            events.unsubscribe(mailbox)
 
     def do_GET(self) -> None:
         """Read the catalog, page assets, or a scoped upstream resource."""
@@ -1090,6 +1124,8 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             self._json(
                 {"token": self.workspace.token, "workspaceIdentity": self.workspace.identity}
             )
+        elif route == PREFIX + "/events":
+            self._events_get()
         elif route in (PREFERENCES_ROUTE, PREFIX):
             try:
                 document = (
@@ -1105,7 +1141,7 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
             self._proxy(route)
         elif route in ("/", "/index.html") or route.startswith("/board/"):
             self._page(route)
-        elif route in ("/workspace.js", "/workspace.css"):
+        elif route in ("/workspace.js", "/workspace.css", "/browser_stream.js"):
             mime = "text/javascript" if route.endswith(".js") else "text/css"
             self._send((ASSET_DIR / route.removeprefix("/")).read_bytes(), mime + "; charset=utf-8")
         elif route == "/favicon.svg":

@@ -38,7 +38,7 @@ const window={location,localswimWorkspace:!!input.workspace,history,
 const context=vm.createContext({window,location,URL,Date,document:{getElementById:element},
   sessionStorage:{setItem(k,v){stored[k]=v}},serverBuild:input.boardBuild || null,
   codeStale:!!input.boardStale,restarting:!!input.boardRestarting,restartProblem:input.boardProblem||null,
-  pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,LIVE_MS:5000,WARN_MS:15000,
+  streamConnected:true,streamLastMessage:Date.now(),streamBoardError:false,pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,LIVE_MS:5000,WARN_MS:15000,
   subjectEdit:null,detailEditVersion:null,mkAttempt:null,relationshipSpecs:()=>[],
   drafts:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
   STALE_RELOAD_STATE_KEY:'saved',STALE_RELOAD_QUERY:'_localswim_build',staleReloadStarted:false,
@@ -80,7 +80,7 @@ if(input.mode==='card-focus'){
     closeEditors(){},relationshipDraft:null,openCard:id=>opened.push(id)});
   vm.runInContext(section(input.page,'function card(', '// **ONE place decides'),context);
   vm.runInContext(section(input.page,'// Card IDs survive reordering;',
-    '// ---- proof of life'),context);
+    '// ---- connection health'),context);
   context.applyFilter=()=>{
     for(const c of rendered)if(c.dataset.id===context.filterOut)c.classList.add('nomatch')};
   const item=id=>({id,ticket:'#0001',subject:'Title '+id,state:'ready',
@@ -161,7 +161,7 @@ if(input.mode==='card-focus'){
   Object.assign(context,{userLabel:()=> 'Synthetic reader',measureCards:()=>new Map(),
     alignCardStarts(){},playFlip(){},applyFilter(){},focusedCardId:()=>null});
   context.document.createElement=()=>({});
-  vm.runInContext(section(input.page,'function paint()', '\n// ---- proof of life'),context);
+  vm.runInContext(section(input.page,'function paint()', '\n// ---- connection health'),context);
   if(input.gesture){element('alerts').checked=true;await listeners.change()}
   for(const count of [0,1,1,2]){
     context.data={project:'Synthetic board',browserUser:'reader',lanes:[],counts:{blocked:count}};
@@ -288,7 +288,7 @@ if(input.mode==='card-focus'){
   const haystacks=vm.runInContext('items.map(hay)',context);
   const cached=vm.runInContext(`items[0].subject='replacement';hay(items[0])`,context);
   // A changed payload must invalidate the existing ID through the actual poll handler.
-  Object.assign(context,{pollingEpoch:null,pollingController:null,pollingQueued:false,
+  Object.assign(context,{pollingEpoch:null,pollingController:null,pollingQueued:false,queuedMeta:null,queuedForce:false,
     AbortController,AbortSignal,queueMicrotask,seen:0,API_PREFIX:'/api/v001',
     apiGet:async path=>path.endsWith('/status')?{ok:true,mtime:1}:
       {actors:input.actors,lanes:[{state:'completed',items:input.items}]},
@@ -362,7 +362,7 @@ if(input.mode==='card-focus'){
 }else{
   const helpers=section(input.page,'function saveStaleReloadState()',
     '// **Terry specified this bar himself:');
-  const live=section(input.page,'function renderLive()', '// **POLLING IS THE DESIGN,');
+  const live=section(input.page,'function renderLive()', '// Push-driven snapshots:');
   vm.runInContext(helpers+live+'\nrenderLive();',context);
   if(input.repeat)vm.runInContext('renderLive();',context);
   process.stdout.write(JSON.stringify({navigations,href,stale:element('stale').textContent,

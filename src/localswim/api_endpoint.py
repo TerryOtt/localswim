@@ -40,7 +40,8 @@ Claude uses wide open, which is exactly what happened on the first version.
 
 ## Three staleness edges, and each looks like the server being broken
 
-**A change to the BOARD FILE is live**, picked up within `POLL_MS`.
+**Committed board changes are announced over SSE.** A shared health check also
+detects external file changes independently of browser requests.
 
 **A change to THIS FILE or to `board_state.py` needs a RESTART.**
 
@@ -87,6 +88,7 @@ from . import (
     activity_feed,
     attachments,
     board_state,
+    browser_events,
     codex_signal,
     notifications,
     service_output,
@@ -165,6 +167,9 @@ def build_id() -> str:
                 pathlib.Path(__file__).with_name("monitor_activity_client.py"),
                 pathlib.Path(__file__).with_name("notifications.py"),
                 pathlib.Path(__file__).with_name("codex_signal.py"),
+                pathlib.Path(__file__).with_name("browser_events.py"),
+                pathlib.Path(__file__).with_name("workspace_events.py"),
+                pathlib.Path(__file__).with_name("browser_stream.js"),
                 pathlib.Path(__file__).with_name("workspace.js"),
                 pathlib.Path(__file__).with_name("workspace.css"),
             )
@@ -229,6 +234,9 @@ CODE_FILES = (
     pathlib.Path(__file__).with_name("monitor_activity_client.py"),
     pathlib.Path(__file__).with_name("notifications.py"),
     pathlib.Path(__file__).with_name("codex_signal.py"),
+    pathlib.Path(__file__).with_name("browser_events.py"),
+    pathlib.Path(__file__).with_name("workspace_events.py"),
+    pathlib.Path(__file__).with_name("browser_stream.js"),
     pathlib.Path(__file__).with_name("workspace.js"),
     pathlib.Path(__file__).with_name("workspace.css"),
 )
@@ -513,9 +521,17 @@ class BoardHttpServer(http.server.ThreadingHTTPServer):
         self._drain_deadline: float | None = None
         self._drain_timer: threading.Timer | None = None
         self._notification_store: BoardStore | None = None
+        self.browser_event_hub: browser_events.BrowserEventHub | None = None
+        self.browser_event_producer: browser_events.BrowserEventProducer | None = None
+        self.browser_event_stop = threading.Event()
         super().__init__(server_address, handler)
         self._notification_store = STORE
+        self.browser_event_hub = browser_events.BrowserEventHub()
+        self.browser_event_producer = browser_events.BrowserEventProducer(
+            self.browser_event_hub, lambda: Handler.status_document(self), interval=5.0
+        )
         if self._notification_store is not None:
+            self._notification_store.browser_event_producer = self.browser_event_producer
             self._notification_store.start_notifications()
 
     def process_request(
@@ -574,6 +590,13 @@ class BoardHttpServer(http.server.ThreadingHTTPServer):
             self._drain_deadline = time.monotonic() + HTTP_INCOMPLETE_DRAIN_S
             self._drain_timer = threading.Timer(HTTP_INCOMPLETE_DRAIN_S, self._expire_incomplete)
             self._drain_timer.start()
+        # Indefinite SSE requests have already left the incomplete-input phase.
+        # Wake them before the HTTP worker join; producer admission retains ownership.
+        self.browser_event_stop.set()
+        if self.browser_event_hub is not None:
+            self.browser_event_hub.close()
+        if self.browser_event_producer is not None:
+            self.browser_event_producer.close()
 
     def shutdown(self) -> None:
         """Stop admissions and begin expiration before the serve loop stops."""
@@ -583,6 +606,9 @@ class BoardHttpServer(http.server.ThreadingHTTPServer):
     def server_close(self) -> None:
         """Preserve the non-daemon join before publisher/lease/restart handoff."""
         self.begin_drain()
+        # Another shutdown caller may have started draining without finishing its join.
+        if self.browser_event_producer is not None:
+            self.browser_event_producer.close()
         try:
             super().server_close()
         finally:
@@ -1258,6 +1284,7 @@ class BoardStore:
         self._admitted_board: board_state.Board | None = None
         self._content_version: str | None = None
         self._notifications: notifications.NotificationDispatcher | None = None
+        self.browser_event_producer: browser_events.BrowserEventProducer | None = None
         self._notification_config_lock = threading.Lock()
         self._board = self._admit(policy)
         self.policy = self._board.policy
@@ -1525,6 +1552,9 @@ class BoardStore:
                 predecessor = self._monitor_feed.observe() and predecessor
             # Replacement may succeed even when lock cleanup or publication raises.
             self._publish_candidate(committed)
+            if self.browser_event_producer is not None:
+                with contextlib.suppress(Exception):
+                    self.browser_event_producer.wake()
             events: list[board_state.JsonObject] = []
             try:
                 events = self._monitor_feed.publish(
@@ -2757,7 +2787,7 @@ PAGE = """<!doctype html>
         class="age-slot age-value" data-reserve="00"><span id="live-card-value"></span></span> <span
         id="live-card-unit" class="age-slot"><span
         id="live-card-unit-label"></span></span> ago</span></span>
-      <span id="live-file-read">· Last JSON file read: <span id="live-read-never">never</span><span
+      <span id="live-file-read">· Last confirmed sync: <span id="live-read-never">never</span><span
         id="live-read-age" hidden><span class="age-slot age-value" data-reserve="00"><span
         id="live-read-value"></span></span> <span id="live-read-unit" class="age-slot"><span
         id="live-read-unit-label"></span></span> ago</span></span>
@@ -2918,6 +2948,7 @@ move any card whoever owns it. Click to hand it over."></button>
   <form method="dialog"><button type="submit">OK</button></form>
 </dialog>
 %WORKSPACE%
+<script src="/browser_stream.js"></script>
 <script>
 let API_TOKEN = '%TOKEN%';
 let API_PREFIX = '%API_PREFIX%';
@@ -4896,31 +4927,15 @@ function paint() {
   if (openId) openCard(openId);
 }
 
-// ---- proof of life -------------------------------------------------------
-//
-// **Terry had a dashboard whose backend had crashed, and the page looked fine.**
-// His words: "past date/time does not mean it's the latest." A timestamp answers
-// "when did I last get data", which reads IDENTICALLY to "when did everything
-// stop" -- and the second one is the case you needed to notice.
-//
-// **So liveness is measured by the CLIENT against its own clock**, and it counts
-// UP. `lastOk` is the only thing this trusts: the moment a fetch actually
-// returned. Nothing the server sends can fake it, because a server that sends
-// nothing cannot move it.
-let lastOk = 0;
-// The board file's own mtime, in client-clock milliseconds. Both processes are on
-// this machine, so the two clocks are the same clock.
-let fileMs = 0;
-
-// **`lastOk` moves ONLY when Python confirms it read and parsed the board.** The
-// `/api/v001/status` route performs a real `board_state.load()`, and its `ok` field
-// is what this keys on -- not the HTTP status, because a socket answering proves the
-// process is up and nothing about the file.
-const LIVE_MS  = 10000;   // Allow one missed five-second poll before reporting staleness.
+// ---- connection health and confirmed snapshot age -------------------------
+// Heartbeats prove transport liveness; only accepted board snapshots confirm sync.
+let lastOk = 0, fileMs = 0;
+let streamConnected = false, streamLastMessage = 0, streamBoardError = false;
+const LIVE_MS = 45000;
 
 // **What THIS TAB is running, frozen at load time.** The server stamps it into the HTML,
 // so it describes the JavaScript the browser actually has -- not what the checkout says
-// now. Every poll compares it against the server's live answer.
+// now. Stream status compares it against the server's live answer.
 //
 // **This exists because a patched server and an unpatched page look IDENTICAL.** On
 // 2026-08-18 a P0 was fixed, verified, and reported still broken, because the tab had
@@ -4936,19 +4951,7 @@ let codeStale = false;
 let restarting = false;
 let restartProblem = null;
 let pushState = null;
-const WARN_MS  = 15000;  // Three five-second polling intervals.
 
-// **The dot's 2s breathing cycle is CSS, not JavaScript, and it is cosmetic.**
-// **Do not "fix" the poll rate to match it.** The badge claims Python read the
-// file within 5 seconds; polling at the animation's pace would leave two or three
-// chances to notice a failure before the claim is already false. The animation is
-// how it feels; POLL_MS is what it guarantees.
-
-// **One absolute clock, everything else relative.** Terry's call: the two
-// timestamps became "N seconds/minutes ago" and only `Currently` stays a wall
-// clock. **The absolute one is the tick; the relative ones are the answer.** A
-// past HH:MM:SS makes you subtract before you know whether to worry, and doing
-// arithmetic under stress is how a stale dashboard gets believed.
 function clockOf(ms) {
   // **`2:09:29pm`, lower case and closed up.** Terry's preference, stated as one:
   // "for AM/PM go all lower case and no space between second and am/pm."
@@ -5079,7 +5082,7 @@ function renderLive() {
   const nowMs = Date.now();
   const [clockHour, clockRest] = clockOf(nowMs);
 
-  // **Checked BEFORE the lastOk guard**, because a stale tab and a dead poll are
+  // **Checked BEFORE the lastOk guard**, because a stale tab and a lost stream are
   // independent failures. A confirmed mismatch repairs itself after preserving every
   // unsent field; the red pill is reserved for a failed automatic recovery.
   //
@@ -5135,7 +5138,7 @@ function renderLive() {
   // **none of the three is something Terry can act on**, and a pill he cannot act on
   // becomes scenery. Same loudness rule the toolchain banner runs on.
   //
-  // **It is placed BEFORE the `lastOk` return, like `#restart`.** A dead poll and an
+  // **It is placed BEFORE the `lastOk` return, like `#restart`.** A lost stream and an
   // unpushed board are independent, and hiding this one during the other is exactly
   // the bug that put the restart flag here.
   const push = document.getElementById('push');
@@ -5168,7 +5171,7 @@ function renderLive() {
   const cardAge = showAge('card', lastOk && fileMs);
   const readAge = showAge('read', lastOk);
   el.title = [buildText, cardAge && 'Last card update: ' + cardAge,
-    'Last JSON file read: ' + (readAge || 'never'), clockHour + clockRest]
+    'Last confirmed sync: ' + (readAge || 'never'), clockHour + clockRest]
     .filter(Boolean).join('  ·  ');
 
   if (!lastOk) {
@@ -5179,113 +5182,100 @@ function renderLive() {
     return;
   }
 
-  const age = nowMs - lastOk;
-
-  // **The badge flips at LIVE_MS, not at WARN_MS.** It carries a single claim --
-  // "Python read that file within the last 5 seconds" -- and a badge that stays
-  // green while quietly becoming false is the whole problem being fixed.
-  if (age < LIVE_MS) {
-    badge.className = '';
-    badge.textContent = 'LIVE';
-  } else if (age < WARN_MS) {
-    badge.className = 'warn';
-    badge.textContent = 'NO ANSWER ' + Math.round(age / 1000) + 's';
-  } else {
-    const s = Math.round(age / 1000);
-    badge.className = 'dead';
-    badge.textContent = 'STALE ' + (s < 90 ? s + 's' : Math.round(s / 60) + 'm');
-  }
-  // **The dot and the badge key off the SAME `lastOk` and the same threshold**, so
-  // they cannot disagree. Breathing green and a red STALE badge side by side would
-  // be worse than either alone.
-  const live = age < LIVE_MS;
+  const live = streamConnected && nowMs - streamLastMessage < LIVE_MS;
+  badge.className = live ? '' : 'dead';
+  badge.textContent = streamBoardError ? 'BOARD ERROR' : live ? 'CONNECTED' : 'RECONNECTING';
+  if (streamBoardError) badge.className = 'dead';
   dot.classList.toggle('stale', !live);
   dot.classList.toggle('alive', live);
 }
 
-// **POLLING IS THE DESIGN,** with five-second selected-board updates.
-// Requests never overlap for the selected epoch; navigation aborts superseded reads.
-// User actions queue an immediate follow-up when an existing poll is in flight.
+// Push-driven snapshots: navigation aborts superseded reads; bursts coalesce.
 let pollingEpoch = null, pollingController = null, pollingQueued = false;
-async function tick(force = false) {
+let queuedMeta = null, queuedForce = false;
+async function tick(force = false, meta = null) {
   if (window.localswimWorkspace && !window.workspaceReady) return;
   const epoch = window.workspaceEpoch;
-  if (pollingEpoch === epoch) { pollingQueued = pollingQueued || force; return; }
+  if (pollingEpoch === epoch) {
+    pollingQueued = true; queuedForce = queuedForce || force;
+    if (meta) queuedMeta = meta;
+    return;
+  }
   if (pollingController) pollingController.abort();
+  pollingQueued = false; queuedMeta = null; queuedForce = false;
   pollingController = new AbortController();
   const signal = AbortSignal.any([pollingController.signal, AbortSignal.timeout(20000)]);
   pollingEpoch = epoch;
   const prefix = API_PREFIX;
   try {
-    const meta = await apiGet(prefix + '/status', signal);
-    if (epoch !== window.workspaceEpoch) return;
-    if (meta.error && window.WorkspaceUI) throw new Error(meta.error);
-    // **Captured before the ok check**, because a stale tab and an unreadable board
-    // are independent failures and either can be true while the other is.
-    if (meta.build) serverBuild = meta.build;
-    // **Captured beside `build`, on both the ok and the failure path**, because a
-    // stale process and an unreadable board are independent and either can be true
-    // while the other is.
-    codeStale = !!meta.codeStale;
-    restarting = !!meta.restarting;
-    restartProblem = meta.restartProblem || null;
-    // **Captured on BOTH paths for the third time, and for the same reason.** A board
-    // that cannot be read and a board that cannot be pushed are independent failures.
-    pushState = meta.push || null;
-    // **`ok: false` does NOT refresh `lastOk`.** The server answered, but it
-    // could not read the board -- and a reachable server serving an unreadable
-    // file is exactly the state that must not look healthy.
-    if (meta.ok === false) {
-      if (window.WorkspaceUI)
-        throw new Error(meta.error || 'The board service could not read this board.');
-      renderLive(); return;
+    const marker = meta ? (typeof meta.contentVersion === 'string' ? meta.contentVersion : meta.mtime) : null;
+    if (meta) {
+      if (meta.build) serverBuild = meta.build;
+      codeStale = !!meta.codeStale; restarting = !!meta.restarting;
+      restartProblem = meta.restartProblem || null; pushState = meta.push || null;
+      streamBoardError = meta.ok === false;
+      if (meta.ok === false) {
+        if (window.WorkspaceUI) throw new Error(meta.error || 'The board service could not read this board.');
+        renderLive(); return;
+      }
+      if (Number.isFinite(meta.mtime)) fileMs = meta.mtime * 1000;
     }
-    if (Number.isFinite(meta.readAt)) lastOk = meta.readAt * 1000;
-    fileMs = meta.mtime * 1000;
-    const marker = typeof meta.contentVersion === 'string' ? meta.contentVersion : meta.mtime;
-    if (marker !== seen) {
+    if (force || !meta || marker !== seen) {
       const snapshot = await apiGet(prefix + '/board', signal);
       if (epoch !== window.workspaceEpoch) return;
       if (snapshot.error && !(snapshot.lanes || []).length) throw new Error(snapshot.error);
       if (!acknowledgeSnapshot(snapshot, prefix)) return;
       data = projectActions(authoritativeData || snapshot, prefix);
-      // **The search cache MUST die with the data that filled it.** Card #0061. A card
-      // that gains a comment keeps its id, so a cache keyed on the id alone would go on
-      // answering from the text that card had a minute ago -- and a search for a
-      // sentence Terry just wrote would report "no match".
-      HAY.clear();
-      paint();
-      restoreStaleReloadState();
+      HAY.clear(); paint(); restoreStaleReloadState();
       if (window.WorkspaceUI) window.WorkspaceUI.loaded();
-      // Commit the snapshot marker only after the UI successfully renders it.
-      seen = marker;
+      // Failed, superseded or CAS-obsolete responses never advance sync confirmation.
+      seen = marker; lastOk = Date.now(); streamBoardError = false;
     }
-    // Freshness belongs to the successful file read, independently of paint.
   } catch (e) {
-    // Superseded requests cannot replace another board's content or recovery state.
     if (epoch === window.workspaceEpoch && window.WorkspaceUI) {
       const message = e.name === 'TimeoutError' || e.name === 'AbortError'
         ? 'The board service did not respond in time. Retry when it is available.'
         : e instanceof TypeError
           ? 'The board service could not be reached. Restart localswim, then Retry.'
         : 'Could not load this board: ' + e.message;
-      window.WorkspaceUI.error(message);
+      window.WorkspaceUI.error(message, true);
     }
-    // Failed requests do not advance lastOk or the successfully rendered snapshot marker.
   } finally {
     if (pollingEpoch === epoch) {
       pollingEpoch = null; pollingController = null;
-      if (pollingQueued) { pollingQueued = false; queueMicrotask(() => tick()); }
+      if (pollingQueued) {
+        const nextMeta = queuedMeta, nextForce = queuedForce;
+        pollingQueued = false; queuedMeta = null; queuedForce = false;
+        queueMicrotask(() => tick(nextForce, nextMeta));
+      }
     }
   }
   if (epoch === window.workspaceEpoch) renderLive();
 }
+
+function streamMessage(message) {
+  if (message.type === 'connection') {
+    streamConnected = message.connected;
+    if (message.connected) {
+      streamLastMessage = Date.now();
+      if (!window.WorkspaceUI?.resume()) tick(true);
+    }
+  } else {
+    streamLastMessage = Date.now();
+    if (message.type === 'status') tick(false, message.value);
+    if (message.type === 'board' && window.WorkspaceUI?.selected() === message.value.board) {
+      if (message.value.status.ok !== false) window.WorkspaceUI.resume();
+      tick(false, message.value.status);
+    }
+    if (message.type === 'heartbeat') window.WorkspaceUI?.heartbeat();
+    if (message.type === 'catalog') window.WorkspaceUI?.catalog(message.value);
+  }
+  renderLive();
+}
+
 tick();
-setInterval(tick, %POLL%);
-// **A second timer, and it is not redundant.** If `tick` itself wedges -- a
-// hung fetch, a thrown error in paint -- the age would freeze at whatever it
-// last rendered and the page would look healthy forever. This one only reads
-// the clock, so it keeps counting when everything else has stopped.
+if (!window.localswimWorkspace) window.BoardStream.start('board', streamMessage);
+// Clock-only rendering never makes a network request or refreshes confirmed sync.
 setInterval(renderLive, 500);
 </script>
 </body>
@@ -5952,7 +5942,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Read polling must never become a 100 ms response-write timeout,
         # including refusals before command admission and parser errors.
         if isinstance(self.server, BoardHttpServer):
-            self.connection.settimeout(HTTP_IDLE_TIMEOUT_S)
+            self.connection.settimeout(
+                browser_events.SSE_WRITE_TIMEOUT_S
+                if getattr(self, "_browser_event_stream", False)
+                else HTTP_IDLE_TIMEOUT_S
+            )
         super().end_headers()
 
     def _send(self, body: bytes, ctype: str, code: int = 200) -> None:
@@ -6129,23 +6123,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(blob)
 
     def _status_get(self) -> None:
+        self._json(self.status_document(self.server))
+
+    @staticmethod
+    def status_document(server: socketserver.BaseServer) -> dict[str, object]:
         """Report one protected disk admission with independent service diagnostics."""
-        # **THE GREEN CIRCLE MEANS "PYTHON READ THAT FILE JUST NOW", so this
-        # route actually reads it.** Terry set the bar: *"green circle means
-        # python has actively polled and read that file within last 5 seconds."*
-        #
-        # **A `stat()` would have been cheaper and would have lied.** It proves
-        # the directory entry exists, not that the board is readable -- a
-        # truncated or half-written file passes `stat` and fails `load`. And a
-        # server answering HTTP proves only that the socket is up.
-        #
-        # **`ok` is the field the dot keys on.** Actual byte reads and validated admission distinguish a current file
-        # from a reachable service. Unchanged bytes reuse prior admission.
-        # **THE EMBEDDED POLICY IS RE-READ HERE TOO.** Terry's standing order is
-        # that a tool able to detect its own staleness resolves it. Schema 4 keeps
-        # lane labels, IDs, and permissions in the same snapshot as the state, so
-        # one validated board read refreshes them together.
-        code_meta = source_status(self.server)
+        # Keep actual disk admission for compatibility /status clients and the
+        # single shared SSE producer. Unchanged bytes reuse accepted parsing.
+        # `ok`/`readAt` describe disk health, independently of stream liveness or
+        # the browser's last accepted and rendered snapshot. A heartbeat proves
+        # only that the connection responds; it never fabricates a disk read.
+        code_meta = source_status(server)
 
         try:
             if STORE is not None:
@@ -6166,38 +6154,70 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # **`build` rides on the FAILURE path too.** An unreadable board and a
             # stale tab are independent problems, and the page must be able to tell
             # them apart while one of them is happening.
-            self._json(
-                {
-                    "ok": False,
-                    "mtime": 0,
-                    "stamp": "unreadable",
-                    "readAt": STORE.read_at if STORE is not None else None,
-                    **code_meta,
-                    "push": push_status(),
-                    "error": str(exc),
-                }
-            )
-            return
+            return {
+                "ok": False,
+                "mtime": 0,
+                "stamp": "unreadable",
+                "readAt": STORE.read_at if STORE is not None else None,
+                **code_meta,
+                "push": push_status(),
+                "error": str(exc),
+            }
         # **`codeStale` rides on BOTH paths, like `build` and for the same
         # reason.** An unreadable board and a stale process are independent
         # failures, and either can be true while the other is.
-        self._json(
-            {
-                "ok": True,
-                "mtime": mtime,
-                "stamp": stamp,
-                "readAt": read_at,
-                "contentVersion": content_version,
-                "revision": revision,
-                **code_meta,
-                "push": push_status(),
-            }
-        )
+        return {
+            "ok": True,
+            "mtime": mtime,
+            "stamp": stamp,
+            "readAt": read_at,
+            "contentVersion": content_version,
+            "revision": revision,
+            **code_meta,
+            "push": push_status(),
+        }
+
+    def _events_get(self) -> None:
+        """Subscribe to cached metadata; one producer serves every browser."""
+        server = self.server
+        if not isinstance(server, BoardHttpServer):
+            self._json({"error": "browser events require the board service"}, 503)
+            return
+        hub, producer = server.browser_event_hub, server.browser_event_producer
+        if hub is None or producer is None or server.browser_event_stop.is_set():
+            self._json({"error": "board service is stopping"}, 503)
+            return
+        mailbox = browser_events.BrowserEventMailbox()
+        try:
+            hub.subscribe(mailbox)
+            producer.start()
+        except RuntimeError:
+            mailbox.close()
+            self._json({"error": "board service is stopping"}, 503)
+            return
+        self._browser_event_stream = True
+        browser_events.stream_browser_events(self, mailbox, server.browser_event_stop)
+
+    def _browser_get(self, route: str) -> bool:
+        if route == API_PREFIX + "/events":
+            self._events_get()
+        elif route == API_PREFIX + "/notifications":
+            self._notifications_request()
+        elif route == "/browser_stream.js":
+            self._send(
+                pathlib.Path(__file__).with_name("browser_stream.js").read_bytes(),
+                "text/javascript; charset=utf-8",
+            )
+        else:
+            return False
+        return True
 
     def do_GET(self) -> None:
         if not self._admit_transport():
             return
         route = self.path.partition("?")[0]
+        if self._browser_get(route):
+            return
         if route in ("/v1/status", "/mtime"):
             # A pre-upgrade page needs one successful poll to discover the new build
             # and reload itself. This redirect preserves that migration path without
@@ -6214,8 +6234,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             )
         elif route == API_PREFIX + "/monitor-activity":
             self._monitor_activity_get()
-        elif route == API_PREFIX + "/notifications":
-            self._notifications_request()
         elif route == API_PREFIX + "/browser-session":
             if STORE is None:
                 raise board_state.BoardError("board store is not initialized")
@@ -6516,7 +6534,7 @@ def _print_board_startup(board: board_state.Board, port: int, drift: list[str]) 
         print(f"  WARNING: {FONT_DIR} is missing, so Inter will not load.")
 
     print(f"  view      : http://{HOST}:{port}/")
-    print(f"  polling   : every {POLL_MS} ms, repaints only when the file changes")
+    print("  updates   : server-sent events; shared five-second file health check")
     browser = next(user for user in board.users if user.id == board.browser_user)
     print(f"  {browser.label} may drag:")
     for a, b in board.policy.edges_for(board.browser_user):

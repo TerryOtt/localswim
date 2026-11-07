@@ -383,7 +383,14 @@ def test_startup_admission_refusal_never_starts_server_or_structural_http_fallba
     monkeypatch.setattr(api_endpoint, "push_status", dict)
     monkeypatch.setattr(board_state, "reload_rules_if_changed", lambda: None)
     statuses: list[dict[str, object]] = []
-    handler = cast("api_endpoint.Handler", SimpleNamespace(server=None, _json=statuses.append))
+    handler = cast(
+        "api_endpoint.Handler",
+        SimpleNamespace(
+            server=None,
+            _json=statuses.append,
+            status_document=api_endpoint.Handler.status_document,
+        ),
+    )
     api_endpoint.Handler._status_get(handler)  # noqa: SLF001 -- truthful health boundary
     assert statuses[-1]["ok"] is False
 
@@ -408,10 +415,18 @@ def test_root_page_refuses_candidate_title_cast_and_context(
     def capture_page(body: bytes, _content_type: str) -> None:
         pages.append(body)
 
+    def skip_browser_metadata(_route: str) -> bool:
+        return False
+
     # This page-admission probe starts after transport; socket tests cover that gate.
     handler = cast(
         "api_endpoint.Handler",
-        SimpleNamespace(path="/", _send=capture_page, _admit_transport=lambda: True),
+        SimpleNamespace(
+            path="/",
+            _send=capture_page,
+            _admit_transport=lambda: True,
+            _browser_get=skip_browser_metadata,
+        ),
     )
     api_endpoint.Handler.do_GET(handler)
     assert before == board_state.ACTORS
