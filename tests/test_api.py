@@ -661,6 +661,8 @@ def test_dirty_build_id_includes_source_fingerprint(
             "gateway_publish.py",
             "service_ownership.py",
             "service_output.py",
+            "activity_feed.py",
+            "monitor_activity_client.py",
             "workspace.js",
             "workspace.css",
         )
@@ -679,7 +681,14 @@ def test_dirty_build_id_includes_source_fingerprint(
     assert len(ident.removeprefix("deadbee-").removesuffix("-dirty")) == 8
     assert api_endpoint.build_id() == ident
 
-    for name in ("api_endpoint.py", "service_output.py", "workspace.js", "workspace.css"):
+    for name in (
+        "api_endpoint.py",
+        "service_output.py",
+        "activity_feed.py",
+        "monitor_activity_client.py",
+        "workspace.js",
+        "workspace.css",
+    ):
         original = sources[name]
         sources[name] = original + b"changed bytes\n"
         changed = api_endpoint.build_id()

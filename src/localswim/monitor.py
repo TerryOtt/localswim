@@ -12,12 +12,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
-import importlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from . import service_ownership
+from . import activity_feed, service_output, service_ownership
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Sequence
@@ -39,6 +39,7 @@ DEFAULT_QUIET_SECONDS = 15.0
 MAX_QUIET_SECONDS = 300.0
 ACTOR_FILTER_VERSION = 2
 SIGNATURE_PARTS = 2
+RECONCILE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class Config:
     quiet_seconds: float
     automation_actor: str = "bot"
     reload: bool = False
+    allow_polling: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,8 @@ class MonitorRuntime:
     stopping: bool = False
     last_health: service_ownership.ServiceHealth | None = None
     health_checked_at: str | None = None
+    last_file_identity: tuple[int, ...] | None = None
+    last_observation_started_at: str | None = None
 
 
 def note_board_write(
@@ -138,27 +142,55 @@ def write_atomic_json(path: Path, value: dict[str, object]) -> None:
     """Replace one transient status document without exposing a partial write."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
-    temporary.replace(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(value, output, separators=(",", ":"))
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def read_json(path: Path) -> dict[str, Any]:
     """Read one monitor-owned transient document."""
 
-    value = cast("object", json.loads(path.read_text(encoding="utf-8")))
+    with path.open("rb") as stream:
+        encoded = stream.read(65537)
+    if len(encoded) > 65536:
+        raise ValueError("monitor runtime metadata exceeds 64 KiB")
+    value = cast("object", json.loads(encoded))
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object in {path}")
     return cast("dict[str, Any]", value)
 
 
-def stop_requested(path: Path, pid: int) -> bool:
+def stop_requested(path: Path, pid: int, owner_id: str | None = None) -> bool:
     """Return whether the monitor target asks this exact process to stop."""
     try:
         target = read_json(path)
     except OSError, TypeError, ValueError:
         return False
-    return target.get("schema") == 1 and target.get("stopPid") == pid
+    return (
+        target.get("schema") == 1
+        and target.get("stopPid") == pid
+        and (owner_id is None or target.get("stopOwnerId") == owner_id)
+    )
+
+
+def drain_requested(path: Path, pid: int, owner_id: str) -> bool:
+    """Match a cooperative explicit drain to one exact monitor generation."""
+    try:
+        target = read_json(path)
+    except OSError, TypeError, ValueError:
+        return False
+    return (
+        target.get("schema") == 1
+        and target.get("drainPid") == pid
+        and target.get("drainOwnerId") == owner_id
+    )
 
 
 def board_signature(path: Path) -> tuple[int, int]:
@@ -317,29 +349,41 @@ def read_activity(config: Config, pending: PendingAlert) -> list[object] | None:
     if cli is None:
         return None
     try:
-        completed = subprocess.run(  # noqa: S603 -- resolved executable, fixed CLI operation
-            [
-                cli,
-                str(config.board),
-                "activity",
-                "between",
-                "--json",
-                activity_query_bound(pending.activity_started_at),
-                activity_query_bound(pending.last_observed_at),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
-        if completed.returncode != 0:
-            return None
-        events = cast("object", json.loads(completed.stdout))
-    except OSError, subprocess.TimeoutExpired, ValueError:
+        with tempfile.TemporaryFile() as output:
+            completed = subprocess.run(  # noqa: S603 -- resolved executable, fixed metadata command
+                [
+                    cli,
+                    str(config.board),
+                    "activity",
+                    "monitor-between",
+                    "--json",
+                    activity_query_bound(pending.activity_started_at),
+                    activity_query_bound(pending.last_observed_at),
+                ],
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+            if completed.returncode != 0 or output.tell() > activity_feed.MAX_RESPONSE_BYTES + 1:
+                return None
+            output.seek(0)
+            envelope = cast("object", json.loads(output.read(activity_feed.MAX_RESPONSE_BYTES + 1)))
+    except OSError, subprocess.TimeoutExpired, TypeError, ValueError:
         return None
-    if not isinstance(events, list):
+    if not isinstance(envelope, dict):
+        return None
+    metadata = cast("dict[str, object]", envelope)
+    coverage = metadata.get("coverage")
+    events = metadata.get("events")
+    if metadata.get("schema") != 1 or not isinstance(coverage, dict):
+        return None
+    if cast("dict[str, object]", coverage).get("complete") is not True:
+        return None
+    if (
+        not isinstance(events, list)
+        or len(cast("list[object]", events)) > activity_feed.LIMIT_EVENTS
+    ):
         return None
     return cast("list[object]", events)
 
@@ -385,11 +429,13 @@ def queue_alert(
             ticket = metadata.get(key)
             if key != "ticket" and ticket is None:
                 continue
-            if type(ticket) is int and ticket > 0:
+            if type(ticket) is int and 0 < ticket <= 999999999:
                 tickets.add(ticket)
             else:
                 incomplete = True
-    lines = [f"- #{ticket:04d}" for ticket in sorted(tickets)]
+    if len(tickets) > 128:
+        incomplete = True
+    lines = [f"- #{ticket:04d}" for ticket in sorted(tickets)[:128]]
     if incomplete:
         lines.append("- Card numbers unavailable; inspect activity metadata.")
     activity_start = activity_query_bound(pending.activity_started_at)
@@ -462,6 +508,9 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument(
         "--reload", action="store_true", help="replace an existing monitor gracefully"
     )
+    parser.add_argument(
+        "--allow-polling", action="store_true", help="explicitly accept a polling backend"
+    )
     args = parser.parse_args(argv)
     board = args.board_path.resolve(strict=True)
     runtime_paths = [
@@ -479,10 +528,10 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     except ValueError as exc:
         parser.error(str(exc))
     board_label = args.board_label.strip()
-    if not board_label:
-        parser.error("--board-label must not be empty")
-    if not args.automation_actor.strip():
-        parser.error("--automation-actor must not be empty")
+    if not board_label or len(board_label) > 200:
+        parser.error("--board-label must contain between 1 and 200 characters")
+    if not args.automation_actor.strip() or len(args.automation_actor) > 200:
+        parser.error("--automation-actor must contain between 1 and 200 characters")
     thread_id = str(uuid.UUID(args.thread_id))
     if not 1 <= args.port <= MAX_PORT:
         parser.error(f"--port must be between 1 and {MAX_PORT}")
@@ -499,6 +548,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
         args.quiet_seconds,
         args.automation_actor.strip(),
         args.reload,
+        args.allow_polling,
     )
 
 
@@ -620,9 +670,13 @@ def resume_runtime(config: Config, previous: dict[str, Any], started_at: str) ->
     status replacement can replay the saved interval. It is not an exactly-once
     delivery or power-loss durability guarantee.
     """
+    observation_started_at = now()
     signature = board_signature(config.board)
     runtime = MonitorRuntime(signature, started_at)
+    runtime.last_observation_started_at = observation_started_at
+    runtime.last_file_identity = activity_feed.fingerprint(config.board)
     observed_at = now()
+    runtime.last_signature_at = observed_at
     if not config.reload:
         final = orphaned_status(config)
     else:
@@ -634,14 +688,20 @@ def resume_runtime(config: Config, previous: dict[str, Any], started_at: str) ->
     if isinstance(cursor, str):
         activity_query_bound(cursor)
         runtime.last_signature_at = cursor
-        if final.get("lastSignature") != list(signature):
+        lower_bound = final.get("lastObservationStartedAt", cursor)
+        runtime.last_observation_started_at = lower_bound
+        saved_identity = final.get("lastFileIdentity")
+        if final.get("lastSignature") != list(signature) or (
+            saved_identity is not None and saved_identity != list(runtime.last_file_identity)
+        ):
             runtime.pending_alert = note_board_write(
                 None,
-                activity_started_at=cursor,
+                activity_started_at=lower_bound,
                 observed_at=observed_at,
                 observed_monotonic=time.monotonic(),
             )
             runtime.last_signature_at = observed_at
+            runtime.last_observation_started_at = observation_started_at
     restore_pending(runtime, final)
     if not config.reload:
         runtime.last_alert_at = final.get("lastAlertAt")
@@ -680,11 +740,32 @@ def validate_orphaned_status(config: Config, final: dict[str, Any]) -> None:
     parts = cast("list[object]", signature)
     if len(parts) != SIGNATURE_PARTS or any(type(part) is not int or part < 0 for part in parts):
         raise ValueError("invalid saved board signature")
+    identity = final.get("lastFileIdentity")
+    if "lastFileIdentity" in final:
+        if not isinstance(identity, list):
+            raise ValueError("invalid saved file identity")
+        identity_parts = cast("list[object]", identity)
+        if len(identity_parts) != 5 or any(
+            type(part) is not int or part < 0 for part in identity_parts
+        ):
+            raise ValueError("invalid saved file identity")
     cursor_value = final.get("lastSignatureAt")
     if not isinstance(cursor_value, str):
         raise TypeError("invalid saved activity cursor")
     cursor = datetime.fromisoformat(activity_query_bound(cursor_value))
     validate_saved_pending(final, cursor)
+    lower_bound = final.get("lastObservationStartedAt", cursor_value)
+    if not isinstance(lower_bound, str):
+        raise ValueError("invalid saved observation boundary")
+    lower = datetime.fromisoformat(activity_query_bound(lower_bound))
+    if lower > cursor:
+        raise ValueError("observation boundary exceeds activity cursor")
+    if final.get("pendingWriteCount"):
+        pending_start = datetime.fromisoformat(
+            activity_query_bound(final["pendingActivityStartedAt"])
+        )
+        if lower < pending_start:
+            raise ValueError("observation boundary precedes pending interval")
     alerted_at = final.get("lastAlertAt")
     if alerted_at is not None:
         if not isinstance(alerted_at, str):
@@ -750,29 +831,21 @@ def restore_pending(runtime: MonitorRuntime, final: dict[str, Any]) -> None:
 
 
 def watch_board(config: Config) -> Iterator[set[object]]:
-    """Load filesystem watching only when the optional command is invoked."""
-    try:
-        backend = importlib.import_module("watchfiles")
-    except ImportError as exc:
-        raise RuntimeError("install localswim[monitor] to use localswim-monitor") from exc
+    """Verify the native backend before watching board and control replacements."""
+    from .monitor_pool import NativeSubscription
 
-    def only_board(_change: object, changed_path: str) -> bool:
-        return os.path.normcase(str(Path(changed_path).resolve())) == os.path.normcase(
-            str(config.board)
-        )
-
-    return cast(
-        "Iterator[set[object]]",
-        backend.watch(
-            config.board.parent,
-            watch_filter=only_board,
-            debounce=100,
-            step=20,
-            recursive=False,
-            rust_timeout=1000,
-            yield_on_timeout=True,
-        ),
+    subscription = NativeSubscription(
+        [config.board, config.target_path], allow_polling=config.allow_polling
     )
+
+    def batches() -> Iterator[set[object]]:
+        try:
+            while True:
+                yield cast("set[object]", subscription.poll())
+        finally:
+            subscription.close()
+
+    return batches()
 
 
 def claim_monitor(config: Config) -> tuple[IO[bytes] | None, dict[str, Any]]:
@@ -802,13 +875,19 @@ def prepare_runtime(
     """Prepare the runtime, releasing the lifetime lock if initialization fails."""
     codex = shutil.which("codex")
     if codex is None:
-        release_lock(lock)
+        try:
+            release_lock(lock)
+        finally:
+            lock.close()
         raise RuntimeError("codex executable is not on PATH")
     try:
         started_at = now()
         return codex, started_at, resume_runtime(config, previous, started_at)
     except BaseException:
-        release_lock(lock)
+        try:
+            release_lock(lock)
+        finally:
+            lock.close()
         raise
 
 
@@ -819,23 +898,89 @@ def reconcile_board_signature(config: Config, runtime: MonitorRuntime) -> bool:
     Notifications may arrive after reconciliation; unchanged signatures never
     extend the burst or count the same observation twice.
     """
+    observation_started_at = now()
     signature = board_signature(config.board)
     if signature == runtime.last_signature:
         return False
     runtime.last_signature = signature
+    runtime.last_file_identity = activity_feed.fingerprint(config.board)
     observed_at = now()
     runtime.pending_alert = note_board_write(
         runtime.pending_alert,
-        activity_started_at=runtime.last_signature_at,
+        activity_started_at=runtime.last_observation_started_at or runtime.last_signature_at,
         observed_at=observed_at,
         observed_monotonic=time.monotonic(),
     )
     runtime.last_signature_at = observed_at
+    runtime.last_observation_started_at = observation_started_at
     print(
         f"Debouncing board write {runtime.pending_alert.write_count} at {observed_at}.",
         flush=True,
     )
     return True
+
+
+def publish_runtime_status(
+    config: Config,
+    runtime: MonitorRuntime,
+    started_at: str,
+    owner_id: str,
+    state: str,
+    **extra: object,
+) -> None:
+    """Publish compatible recovery metadata for either monitor execution mode."""
+    write_atomic_json(
+        config.status_path,
+        {
+            "schema": 1,
+            "state": state,
+            "pid": os.getpid(),
+            "ownerId": owner_id,
+            "board": str(config.board),
+            "startedAt": started_at,
+            "lastSignature": list(runtime.last_signature),
+            **(
+                {"lastFileIdentity": list(runtime.last_file_identity)}
+                if runtime.last_file_identity is not None
+                else {}
+            ),
+            **(
+                {"lastObservationStartedAt": runtime.last_observation_started_at}
+                if runtime.last_observation_started_at is not None
+                else {}
+            ),
+            "lastSignatureAt": runtime.last_signature_at,
+            "lastAlertAt": runtime.last_alert_at,
+            "quietSeconds": config.quiet_seconds,
+            "actorFilterVersion": ACTOR_FILTER_VERSION,
+            "automationActor": config.automation_actor,
+            "reloadSupported": True,
+            "pendingWriteCount": (
+                0 if runtime.pending_alert is None else runtime.pending_alert.write_count
+            ),
+            "pendingFirstObservedAt": (
+                None if runtime.pending_alert is None else runtime.pending_alert.first_observed_at
+            ),
+            "pendingActivityStartedAt": (
+                None if runtime.pending_alert is None else runtime.pending_alert.activity_started_at
+            ),
+            "pendingLastObservedAt": (
+                None if runtime.pending_alert is None else runtime.pending_alert.last_observed_at
+            ),
+            **(
+                {
+                    "lastHealthCheck": {
+                        **runtime.last_health.to_json(),
+                        "checkedAt": runtime.health_checked_at,
+                    },
+                    "consecutiveHealthFailures": runtime.service_misses,
+                }
+                if runtime.last_health is not None
+                else {}
+            ),
+            **extra,
+        },
+    )
 
 
 def monitor(config: Config) -> int:
@@ -850,54 +995,7 @@ def monitor(config: Config) -> int:
     owner_id = str(uuid.uuid4())
 
     def status(state: str, **extra: object) -> None:
-        write_atomic_json(
-            config.status_path,
-            {
-                "schema": 1,
-                "state": state,
-                "pid": os.getpid(),
-                "ownerId": owner_id,
-                "board": str(config.board),
-                "startedAt": started_at,
-                "lastSignature": list(runtime.last_signature),
-                "lastSignatureAt": runtime.last_signature_at,
-                "lastAlertAt": runtime.last_alert_at,
-                "quietSeconds": config.quiet_seconds,
-                "actorFilterVersion": ACTOR_FILTER_VERSION,
-                "automationActor": config.automation_actor,
-                "reloadSupported": True,
-                "pendingWriteCount": (
-                    0 if runtime.pending_alert is None else runtime.pending_alert.write_count
-                ),
-                "pendingFirstObservedAt": (
-                    None
-                    if runtime.pending_alert is None
-                    else runtime.pending_alert.first_observed_at
-                ),
-                "pendingActivityStartedAt": (
-                    None
-                    if runtime.pending_alert is None
-                    else runtime.pending_alert.activity_started_at
-                ),
-                "pendingLastObservedAt": (
-                    None
-                    if runtime.pending_alert is None
-                    else runtime.pending_alert.last_observed_at
-                ),
-                **(
-                    {
-                        "lastHealthCheck": {
-                            **runtime.last_health.to_json(),
-                            "checkedAt": runtime.health_checked_at,
-                        },
-                        "consecutiveHealthFailures": runtime.service_misses,
-                    }
-                    if runtime.last_health is not None
-                    else {}
-                ),
-                **extra,
-            },
-        )
+        publish_runtime_status(config, runtime, started_at, owner_id, state, **extra)
 
     try:
         status("running")
@@ -942,7 +1040,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the monitor with a concise failure on stderr."""
 
     try:
-        return monitor(parse_args(argv))
+        from .monitor_pool import run_pool
+
+        config = parse_args(argv)
+        from .monitor_pool import validate_configs
+
+        validate_configs([config])
+        service_output.configure()
+        return run_pool([config], allow_polling=config.allow_polling)
     except Exception as exc:  # noqa: BLE001 -- final CLI boundary reports all monitor failures
         print(f"localswim monitor failed: {exc}", file=sys.stderr, flush=True)
         return 1

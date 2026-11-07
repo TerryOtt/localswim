@@ -6,16 +6,31 @@ import json
 import subprocess
 import uuid
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 
 import pytest
 
 from localswim import monitor as watcher
+from localswim import monitor_pool as pool
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+    from typing import IO
+
+
+def metadata_transport(events: object, exit_code: int = 0) -> Mock:
+    """Mimic the CLI's bounded sanitized feed written to its supplied stdout."""
+
+    def run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        envelope = {"schema": 1, "coverage": {"complete": True}, "events": events}
+        output = cast("IO[bytes]", kwargs["stdout"])
+        output.write(json.dumps(envelope).encode("utf-8"))
+        output.flush()
+        return subprocess.CompletedProcess([], exit_code, "", "")
+
+    return Mock(side_effect=run)
 
 
 @pytest.fixture
@@ -78,9 +93,7 @@ def test_automation_activity_ignores_filesystem_counts(
     count: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run = Mock(
-        return_value=subprocess.CompletedProcess([], 0, json.dumps([{"by": "robot"}] * count), "")
-    )
+    run = metadata_transport([{"by": "robot"}] * count)
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="localswim-cli"))
     monkeypatch.setattr(watcher.subprocess, "run", run)
     assert (
@@ -136,7 +149,7 @@ def test_flush_dispatches_fail_open_activity_once(
 ) -> None:
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="localswim-cli"))
     output, exit_code, expected_queues = case
-    query = Mock(return_value=subprocess.CompletedProcess([], exit_code, output, ""))
+    query = metadata_transport(json.loads(output), exit_code)
     monkeypatch.setattr(watcher.subprocess, "run", query)
     order: list[str] = []
 
@@ -581,7 +594,7 @@ def test_request_transaction_acquires_resolved_safe_symlink_target(
 def test_optional_backend_failure_has_install_hint(
     monkeypatch: pytest.MonkeyPatch, config: watcher.Config
 ) -> None:
-    monkeypatch.setattr(watcher.importlib, "import_module", Mock(side_effect=ImportError()))
+    monkeypatch.setattr(pool.importlib, "import_module", Mock(side_effect=ImportError()))
     with pytest.raises(RuntimeError, match=r"localswim\[monitor\]"):
         watcher.watch_board(config)
 
@@ -979,12 +992,14 @@ def test_recovered_interval_uses_shared_actor_filter_and_mocked_transport(
         "probe_monitor_lifecycle",
         Mock(return_value=watcher.service_ownership.ServiceHealth(True, "complete", "healthy", 0)),
     )
-    transport = Mock(
-        side_effect=[
-            subprocess.CompletedProcess([], 0, json.dumps(events), ""),
-            subprocess.CompletedProcess([], 0, "", ""),
-        ]
-    )
+    query = metadata_transport(events)
+
+    def deliver(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "stdout" in kwargs:
+            return query(*args, **kwargs)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    transport = Mock(side_effect=deliver)
     monkeypatch.setattr(watcher.subprocess, "run", transport)
     empty_changes: set[object] = set()
     monkeypatch.setattr(watcher, "watch_board", Mock(return_value=iter([empty_changes])))
@@ -1121,3 +1136,53 @@ def test_healthy_probe_mode_upgrade_is_persisted_without_log_churn(
     assert publish.call_count == 2
     assert runtime.last_health == modern
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("coverage", [None, {}, {"complete": False}, {"complete": 1}])
+def test_incomplete_feed_never_suppresses_bot_events(
+    config: watcher.Config,
+    pending: watcher.PendingAlert,
+    monkeypatch: pytest.MonkeyPatch,
+    coverage: object,
+) -> None:
+    def run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        output = cast("IO[bytes]", kwargs["stdout"])
+        output.write(
+            json.dumps({"schema": 1, "coverage": coverage, "events": [{"by": "bot"}]}).encode()
+        )
+        output.flush()
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="localswim-cli"))
+    monkeypatch.setattr(watcher.subprocess, "run", run)
+    assert not watcher.bot_only_activity(config, pending)
+
+
+def test_runtime_metadata_refuses_unbounded_saved_status(config: watcher.Config) -> None:
+    config.status_path.write_bytes(b" " * 65537)
+    with pytest.raises(RuntimeError, match="unreadable"):
+        watcher.orphaned_status(config)
+    assert config.status_path.stat().st_size == 65537
+
+
+def test_atomic_status_does_not_truncate_predictable_temporary_path(config: watcher.Config) -> None:
+    import os
+
+    old_temporary = config.status_path.with_name(f"{config.status_path.name}.{os.getpid()}.tmp")
+    old_temporary.write_bytes(b"unrelated board")
+    watcher.write_atomic_json(config.status_path, {"schema": 1})
+    assert old_temporary.read_bytes() == b"unrelated board"
+    assert watcher.read_json(config.status_path) == {"schema": 1}
+
+
+def test_single_board_entrypoint_uses_shared_pool(
+    config: watcher.Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(watcher, "parse_args", Mock(return_value=config))
+    configure = Mock()
+    monkeypatch.setattr(watcher.service_output, "configure", configure)
+    run = Mock(return_value=0)
+    monkeypatch.setattr(pool, "run_pool", run)
+    assert watcher.main([]) == 0
+    configure.assert_called_once_with()
+    run.assert_called_once_with([config], allow_polling=False)

@@ -597,58 +597,64 @@ duplicate. Board reads and mutations go through `localswim-cli`, never a direct 
 edit. The service runs with `--autopush` because this board's private state-store
 repository is its durable snapshot.
 
-When monitoring is enabled, the board-write monitor must target the active Codex
-chat. Honor Terry's explicit monitor shutdown: never restart a monitor merely because
-a board service is running. Preserve its saved target, cursor, pending alerts and locks. Use the shared installed `localswim-monitor`
-command from `localswim[monitor]`, or `uv run --frozen --extra monitor
-localswim-monitor` in this checkout. Pass the current board port and thread ID:
+Production monitors stay off. Honor explicit shutdown: never restart a monitor merely
+because the board service is running. Preserve target, cursor, pending alerts and locks.
+From `C:\Projects\localswim`, expose the new command with `uv sync --frozen --extra
+monitor` and run `uv run --frozen --extra monitor localswim-monitor-pool --manifest FILE`.
+Keep active global tool environments intact; use that shared runner in the detached
+task wrapper. For multiple boards, use the released pool with a schema-1 manifest
+of existing single-board argument arrays (maximum 1 MiB/256 members). Board, status,
+target, lifetime-lock and derived request-lock paths must be distinct and alias checked.
+Polling requires explicit `--allow-polling`; backend choice is exposed. `--stop`
+cooperatively drains only exact owner UUIDs in the manifest. Migrate only after release
+and explicit authorization, preserving original thread targets and state; never
+force-kill owners.
 
-```console
-localswim-monitor --board-path C:\Projects\localswim-state-store\localswim\localswim.json --board-label "localswim inception" --thread-id THREAD_UUID --port 8794 --status-path C:\Temp\localswim-inception-monitor-status.json --target-path C:\Temp\localswim-inception-monitor-target.json --lock-path C:\Temp\localswim-inception-monitor.lock
-```
+The single-board `localswim-monitor` remains available. Use the shared installed
+command or `uv run --frozen --extra monitor localswim-monitor` in this checkout.
+Keep its board-specific thread target, port and distinct runtime paths. Launch detached
+and hidden with regular stdout/stderr log files established before Python starts. The
+helper handles unsafe pipes; this does not change the pre-interpreter boundary. Use
+cooperative reload after package updates only when authorized; preserve targets,
+cursors and pending alerts. Never force-terminate legacy watchers; follow their
+documented graceful lifecycle.
 
-Use the current port rather than assuming the example's port. The port is a
-compatibility/startup hint; monitor lifecycle health follows the live descriptor
-and validates the board identity. Launch hidden with
-`PYTHONIOENCODING=utf-8`, redirecting output/error to the corresponding board-specific
-`.out.log`/`.err.log` files under `C:\Temp`. All runtime paths are mandatory and
-must be distinct from other boards. Reinvocation retargets the current owner.
-Add `--reload` after package updates to drain pending activity and replace the
-monitor without stopping the board. The old FGA-local process cannot honor this
-protocol until its one-time graceful restart. See README's monitor section.
+Use an OS-owned on-demand Task Scheduler task for a Windows background pool,
+without an automatic login trigger unless explicitly requested. Keep its wrapper
+and private logs outside shared source. Creating or starting that task requires
+explicit activation authority; this implementation leaves production monitors off.
 
-The monitor never reads board content. After a trailing-edge 15-second quiet
-window it queries sanitized `localswim-cli` activity metadata. Suppress a nonempty
-result only when every event is by the configured automation actor (`bot` by
-default). Human, mixed, unknown, empty, malformed and failed queries still alert.
-Health diagnostics use bounded phase/code/error categories, elapsed milliseconds,
-probe mode, and validated port/HTTP status only. Advertised monitor lifecycle identity
-is independent of snapshot admission. Keep gateway/service readiness on its existing
-admission-aware probe, and keep legacy monitor fallback explicit in diagnostics.
-Preserve the current target, activity cursor,
-pending intervals, ownership and filtering during diagnostics recovery. Never log
-descriptor bodies, browser-session content, tokens or raw exception text.
-Never require one activity event per observed filesystem write. For queued alerts,
-inspect only activity metadata first; proven automation-only events need no card
-inspection, work resumption or further action. Preserve Terry's alerts. Keep prose
-and credentials out of logs. Routine alerts do not justify a GitHub visibility query.
+The monitor never reads board content. Debounce defaults to 15 seconds; bounded
+activity queries and delivery are serial and independent of filesystem intake. Lifecycle
+and cheap metadata reconciliation run every 30 seconds, with no idle filesystem reads.
+Attribution uses `localswim-cli BOARD activity monitor-between START END --json
+[--cursor CURSOR]` for bounded writer-owned metadata without board parsing or browser
+preflight. Only complete, nonempty all-automation results suppress alerts; unknown,
+empty, incomplete and failed queries alert. Keep legacy `activity between` available.
+The writer records a post-commit byte verification read. Metadata covers committed and
+admitted state, has in-memory ring gaps, and fails open after restart; it is not a durable
+journal and cannot recover unsupported transient manual JSON writes overwritten outside
+the writer protocol. Never assume one notification per activity event.
 
-Ordinary monitor startup validates saved same-board status after taking its lifetime
-lock and before replacement. Retain pending/cursor activity and signature gaps; refuse
-foreign, unreadable or inconsistent metadata without overwriting it. A saved pending
-end must equal its cursor. Never discard an uncertain interval to force startup.
-Queue acknowledgement before status persistence creates an at-least-once crash
-duplicate window; do not promise exactly-once or power-loss delivery.
+During handoff, `lastObservationStartedAt` is an additive conservative pre-stat overlap
+lower bound. Preserve the strict pending invariant: pending end equals
+`lastSignatureAt`. Retain bounded health diagnostics and avoid descriptor bodies,
+credentials, tokens and raw errors in logs. For queued alerts, inspect activity metadata
+first; proven automation-only events need no card inspection or work resumption. Preserve
+Terry's alerts.
 
-Cooperative monitor reload binds updated owners by PID and owner UUID, discovering
-the first complete same-board status when initialization is still in progress.
-Preserve each launch's request UUID across retries and timeout cleanup; never replace
-a newer retarget/reload/stop request. Cooperating target writers use the persistent
-derived `<target path>.lock` for compare/write operations, not readiness waits; keep
-it distinct from the board, status, target and lifetime-lock paths. Never unlink
-either lock path. Pre-UUID shared owners retain only their historical PID-based
-cooperative upgrade guarantee; new owners enforce UUIDs. Direct target-file writers
-must follow the same request-lock protocol to receive its serialization guarantee.
+Ordinary startup takes the lifetime lock before validating saved same-board status.
+Refuse foreign, unreadable or inconsistent metadata without overwriting it. Retain
+pending intervals and signature gaps; never discard uncertainty to force startup.
+Queue acknowledgement before status persistence creates an at-least-once duplicate
+window. Do not promise exactly-once or power-loss delivery.
+
+Cooperative reload binds PID and owner UUID. Preserve each request UUID across
+retries/timeout cleanup and never replace a newer retarget, reload, drain or stop
+request. Serialize target read/modify/write through the persistent derived
+`<target path>.lock`, distinct from board/status/target/lifetime-lock paths. Never
+unlink either lock. Pre-UUID legacy owners retain only their documented historical
+graceful upgrade path; do not invent forced migration.
 
 ## Git in the Codex sandbox
 

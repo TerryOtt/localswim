@@ -84,6 +84,7 @@ HELP_PATHS = [
     (),
     ("activity",),
     ("activity", "between"),
+    ("activity", "monitor-between"),
     ("activity", "since"),
     ("board",),
     ("board", "embed-policy"),
@@ -450,24 +451,46 @@ def test_cli_board_identity_mismatch_never_posts(
     assert posts == []
 
 
+@pytest.mark.parametrize("drop_refusal", [False, True])
 def test_cli_stale_capability_refuses_once_without_replay(
-    served_board: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    served_board: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, drop_refusal: bool
 ) -> None:
     descriptor = board_state.service_descriptor_path(served_board)
     raw = json.loads(descriptor.read_text(encoding="utf-8"))
     raw["token"] = "stale-cli-capability"  # noqa: S105 -- synthetic refused capability
     descriptor.write_text(json.dumps(raw), encoding="utf-8")
     posts: list[str] = []
+    replies: list[int] = []
+    before = served_board.read_bytes()
     original = api_endpoint.Handler.do_POST
+    original_json = api_endpoint.Handler._json  # noqa: SLF001 -- observe refusal before transport
 
     def post(handler: api_endpoint.Handler) -> None:
         posts.append(handler.path)
         original(handler)
 
+    def reply(handler: api_endpoint.Handler, value: object, code: int = 200) -> None:
+        if handler.command == "POST":
+            replies.append(code)
+            if drop_refusal:
+                handler.close_connection = True
+                return
+        original_json(handler, value, code)
+
     monkeypatch.setattr(api_endpoint.Handler, "do_POST", post)
-    with pytest.raises(board_state.BoardError, match="refused"):
+    monkeypatch.setattr(api_endpoint.Handler, "_json", reply)
+    # Windows may reset a connection when a server rejects an unread POST body.
+    # Either a delivered refusal or a conservative transport-unknown result must
+    # retain the same security and no-replay guarantees.
+    with pytest.raises(
+        board_state.BoardError, match=r"refused|mutation outcome is unknown"
+    ) as caught:
         board_state.apply_remote_priority_batch(served_board, ["alpha"], "p3", expected_revision=0)
+    if drop_refusal:
+        assert "mutation outcome is unknown" in str(caught.value)
     assert posts == [board_state.API_PREFIX + "/cards/priorities"]
+    assert replies == [401]
+    assert served_board.read_bytes() == before
 
 
 @pytest.mark.parametrize(

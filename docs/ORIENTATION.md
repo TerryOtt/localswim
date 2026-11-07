@@ -1230,26 +1230,36 @@ to the authoritative data so it cannot drift.
 
 ## Shared monitor ownership
 
-`src/localswim/monitor.py` owns the optional `localswim-monitor` entry point,
-portable lifetime lock, sanitized CLI attribution, per-board target/status files,
-and cooperative reload. `tests/test_monitor.py` covers fail-open actor filtering,
-event-count independence, quiet-window debounce, PID scoping, lock exclusion,
-and cursor continuity during reload. Updated owners publish an `ownerId` UUID; reload
-requests bind both PID and UUID. The launcher can rediscover the first status while the
-existing owner holds the lifetime lock. A per-launch `requestId` and persistent
-`<target path>.lock` serialize
-cooperating target compare/write operations without holding that lock during readiness
-waits. Superseded retries and timeout cleanup preserve newer target, reload or stop data.
-Complete pre-UUID same-board status retains its historical PID-only cooperative upgrade
-path; updated owners require their UUID. Out-of-protocol target writers do not share the
-serialization guarantee. No process is forcibly terminated for reload.
+`src/localswim/monitor.py` owns optional `localswim-monitor`; `src/localswim/monitor_pool.py`
+owns `localswim-monitor-pool`. The pool manifest is schema 1 with a `boards` array
+of existing single-board argument arrays, limited to 1 MiB and 256 members. Board,
+status, target, lifetime-lock and derived request-lock paths are distinct and alias
+checked before target writes. Native watching uses unique parent directories;
+backend choice is exposed. Polling requires explicit `--allow-polling`. `--stop`
+cooperatively drains only exact owner UUIDs in the manifest.
 
-Ordinary startup validates saved same-board pending activity only after taking ownership,
-preserving failed dispatch and signature
-gaps. Foreign or inconsistent metadata is retained and refused, including a pending
-end that differs from the saved cursor. Queue acknowledgement and status persistence
-are separate, so crash recovery has at-least-once duplicate windows. See README's shared board-write monitor
-section for launch arguments and migration from the old FGA-local watcher.
+Production monitors remain off. The pool binary is available after release; migration
+requires explicit authorization. Preserve original thread targets, cursors and pending
+alerts, and never force-kill an owner.
+
+Filesystem intake is independent from serial bounded queries and delivery. Default
+debounce is 15 seconds; cheap metadata reconciliation and lifecycle checks run every
+30 seconds, and idle ticks perform no filesystem reads. Activity attribution uses
+`localswim-cli BOARD activity monitor-between START END --json [--cursor CURSOR]` for
+bounded writer-owned metadata without board parsing or browser preflight. Only complete,
+nonempty all-automation results suppress; empty, unknown, incomplete and failed
+results alert. The legacy `activity between` command remains available. The writer
+records a post-commit byte verification read. Metadata covers committed/admitted
+state, with in-memory ring gaps and fail-open restart behavior. It is not a durable
+journal and cannot recover unsupported transient manual JSON writes overwritten
+outside the writer protocol.
+
+The additive `lastObservationStartedAt` supplies a conservative pre-stat overlap
+lower bound during observation handoff. Preserve the strict pending invariant:
+pending end must equal `lastSignatureAt`. Existing `ownerId`, request serialization,
+cooperative reload and startup recovery semantics remain in force. No process is
+forcibly terminated. Queue acknowledgement and status persistence are separate,
+so crash recovery retains at-least-once duplicate windows.
 
 ## Private schema-5 preparation (#0129)
 

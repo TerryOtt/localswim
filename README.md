@@ -1041,9 +1041,8 @@ as UTF-8 with LF endings by .editorconfig, .gitattributes and the gate.
 
 Install the optional monitor extra with `uv sync --locked --extra monitor` or
 `uv tool install --editable '.[monitor]'` from this checkout. Click remains the sole core dependency.
-The explicit optional dependency decision is `watchfiles==1.3.0` (MIT): native
-filesystem notifications and a trailing-edge quiet window avoid polling board
-contents. Core CLI and board services do not import this package.
+The explicit optional dependency decision is `watchfiles==1.3.0` (MIT). Core CLI
+and board services do not import this package.
 
 Run one monitor per board with distinct runtime paths:
 
@@ -1051,94 +1050,92 @@ Run one monitor per board with distinct runtime paths:
 localswim-monitor --board-path /path/to/board.json --board-label "Project board" --thread-id THREAD_UUID --port 8793 --status-path /runtime/project-status.json --target-path /runtime/project-target.json --lock-path /runtime/project.lock
 ```
 
-The port and all three runtime paths are required. The port is a compatibility
-and startup hint; lifecycle checks follow the live service descriptor and validate
-its board identity, so a relocated listener remains healthy and another board on
-the old port cannot substitute for it. `--automation-actor` defaults to
-`bot`; configure the board's persisted automation actor ID when it differs.
-The default quiet window is 15 seconds; `--quiet-seconds` accepts up to 300 seconds.
-Repeated launches retarget the existing monitor through its target file rather
-than creating another owner. Keep lock files persistent even after exit.
+From the shared checkout, run the pool through its frozen project environment:
 
-After the quiet window, the monitor queries sanitized metadata through
-`localswim-cli BOARD activity between --json START END`. A nonempty result is
-suppressed only when every event belongs to the configured automation actor.
-Human, mixed, unknown, empty, malformed and failed results queue an alert.
-Filesystem signatures and activity-event counts differ and are never compared.
-No board prose or service credentials enter monitor logs or status files.
-Monitor status also includes `lastHealthCheck` after a probe has completed, with
-`healthy`, a bounded `phase` and `code`, `probe_mode`, `elapsed_ms`, and `checkedAt`. Optional
-`port`, `http_status`, and `error_type` describe only validated endpoint metadata
-or an allowlisted failure category. `consecutiveHealthFailures` reports the normal
-idle-cycle lifecycle counter. Failed probes and recovery emit the same diagnostic
-fields to stdout; successful quiet polling produces no repeated log entries.
-Diagnostic-only log/status I/O failures are best effort; existing activity/cursor
-and lifecycle persistence keeps its normal failure behavior.
-Status is persisted on health-category changes, failed probes, recovery, and the
-existing activity/lifecycle events. It is an observation, not a live heartbeat.
-Existing status files remain supported. The one-second probe timeout and
-five-consecutive-miss exit rule keep their existing behavior.
-New board writers advertise `monitorIdentityVersion: 1` in their machine-local
-descriptor. Monitors use the bounded `/api/v001/monitor-identity` endpoint for those
-writers. It returns the identity cached when the writer's HTTP server was constructed,
-independently of snapshot admission and the store mutex. It describes the running
-writer, while readiness and disk-health checks continue to validate board state.
+```console
+uv sync --frozen --extra monitor
+uv run --frozen --extra monitor localswim-monitor-pool --manifest /runtime/pool.json
+```
 
-Health diagnostics label this mode `lifecycle_identity`. Services without the
-capability retain `legacy_readiness` through `/browser-session`; that fallback still
-depends on snapshot admission. `discovery` identifies checks that fail before endpoint
-selection, and explicit readiness probes use `readiness`. Malformed or unsupported
-capabilities fail closed for the monitor. Existing gateway/service readiness checks
-retain their prior endpoint and admission semantics.
+This exposes the new command without recreating an active global tool environment.
+An existing global editable installation immediately uses the shared updated Python
+modules; installing a new global executable can wait for an authorized maintenance
+window. Use the shared `uv run` command in the OS-owned task wrapper as well.
 
-To activate the lifecycle endpoint after an upgrade, let the specific board writer
-complete its supported graceful source refresh and verify that its descriptor
-advertises version 1. Then cooperatively reload that board's monitor using its
-existing target, status, and lock paths. If that writer requires an explicit stop
-and start, use its board-specific graceful lifecycle and preserve its launch settings.
-Queued alerts contain the board label, one activity datetime range, and a sorted,
-deduplicated bullet list of changed card numbers from that same metadata query.
-If card numbers are unavailable, a short fallback requests metadata inspection;
-uncertain queries still alert.
-An already queued alert should first inspect only its bounded activity metadata;
-proven automation-only activity needs no card inspection or work resumption.
+For multiple boards, use `localswim-monitor-pool --manifest FILE`. The schema-1
+manifest has a `boards` array of existing single-board argument arrays and is
+limited to 1 MiB and 256 members. Board, status, target, lifetime-lock and derived
+request-lock paths must be distinct; aliases are checked before target writes.
+Native watching subscribes once per unique parent directory; boards sharing a
+directory share that subscription. The actual selected backend is reported. Polling is visible and requires explicit `--allow-polling`. `--stop`
+cooperatively drains only exact owner UUIDs in the manifest.
 
-Ordinary startup acquires the monitor lock before validating and recovering saved
-same-board activity. A saved failed pending burst and cursor survive a restart even
-without a later board write; a changed file signature adds a covering interval.
-Foreign, unreadable, unsupported or inconsistent recovery metadata causes startup to
-refuse while preserving the status document for investigation. Inspect that document
-and recover its uncertain interval before replacing it; do not simply delete it.
-Delivery is at least once: a crash after queue acknowledgement but before status
-persistence can duplicate an alert. This does not promise exactly-once delivery or
-survival of sudden power loss.
+For example, a single member of a larger pool manifest is:
 
-Add `--reload` to the same launch command after deploying an updated package.
-It requests replacement of the recorded monitor PID and owner UUID while the board stays
-live. The old monitor continues observing writes, drains its pending quiet window,
-and releases its OS lock. The replacement waits up to 330 seconds, owns that same
-lock, and resumes the prior activity cursor; a write during handoff becomes a new
-pending burst. The status document publishes `reloadSupported: true` and
-`actorFilterVersion: 2`. A timeout fails rather than starting a duplicate.
+```json
+{
+  "schema": 1,
+  "boards": [[
+    "--board-path", "/boards/project.json",
+    "--board-label", "Project board",
+    "--thread-id", "00000000-0000-4000-8000-000000000001",
+    "--port", "8793",
+    "--status-path", "/runtime/project-status.json",
+    "--target-path", "/runtime/project-target.json",
+    "--lock-path", "/runtime/project.lock"
+  ]]
+}
+```
 
-If the lifetime lock is held before the owner's first status appears, the launcher waits
-for a complete same-board identity and targets that owner. Each launch has a request UUID;
-retries and timeout cleanup leave newer retarget, reload and stop requests untouched.
-Cooperating target writers serialize updates through a persistent `<target path>.lock`
-file, distinct from the lifetime lock and other runtime paths. Readiness waits do not
-hold that request lock. Direct writes outside this protocol do not receive that guarantee.
-Pre-UUID shared owners can still hand off through their older PID-based reload protocol
-when their same-board status is complete. That one-time compatibility path cannot add
-UUID checks to an already running old owner; replacement owners publish and enforce them.
+Add further argument arrays under `boards`, retaining each board's existing target
+and runtime paths. A cooperative stop uses
+`localswim-monitor-pool --manifest FILE --stop`; it does not retarget or start owners.
+For background launch, use hidden/detached process startup with private regular-file
+stdout/stderr redirection before Python starts. Serial work bounds read pressure;
+a slow destination can delay later queued deliveries, so stop/drain is cooperative.
 
-The old FGA-local monitor predates this protocol and needs its existing graceful
-board-stop/restart boundary once before future reloads can leave the board running.
-Do not use PID termination or assume Windows byte locks survive process replacement.
+On Windows, use an OS-owned, on-demand Task Scheduler task for a background pool.
+Keep it without a login trigger unless the owner explicitly requests one. Its wrapper
+launches the shared executable hidden with regular stdout/stderr files in private
+runtime storage, caches the process handle, waits for exit and propagates the code.
+This follows the detached gateway pattern above. Registering or starting that task
+is a separate authorized activation step; this release creates neither.
 
-Stop requests retain the existing target-file protocol: schema 1 plus `stopPid`
-for the exact owner makes it wait until its board service has stopped before exit.
-A normal monitor also exits after five consecutive failed service-health checks.
-Status files are a sanitized handoff, not proof of a process or listener's health.
+Production monitors stay off. The new binary is available only after release;
+migrate only when explicitly authorized. Preserve original thread targets, cursors
+and pending alerts. Never force-kill an owner.
+
+The single-board monitor's port and runtime paths are required. Port is a
+compatibility/startup hint; lifecycle checks follow the live descriptor and validate
+board identity. `--automation-actor` defaults to `bot`. The debounce defaults to
+15 seconds (`--quiet-seconds` accepts up to 300). Repeated launches retarget the
+existing owner; keep lock files persistent.
+
+Filesystem event intake is independent from serial, bounded activity queries and
+alert delivery. Cheap metadata reconciliation and lifecycle checks run every
+30 seconds; idle ticks do no filesystem reads. Attribution uses
+`localswim-cli BOARD activity monitor-between START END --json [--cursor CURSOR]`
+for bounded writer-owned metadata without board parsing or browser preflight. Only
+complete, nonempty results containing exclusively the configured automation actor
+suppress alerts. Unknown, empty, incomplete and failed queries alert. Keep legacy
+`activity between` available. The writer records a post-commit byte verification
+read. Metadata covers committed/admitted state; the in-memory ring may have gaps
+and fails open after restart. It is not a durable journal or a recovery path for
+unsupported transient manual JSON writes overwritten outside the writer protocol.
+Never assume one notification per activity event.
+
+No board prose or service credentials enter monitor logs or status files. Preserve
+existing lifecycle and health diagnostics, cooperative reload and lock protocols.
+During handoff, the additive `lastObservationStartedAt` provides a conservative
+pre-stat overlap lower bound; retain the strict pending invariant that the pending
+end equals `lastSignatureAt`. The legacy owner continues observing and drains pending
+work before replacement. Never use forced termination.
+
+Queued alerts are based on metadata from the same bounded query. An already queued
+alert should first inspect only its activity metadata; proven automation-only activity
+needs no card inspection or work resumption. At-least-once delivery has duplicate
+windows after queue acknowledgement and before status persistence; it is not exactly
+once and does not promise survival of sudden power loss.
 
 ## License
 

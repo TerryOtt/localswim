@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, cast
 
 import click
 
-from localswim import attachments, board_state
+from localswim import attachments, board_state, monitor_activity_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -302,6 +302,27 @@ def activity_between(context: CliContext, start: str, end: str, *, as_json: bool
     _board_call(
         lambda: board_state.report_activity(_load(context), start_at, end_at, as_json=as_json)
     )
+
+
+@activity_commands.command("monitor-between")
+@click.argument("start")
+@click.argument("end")
+@click.option("--cursor", default=None, help="Optional writer activity cursor.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the bounded coverage envelope.")
+@click.pass_obj
+def activity_monitor_between(
+    context: CliContext, start: str, end: str, cursor: str | None, *, as_json: bool
+) -> None:
+    """Read sanitized writer evidence without loading the board JSON."""
+    result = _board_call(
+        lambda: monitor_activity_client.read_monitor_activity(context.board, start, end, cursor)
+    )
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    else:
+        coverage = cast("board_state.JsonObject", result["coverage"])
+        events = cast("list[board_state.JsonValue]", result["events"])
+        click.echo(f"  coverage: {coverage['code']}; events: {len(events)}")
 
 
 @cli.group("card", no_args_is_help=True)

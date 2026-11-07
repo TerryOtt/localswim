@@ -83,7 +83,7 @@ import urllib.parse
 import uuid
 from typing import TYPE_CHECKING, cast
 
-from . import attachments, board_state, service_output, service_ownership
+from . import activity_feed, attachments, board_state, service_output, service_ownership
 
 if TYPE_CHECKING:
     import socketserver
@@ -153,6 +153,8 @@ def build_id() -> str:
                 pathlib.Path(__file__).with_name("gateway_publish.py"),
                 pathlib.Path(__file__).with_name("service_ownership.py"),
                 pathlib.Path(__file__).with_name("service_output.py"),
+                pathlib.Path(__file__).with_name("activity_feed.py"),
+                pathlib.Path(__file__).with_name("monitor_activity_client.py"),
                 pathlib.Path(__file__).with_name("workspace.js"),
                 pathlib.Path(__file__).with_name("workspace.css"),
             )
@@ -213,6 +215,8 @@ CODE_FILES = (
     pathlib.Path(__file__).with_name("gateway_publish.py"),
     pathlib.Path(__file__).with_name("service_ownership.py"),
     pathlib.Path(__file__).with_name("service_output.py"),
+    pathlib.Path(__file__).with_name("activity_feed.py"),
+    pathlib.Path(__file__).with_name("monitor_activity_client.py"),
     pathlib.Path(__file__).with_name("workspace.js"),
     pathlib.Path(__file__).with_name("workspace.css"),
 )
@@ -1235,6 +1239,7 @@ class BoardStore:
         self._board = self._admit(policy)
         self.policy = self._board.policy
         self._policy_observation: board_state.TransitionPolicy = self.policy
+        self._monitor_feed = activity_feed.ActivityFeed(self.path, self._admitted_bytes or b"")
 
     @staticmethod
     def _verify_candidate(candidate: board_state.Board) -> bool:
@@ -1383,6 +1388,7 @@ class BoardStore:
         with self._mutex:
             # Even a failed save can have an uncertain replacement outcome.
             self._invalidate_admission()
+            predecessor = self._monitor_feed.observe()
             active = self.policy if self._external_policy else None
             with board_state.edit(
                 self.path, active, install_context=False, outcome=outcome
@@ -1392,6 +1398,11 @@ class BoardStore:
                         f"board revision is {candidate.revision}, not "
                         f"{expected_revision}; refresh and try again"
                     )
+                # The transaction load can follow an uncooperative external edit.
+                # Bind its selected input to the last exact-byte writer binding,
+                # rather than trusting only the observation before acquiring it.
+                predecessor = self._monitor_feed.observe() and predecessor
+                history_position = activity_feed.position(candidate)
                 if card_precondition is not None:
                     reference, expected_card = card_precondition
                     try:
@@ -1414,9 +1425,23 @@ class BoardStore:
                     reference, metadata = card_response
                     metadata["cardVersion"] = card_version(candidate, candidate.find(reference))
                 committed = copy.deepcopy(candidate)
+                # An external write during command preparation must remain a gap
+                # even when our own replacement subsequently overwrites its bytes.
+                predecessor = self._monitor_feed.observe() and predecessor
             # Replacement may succeed even when lock cleanup or publication raises.
             self._publish_candidate(committed)
+            try:
+                self._monitor_feed.publish(committed, history_position, predecessor=predecessor)
+            except Exception:  # noqa: BLE001 -- metadata cannot turn a committed command into refusal
+                self._monitor_feed.stamp = None
             return result, committed.revision
+
+    def monitor_activity(
+        self, start: dt.datetime, end: dt.datetime | None, cursor: str | None = None
+    ) -> board_state.JsonObject:
+        """Serve cached sanitized metadata without board reads or admission."""
+        with self._mutex:
+            return self._monitor_feed.query(start, end, cursor)
 
     def _publish_candidate(self, committed: board_state.Board) -> None:
         """Publish the isolated board prepared before irreversible replacement."""
@@ -1545,6 +1570,7 @@ def publish_service(path: pathlib.Path, port: int) -> None:
         "token": CLI_TOKEN,
         "board": str(path.resolve()),
         "monitorIdentityVersion": 1,
+        "monitorActivityVersion": 1,
         **(
             {"workspaceLaunch": launch}
             if (launch := os.environ.get("LOCALSWIM_WORKSPACE_LAUNCH"))
@@ -5972,6 +5998,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "boardIdentity": cast("BoardHttpServer", self.server).board_identity,
                 }
             )
+        elif route == API_PREFIX + "/monitor-activity":
+            self._monitor_activity_get()
         elif route == API_PREFIX + "/browser-session":
             if STORE is None:
                 raise board_state.BoardError("board store is not initialized")
@@ -6043,6 +6071,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(page.encode("utf-8"), "text/html; charset=utf-8")
         else:
             self.send_error(404)
+
+    def _monitor_activity_get(self) -> None:
+        """Authenticate a bounded read-only feed query with fixed failure codes."""
+        if self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
+            self._json({"code": "credential_required"}, 401)
+            return
+        query = urllib.parse.urlsplit(self.path).query
+        if len(query) > 2048:
+            self._json({"code": "invalid_activity_query"}, 400)
+            return
+        try:
+            params = urllib.parse.parse_qs(query, keep_blank_values=True, max_num_fields=3)
+            if set(params) - {"since", "until", "cursor"} or any(
+                len(v) != 1 for v in params.values()
+            ):
+                raise ValueError("invalid activity query")
+            start = board_state.parse_activity_bound(params["since"][0], "since")
+            end = (
+                board_state.parse_activity_bound(params["until"][0], "until")
+                if "until" in params
+                else None
+            )
+            if end is not None and start > end:
+                raise ValueError("invalid activity bounds")
+            cursor = params.get("cursor", [None])[0]
+        except KeyError, ValueError:
+            self._json({"code": "invalid_activity_query"}, 400)
+            return
+        if STORE is None:
+            self._json({"code": "store_unavailable"}, 503)
+            return
+        self._json(STORE.monitor_activity(start, end, cursor))
 
     def _shutdown_post(self) -> None:
         """Authenticate and schedule the existing graceful shutdown command."""

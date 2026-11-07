@@ -34,6 +34,7 @@ Repository = "https://github.com/TerryOtt/localswim"
 localswim = "localswim.api_endpoint:main"
 localswim-cli = "localswim.cli:main"
 localswim-monitor = "localswim.monitor:main"
+localswim-monitor-pool = "localswim.monitor_pool:main"
 
 [dependency-groups]
 dev = [
