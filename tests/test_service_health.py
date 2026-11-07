@@ -15,19 +15,20 @@ if TYPE_CHECKING:
 SENTINEL = "private-board-token-response-exception-sentinel"
 
 
-def write_descriptor(path: pathlib.Path) -> None:
+def write_descriptor(path: pathlib.Path, *, monitor: bool = False) -> None:
     descriptor = board_state.service_descriptor_path(path)
     descriptor.parent.mkdir(parents=True, exist_ok=True)
+    metadata: board_state.JsonObject = {
+        "schema": 1,
+        "host": "127.0.0.1",
+        "port": 12345,
+        "board": str(path),
+        "token": SENTINEL,
+    }
+    if monitor:
+        metadata["monitorIdentityVersion"] = 1
     descriptor.write_text(
-        json.dumps(
-            {
-                "schema": 1,
-                "host": "127.0.0.1",
-                "port": 12345,
-                "board": str(path),
-                "token": SENTINEL,
-            }
-        ),
+        json.dumps(metadata),
         encoding="utf-8",
     )
 
@@ -85,6 +86,7 @@ def assert_private(result: service_ownership.ServiceHealth, path: pathlib.Path) 
         "port",
         "http_status",
         "error_type",
+        "probe_mode",
     }
     assert result.elapsed_ms >= 0
 
@@ -114,6 +116,7 @@ def test_success_is_frozen_private_and_preserves_probe_contract(
     monkeypatch.setattr(service_ownership, "read_service_metadata", read_once)
     result = service_ownership.probe_service_health(path)
     assert result.healthy
+    assert result.probe_mode == "readiness"
     assert (result.phase, result.code, result.port, result.http_status) == (
         "complete",
         "healthy",
@@ -131,6 +134,7 @@ def test_success_is_frozen_private_and_preserves_probe_contract(
     assert service_ownership.service_is_healthy(path) is True
 
 
+@pytest.mark.parametrize("lifecycle", [False, True])
 @pytest.mark.parametrize(
     "error,expected",
     [
@@ -142,7 +146,11 @@ def test_success_is_frozen_private_and_preserves_probe_contract(
     ],
 )
 def test_descriptor_failures_distinguish_read_and_validation(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected: str,
+    lifecycle: bool,
 ) -> None:
     path = tmp_path / SENTINEL
 
@@ -150,7 +158,12 @@ def test_descriptor_failures_distinguish_read_and_validation(
         raise error
 
     monkeypatch.setattr(service_ownership, "read_service_metadata", fail)
-    result = service_ownership.probe_service_health(path)
+    probe = (
+        service_ownership.probe_monitor_lifecycle
+        if lifecycle
+        else service_ownership.probe_service_health
+    )
+    result = probe(path)
     validation = isinstance(error, (ValueError, RecursionError))
     assert result.phase == ("descriptor_validation" if validation else "descriptor_read")
     assert result.code == ("descriptor_invalid" if validation else "descriptor_unreadable")
@@ -161,6 +174,7 @@ def test_descriptor_failures_distinguish_read_and_validation(
     assert service_ownership.service_is_healthy(path) is False
 
 
+@pytest.mark.parametrize("lifecycle", [False, True])
 @pytest.mark.parametrize(
     "payload",
     [
@@ -173,19 +187,28 @@ def test_descriptor_failures_distinguish_read_and_validation(
     ],
 )
 def test_invalid_descriptors_never_contact_endpoint(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, payload: bytes
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+    lifecycle: bool,
 ) -> None:
     path = tmp_path / SENTINEL
     descriptor = board_state.service_descriptor_path(path)
     descriptor.write_bytes(payload)
     connection = ProbeConnection(b"{}")
     install_connection(monkeypatch, connection)
-    result = service_ownership.probe_service_health(path)
+    probe = (
+        service_ownership.probe_monitor_lifecycle
+        if lifecycle
+        else service_ownership.probe_service_health
+    )
+    result = probe(path)
     assert (result.phase, result.code) == ("descriptor_validation", "descriptor_invalid")
     assert not connection.requests
     assert_private(result, path)
 
 
+@pytest.mark.parametrize("lifecycle", [False, True])
 @pytest.mark.parametrize("stage", ["connect_request", "response_headers", "response_read"])
 @pytest.mark.parametrize(
     "error,expected",
@@ -203,13 +226,19 @@ def test_transport_failures_are_bounded_and_private(
     stage: str,
     error: Exception,
     expected: str,
+    lifecycle: bool,
 ) -> None:
     path = tmp_path / SENTINEL
-    write_descriptor(path)
+    write_descriptor(path, monitor=lifecycle)
     connection = ProbeConnection(b"{}")
     connection.stage, connection.error = stage, error
     install_connection(monkeypatch, connection)
-    result = service_ownership.probe_service_health(path)
+    probe = (
+        service_ownership.probe_monitor_lifecycle
+        if lifecycle
+        else service_ownership.probe_service_health
+    )
+    result = probe(path)
     assert result.phase == stage
     assert result.error_type == expected
     assert not result.healthy
@@ -219,6 +248,7 @@ def test_transport_failures_are_bounded_and_private(
     assert_private(result, path)
 
 
+@pytest.mark.parametrize("lifecycle", [False, True])
 @pytest.mark.parametrize(
     "payload,status,phase,code",
     [
@@ -231,7 +261,7 @@ def test_transport_failures_are_bounded_and_private(
         (b"{}", 200, "metadata_validation", "metadata_invalid"),
         (b'{"boardIdentity":123}', 200, "metadata_validation", "metadata_invalid"),
         (
-            json.dumps({"boardIdentity": SENTINEL, "token": SENTINEL}).encode(),
+            json.dumps({"schema": 1, "boardIdentity": SENTINEL, "token": SENTINEL}).encode(),
             200,
             "identity",
             "identity_mismatch",
@@ -245,12 +275,18 @@ def test_response_failures_preserve_status_and_hide_payload(
     status: int,
     phase: str,
     code: str,
+    lifecycle: bool,
 ) -> None:
     path = tmp_path / SENTINEL
-    write_descriptor(path)
+    write_descriptor(path, monitor=lifecycle)
     connection = ProbeConnection(payload, status)
     install_connection(monkeypatch, connection)
-    result = service_ownership.probe_service_health(path)
+    probe = (
+        service_ownership.probe_monitor_lifecycle
+        if lifecycle
+        else service_ownership.probe_service_health
+    )
+    result = probe(path)
     assert (result.phase, result.code, result.http_status) == (phase, code, status)
     assert not result.healthy
     assert connection.closed
@@ -264,8 +300,13 @@ def test_health_rejects_unallowlisted_diagnostic_strings() -> None:
         service_ownership.ServiceHealth(
             False, "descriptor_read", "descriptor_unreadable", 0, error_type=SENTINEL
         )
+    with pytest.raises(ValueError, match="invalid service health metadata"):
+        service_ownership.ServiceHealth(
+            False, "descriptor_read", "descriptor_unreadable", 0, probe_mode=SENTINEL
+        )
 
 
+@pytest.mark.parametrize("lifecycle", [False, True])
 @pytest.mark.parametrize("error", [OSError(SENTINEL), http.client.HTTPException(SENTINEL)])
 @pytest.mark.parametrize("healthy_body", [True, False])
 def test_close_failure_rejects_success_and_preserves_earlier_failure(
@@ -273,16 +314,113 @@ def test_close_failure_rejects_success_and_preserves_earlier_failure(
     monkeypatch: pytest.MonkeyPatch,
     error: Exception,
     healthy_body: bool,
+    lifecycle: bool,
 ) -> None:
     path = tmp_path / SENTINEL
-    write_descriptor(path)
-    body = json.dumps({"boardIdentity": service_ownership.board_identity(path)}).encode()
+    write_descriptor(path, monitor=lifecycle)
+    body = json.dumps(
+        {"schema": 1, "boardIdentity": service_ownership.board_identity(path)}
+    ).encode()
     connection = ProbeConnection(body if healthy_body else b"[")
     connection.stage, connection.error = "response_close", error
     install_connection(monkeypatch, connection)
-    result = service_ownership.probe_service_health(path)
+    probe = (
+        service_ownership.probe_monitor_lifecycle
+        if lifecycle
+        else service_ownership.probe_service_health
+    )
+    result = probe(path)
     assert not result.healthy
     assert result.phase == ("response_close" if healthy_body else "metadata_decode")
     assert result.code == ("response_close_failed" if healthy_body else "metadata_invalid")
     assert_private(result, path)
     assert service_ownership.service_is_healthy(path) is False
+
+
+@pytest.mark.parametrize("advertised", [False, True])
+def test_monitor_selects_capability_without_retry(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, advertised: bool
+) -> None:
+    path = tmp_path / SENTINEL
+    write_descriptor(path)
+    descriptor = board_state.service_descriptor_path(path)
+    if advertised:
+        raw = json.loads(descriptor.read_text(encoding="utf-8"))
+        raw["monitorIdentityVersion"] = 1
+        descriptor.write_text(json.dumps(raw), encoding="utf-8")
+    connection = ProbeConnection(
+        json.dumps({"schema": 1, "boardIdentity": service_ownership.board_identity(path)}).encode()
+    )
+    install_connection(monkeypatch, connection)
+    result = service_ownership.probe_monitor_lifecycle(path)
+    assert result.healthy
+    assert result.probe_mode == ("lifecycle_identity" if advertised else "legacy_readiness")
+    endpoint = "monitor-identity" if advertised else "browser-session"
+    assert connection.requests == [("GET", "/api/v001/" + endpoint)]
+    assert connection.read_limits == [service_ownership.MAX_METADATA_BYTES + 1]
+    assert connection.closed
+    assert_private(result, path)
+
+
+@pytest.mark.parametrize("version", [None, True, False, 0, 2, "1", {}, []])
+def test_invalid_monitor_capability_does_not_change_readiness(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, version: board_state.JsonValue
+) -> None:
+    path = tmp_path / SENTINEL
+    write_descriptor(path)
+    descriptor = board_state.service_descriptor_path(path)
+    raw = json.loads(descriptor.read_text(encoding="utf-8"))
+    raw["monitorIdentityVersion"] = version
+    descriptor.write_text(json.dumps(raw), encoding="utf-8")
+    connection = ProbeConnection(
+        json.dumps({"boardIdentity": service_ownership.board_identity(path)}).encode()
+    )
+    install_connection(monkeypatch, connection)
+    result = service_ownership.probe_monitor_lifecycle(path)
+    assert not result.healthy
+    assert (result.phase, result.code, result.probe_mode) == (
+        "monitor_capability_validation",
+        "monitor_capability_invalid",
+        "discovery",
+    )
+    assert result.error_type == "invalid_metadata"
+    assert not connection.requests
+    assert_private(result, path)
+    assert service_ownership.probe_service_health(path).healthy
+    assert service_ownership.service_is_healthy(path)
+    assert connection.requests == [("GET", "/api/v001/browser-session")] * 2
+
+
+@pytest.mark.parametrize("schema", [None, True, False, 0, 2, "1", {}, []])
+def test_monitor_identity_requires_exact_schema(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, schema: board_state.JsonValue
+) -> None:
+    path = tmp_path / SENTINEL
+    write_descriptor(path)
+    descriptor = board_state.service_descriptor_path(path)
+    raw = json.loads(descriptor.read_text(encoding="utf-8"))
+    raw["monitorIdentityVersion"] = 1
+    descriptor.write_text(json.dumps(raw), encoding="utf-8")
+    connection = ProbeConnection(
+        json.dumps(
+            {"schema": schema, "boardIdentity": service_ownership.board_identity(path)}
+        ).encode()
+    )
+    install_connection(monkeypatch, connection)
+    result = service_ownership.probe_monitor_lifecycle(path)
+    assert not result.healthy
+    assert (result.phase, result.code, result.probe_mode) == (
+        "metadata_validation",
+        "metadata_invalid",
+        "lifecycle_identity",
+    )
+    assert connection.requests == [("GET", "/api/v001/monitor-identity")]
+    assert_private(result, path)
+
+
+def test_monitor_discovery_failure_is_unresolved(tmp_path: pathlib.Path) -> None:
+    result = service_ownership.probe_monitor_lifecycle(tmp_path / SENTINEL)
+    assert not result.healthy
+    assert result.probe_mode == "discovery"
+    assert result.phase == "descriptor_read"
+    assert_private(result, tmp_path / SENTINEL)

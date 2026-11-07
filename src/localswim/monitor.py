@@ -255,7 +255,7 @@ def handle_idle_cycle(
     """Update health and flush any alert whose quiet window has elapsed."""
     previous = runtime.last_health
     recovering = runtime.service_misses > 0
-    health = service_ownership.probe_service_health(config.board)
+    health = service_ownership.probe_monitor_lifecycle(config.board)
     runtime.last_health = health
     runtime.health_checked_at = now()
     if health.healthy:
@@ -269,6 +269,7 @@ def handle_idle_cycle(
         previous.port,
         previous.http_status,
         previous.error_type,
+        previous.probe_mode,
     ) != (
         health.healthy,
         health.phase,
@@ -276,6 +277,7 @@ def handle_idle_cycle(
         health.port,
         health.http_status,
         health.error_type,
+        health.probe_mode,
     )
     if not health.healthy or recovering:
         with contextlib.suppress(OSError):
@@ -902,7 +904,7 @@ def monitor(config: Config) -> int:
         print(f"Watching {config.board} for Codex thread alerts.", flush=True)
         for changes in watch_board(config):
             if stop_requested(config.target_path, os.getpid()):
-                health = service_ownership.probe_service_health(config.board)
+                health = service_ownership.probe_monitor_lifecycle(config.board)
                 runtime.last_health = health
                 runtime.health_checked_at = now()
                 if health.healthy:

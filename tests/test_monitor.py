@@ -306,7 +306,7 @@ def test_reload_debounces_initialization_write_with_or_without_notification(
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="codex"))
     monkeypatch.setattr(
         watcher.service_ownership,
-        "probe_service_health",
+        "probe_monitor_lifecycle",
         Mock(return_value=watcher.service_ownership.ServiceHealth(True, "complete", "healthy", 0)),
     )
     flush = Mock(return_value="alert stamp")
@@ -644,7 +644,7 @@ def test_ordinary_restart_retries_failed_queue_without_board_write(
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
     monkeypatch.setattr(
         watcher.service_ownership,
-        "probe_service_health",
+        "probe_monitor_lifecycle",
         Mock(
             side_effect=[
                 watcher.service_ownership.ServiceHealth(
@@ -724,7 +724,7 @@ def test_health_failure_diagnostics_recover_without_success_log_churn(
     )
     monkeypatch.setattr(
         watcher.service_ownership,
-        "probe_service_health",
+        "probe_monitor_lifecycle",
         Mock(side_effect=[failed, failed, healthy, healthy]),
     )
     runtime = watcher.MonitorRuntime(watcher.board_signature(config.board), watcher.now())
@@ -755,7 +755,7 @@ def test_fifth_health_failure_preserves_diagnostic_and_target(
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-codex"))
     monkeypatch.setattr(
         watcher.service_ownership,
-        "probe_service_health",
+        "probe_monitor_lifecycle",
         Mock(
             return_value=watcher.service_ownership.ServiceHealth(
                 False,
@@ -793,7 +793,7 @@ def test_diagnostic_io_failure_keeps_pending_flush_and_health_counter(
 ) -> None:
     monkeypatch.setattr(
         watcher.service_ownership,
-        "probe_service_health",
+        "probe_monitor_lifecycle",
         Mock(
             return_value=watcher.service_ownership.ServiceHealth(
                 False,
@@ -837,7 +837,7 @@ def test_activity_status_io_failure_keeps_its_existing_failure_semantics(
 ) -> None:
     monkeypatch.setattr(
         watcher.service_ownership,
-        "probe_service_health",
+        "probe_monitor_lifecycle",
         Mock(
             return_value=watcher.service_ownership.ServiceHealth(
                 True,
@@ -976,7 +976,7 @@ def test_recovered_interval_uses_shared_actor_filter_and_mocked_transport(
     monkeypatch.setattr(watcher.shutil, "which", Mock(return_value="mock-executable"))
     monkeypatch.setattr(
         watcher.service_ownership,
-        "probe_service_health",
+        "probe_monitor_lifecycle",
         Mock(return_value=watcher.service_ownership.ServiceHealth(True, "complete", "healthy", 0)),
     )
     transport = Mock(
@@ -1032,7 +1032,92 @@ def test_lifecycle_uses_live_descriptor_and_board_identity(
     runtime = watcher.MonitorRuntime(watcher.board_signature(config.board), watcher.now())
     watcher.handle_idle_cycle(config, "codex", runtime, Mock())
     assert runtime.service_misses == (0 if correct_identity else 1)
+    assert runtime.last_health is not None
+    assert runtime.last_health.probe_mode == "legacy_readiness"
     connect.assert_called_once_with("127.0.0.1", live_port, timeout=1)
     assert live_port != config.port
     legacy_probe.assert_not_called()
     connection.close.assert_called_once()
+
+
+def test_observed_timeout_bursts_recover_before_the_unchanged_exit_threshold(
+    config: watcher.Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = watcher.service_ownership.ServiceHealth(
+        False,
+        "response_headers",
+        "response_headers_failed",
+        1016,
+        port=55204,
+        error_type="timeout",
+        probe_mode="lifecycle_identity",
+    )
+    healthy = watcher.service_ownership.ServiceHealth(
+        True,
+        "complete",
+        "healthy",
+        626,
+        port=55204,
+        http_status=200,
+        probe_mode="lifecycle_identity",
+    )
+    samples = [failed] * 4 + [healthy] + [failed] * 4 + [healthy] + [failed] * 2 + [healthy]
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_monitor_lifecycle",
+        Mock(side_effect=samples),
+    )
+    runtime = watcher.MonitorRuntime(watcher.board_signature(config.board), watcher.now())
+    counts: list[int] = []
+    for _ in samples:
+        watcher.handle_idle_cycle(config, "mock-codex", runtime, Mock())
+        counts.append(runtime.service_misses)
+    assert counts == [1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 0]
+
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_monitor_lifecycle",
+        Mock(return_value=failed),
+    )
+    for _ in range(4):
+        watcher.handle_idle_cycle(config, "mock-codex", runtime, Mock())
+    with pytest.raises(RuntimeError, match="five consecutive checks"):
+        watcher.handle_idle_cycle(config, "mock-codex", runtime, Mock())
+
+
+def test_healthy_probe_mode_upgrade_is_persisted_without_log_churn(
+    config: watcher.Config,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    legacy = watcher.service_ownership.ServiceHealth(
+        True,
+        "complete",
+        "healthy",
+        200,
+        port=55204,
+        http_status=200,
+        probe_mode="legacy_readiness",
+    )
+    modern = watcher.service_ownership.ServiceHealth(
+        True,
+        "complete",
+        "healthy",
+        1,
+        port=55204,
+        http_status=200,
+        probe_mode="lifecycle_identity",
+    )
+    monkeypatch.setattr(
+        watcher.service_ownership,
+        "probe_monitor_lifecycle",
+        Mock(side_effect=[legacy, modern, modern]),
+    )
+    runtime = watcher.MonitorRuntime(watcher.board_signature(config.board), watcher.now())
+    publish = Mock()
+    for _ in range(3):
+        watcher.handle_idle_cycle(config, "mock-codex", runtime, publish)
+    assert publish.call_count == 2
+    assert runtime.last_health == modern
+    assert capsys.readouterr().out == ""

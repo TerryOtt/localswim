@@ -293,6 +293,7 @@ def read_service_metadata(path: pathlib.Path) -> board_state.JsonValue:
 HEALTH_PHASE_CODES = {
     "descriptor_read": "descriptor_unreadable",
     "descriptor_validation": "descriptor_invalid",
+    "monitor_capability_validation": "monitor_capability_invalid",
     "connect_request": "request_failed",
     "response_headers": "response_headers_failed",
     "response_read": "response_read_failed",
@@ -316,6 +317,7 @@ HEALTH_ERROR_TYPES = frozenset(
         "recursion_error",
     }
 )
+HEALTH_PROBE_MODES = frozenset({"readiness", "lifecycle_identity", "legacy_readiness", "discovery"})
 
 
 @dataclass(frozen=True)
@@ -329,6 +331,7 @@ class ServiceHealth:
     port: int | None = None
     http_status: int | None = None
     error_type: str | None = None
+    probe_mode: str = "readiness"
 
     def __post_init__(self) -> None:
         if (
@@ -346,6 +349,8 @@ class ServiceHealth:
                 and (type(self.http_status) is not int or not 100 <= self.http_status <= 999)
             )
             or (self.error_type is not None and self.error_type not in HEALTH_ERROR_TYPES)
+            or type(self.probe_mode) is not str
+            or self.probe_mode not in HEALTH_PROBE_MODES
         ):
             raise ValueError("invalid service health metadata")
 
@@ -356,6 +361,7 @@ class ServiceHealth:
             "phase": self.phase,
             "code": self.code,
             "elapsed_ms": self.elapsed_ms,
+            "probe_mode": self.probe_mode,
         }
         for key, value in (
             ("port", self.port),
@@ -389,8 +395,18 @@ def _health_error_type(error: BaseException) -> str:
 
 def probe_service_health(path: pathlib.Path) -> ServiceHealth:
     """Identify the failed stage of the existing bounded correct-board GET probe."""
+    return _probe_health(path, lifecycle=False)
+
+
+def probe_monitor_lifecycle(path: pathlib.Path) -> ServiceHealth:
+    """Probe advertised immutable identity, falling back only for legacy services."""
+    return _probe_health(path, lifecycle=True)
+
+
+def _probe_health(path: pathlib.Path, *, lifecycle: bool) -> ServiceHealth:
     started = time.monotonic()
     phase = "descriptor_read"
+    probe_mode = "discovery" if lifecycle else "readiness"
     port: int | None = None
     http_status: int | None = None
     connection: http.client.HTTPConnection | None = None
@@ -405,6 +421,7 @@ def probe_service_health(path: pathlib.Path) -> ServiceHealth:
             port=port,
             http_status=http_status,
             error_type=error_type,
+            probe_mode=probe_mode,
         )
 
     try:
@@ -416,9 +433,20 @@ def probe_service_health(path: pathlib.Path) -> ServiceHealth:
         phase = "descriptor_validation"
         descriptor = _validate_service_descriptor(path, raw)
         port = cast("int", descriptor["port"])
+        endpoint = board_state.API_PREFIX + "/browser-session"
+        if lifecycle:
+            phase = "monitor_capability_validation"
+            if "monitorIdentityVersion" in descriptor:
+                version = descriptor["monitorIdentityVersion"]
+                if type(version) is not int or version != 1:
+                    raise ValueError("invalid monitor identity capability")
+                probe_mode = "lifecycle_identity"
+                endpoint = board_state.API_PREFIX + "/monitor-identity"
+            else:
+                probe_mode = "legacy_readiness"
         phase = "connect_request"
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
-        connection.request("GET", board_state.API_PREFIX + "/browser-session")
+        connection.request("GET", endpoint)
         phase = "response_headers"
         response = connection.getresponse()
         http_status = response.status
@@ -428,9 +456,9 @@ def probe_service_health(path: pathlib.Path) -> ServiceHealth:
         session = _decode_json(data, MAX_METADATA_BYTES)
         if http_status != HTTPStatus.OK:
             phase = "http_status"
-        elif not isinstance(session, dict) or not isinstance(session.get("boardIdentity"), str):
+        elif not _valid_probe_metadata(session, probe_mode):
             phase = "metadata_validation"
-        elif session.get("boardIdentity") != board_identity(path):
+        elif cast("board_state.JsonObject", session).get("boardIdentity") != board_identity(path):
             phase = "identity"
         else:
             phase = "complete"
@@ -445,6 +473,14 @@ def probe_service_health(path: pathlib.Path) -> ServiceHealth:
                     phase = "response_close"
                     failure_type = _health_error_type(error)
     return result(failure_type)
+
+
+def _valid_probe_metadata(metadata: board_state.JsonValue, probe_mode: str) -> bool:
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("boardIdentity"), str):
+        return False
+    return probe_mode != "lifecycle_identity" or (
+        type(metadata.get("schema")) is int and metadata.get("schema") == 1
+    )
 
 
 def service_is_healthy(path: pathlib.Path) -> bool:

@@ -581,7 +581,10 @@ window it queries sanitized `localswim-cli` activity metadata. Suppress a nonemp
 result only when every event is by the configured automation actor (`bot` by
 default). Human, mixed, unknown, empty, malformed and failed queries still alert.
 Health diagnostics use bounded phase/code/error categories, elapsed milliseconds,
-and validated port/HTTP status only. Preserve the current target, activity cursor,
+probe mode, and validated port/HTTP status only. Advertised monitor lifecycle identity
+is independent of snapshot admission. Keep gateway/service readiness on its existing
+admission-aware probe, and keep legacy monitor fallback explicit in diagnostics.
+Preserve the current target, activity cursor,
 pending intervals, ownership and filtering during diagnostics recovery. Never log
 descriptor bodies, browser-session content, tokens or raw exception text.
 Never require one activity event per observed filesystem write. For queued alerts,

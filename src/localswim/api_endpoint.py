@@ -489,6 +489,7 @@ class BoardHttpServer(http.server.ThreadingHTTPServer):
     block_on_close = True
 
     def __init__(self, server_address: tuple[str, int], handler: type[Handler]) -> None:
+        self.board_identity = service_ownership.board_identity(BOARD_PATH)
         self._transport_lock = threading.Lock()
         self._reading: set[socket.socket] = set()
         self._drain_deadline: float | None = None
@@ -1402,6 +1403,7 @@ def publish_service(path: pathlib.Path, port: int) -> None:
         "port": port,
         "token": CLI_TOKEN,
         "board": str(path.resolve()),
+        "monitorIdentityVersion": 1,
         **(
             {"workspaceLaunch": launch}
             if (launch := os.environ.get("LOCALSWIM_WORKSPACE_LAUNCH"))
@@ -5529,6 +5531,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._redirect(API_PREFIX + "/status")
         elif route == API_PREFIX + "/status":
             self._status_get()
+        elif route == API_PREFIX + "/monitor-identity":
+            self._json(
+                {
+                    "schema": 1,
+                    "boardIdentity": cast("BoardHttpServer", self.server).board_identity,
+                }
+            )
         elif route == API_PREFIX + "/browser-session":
             board = live_snapshot()
             self._json(

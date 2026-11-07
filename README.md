@@ -1022,7 +1022,7 @@ Human, mixed, unknown, empty, malformed and failed results queue an alert.
 Filesystem signatures and activity-event counts differ and are never compared.
 No board prose or service credentials enter monitor logs or status files.
 Monitor status also includes `lastHealthCheck` after a probe has completed, with
-`healthy`, a bounded `phase` and `code`, `elapsed_ms`, and `checkedAt`. Optional
+`healthy`, a bounded `phase` and `code`, `probe_mode`, `elapsed_ms`, and `checkedAt`. Optional
 `port`, `http_status`, and `error_type` describe only validated endpoint metadata
 or an allowlisted failure category. `consecutiveHealthFailures` reports the normal
 idle-cycle lifecycle counter. Failed probes and recovery emit the same diagnostic
@@ -1033,6 +1033,24 @@ Status is persisted on health-category changes, failed probes, recovery, and the
 existing activity/lifecycle events. It is an observation, not a live heartbeat.
 Existing status files remain supported. The one-second probe timeout and
 five-consecutive-miss exit rule keep their existing behavior.
+New board writers advertise `monitorIdentityVersion: 1` in their machine-local
+descriptor. Monitors use the bounded `/api/v001/monitor-identity` endpoint for those
+writers. It returns the identity cached when the writer's HTTP server was constructed,
+independently of snapshot admission and the store mutex. It describes the running
+writer, while readiness and disk-health checks continue to validate board state.
+
+Health diagnostics label this mode `lifecycle_identity`. Services without the
+capability retain `legacy_readiness` through `/browser-session`; that fallback still
+depends on snapshot admission. `discovery` identifies checks that fail before endpoint
+selection, and explicit readiness probes use `readiness`. Malformed or unsupported
+capabilities fail closed for the monitor. Existing gateway/service readiness checks
+retain their prior endpoint and admission semantics.
+
+To activate the lifecycle endpoint after an upgrade, let the specific board writer
+complete its supported graceful source refresh and verify that its descriptor
+advertises version 1. Then cooperatively reload that board's monitor using its
+existing target, status, and lock paths. If that writer requires an explicit stop
+and start, use its board-specific graceful lifecycle and preserve its launch settings.
 Queued alerts contain the board label, one activity datetime range, and a sorted,
 deduplicated bullet list of changed card numbers from that same metadata query.
 If card numbers are unavailable, a short fallback requests metadata inspection;
