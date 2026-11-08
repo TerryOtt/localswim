@@ -723,6 +723,48 @@ gates merely to fill worker slots. Use fresh independent review before handoff,
 and ask focused questions when a necessary requirement is genuinely unclear while
 continuing useful work that does not depend on the answer.
 
+## Terry-approved V1 work and the V2 UX floor
+
+Terry established this standing workflow on 2026-11-08: approved V1 UX is the
+minimum acceptance baseline for V2. V2 may do more, but must not do less. Preserve
+approved user-visible behavior and guarantees, including workflow efficiency,
+accessibility, responsiveness, persistence and truthful recovery. Different V2
+architecture or implementation is welcome; it must preserve or improve the V1
+outcome and guarantees. An "intentional difference" label is not a parity waiver.
+
+After Terry approves V1 tickets, this V1 owning chat must send the verified current
+localswim V2 owning chat a concise writeup and/or a pointer to the approved cards.
+This is standing authorization for those approval handoffs; do not ask Terry for
+per-ticket messaging permission.
+
+- Verify the approval through sanitized activity metadata first. Approval hints
+  guide the check; an arbitrary comment or lane move is not proof of approval.
+  Reuse existing handoff evidence and inspect focused card content only when
+  needed. Do not reread every full card merely to rediscover an approval batch.
+- Discover current non-archived owning chats named `localswim V2 Dev Mnn` from
+  current app metadata and select the highest numeric milestone, not a
+  lexicographic title or remembered UUID. Page beyond a truncated recent list
+  before deciding which milestone is highest or that no recipient exists.
+  Use project identity and the board's
+  notification target to corroborate the recipient or resolve a same-milestone
+  tie; a stale target must not select an older milestone.
+- If no eligible V2 chat can be verified, tell Terry immediately and keep the
+  handoff pending. Never silently skip delivery or assume V2 work is finished.
+  Likewise escalate an unresolved recipient ambiguity instead of guessing.
+- Batch one approval burst into one useful handoff. Link an existing Git writeup
+  when sufficient; otherwise summarize the changed behavior and acceptance
+  requirements. Include the board URL plus ticket numbers and stable IDs, using
+  a verified card-specific link where available, and relevant source/evidence
+  links. For work with no additional UX/parity impact, say so and provide a pointer
+  rather than inventing requirements.
+- State that parity is required by the end of V2. Ask its owner to place each gap
+  in an already planned future milestone or a new closing milestone. Approval in
+  V1 does not expand the current V2 milestone or bypass V2 execution gates.
+- Use existing chat or tracking evidence to avoid duplicate handoffs for replayed
+  notices. Record the recipient and handoff pointer in private project runtime or
+  an active tracking card. Do not reopen or edit Completed cards merely to log
+  delivery, and do not add another watcher, notifier cursor or delivery service.
+
 ## Local inception-board coordination
 
 Use `C:\Projects\localswim-state-store\localswim\localswim.json` as the machine-local
