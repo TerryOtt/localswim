@@ -39,7 +39,7 @@ const context=vm.createContext({window,location,URL,Date,document:{getElementByI
   localActions:[],API_PREFIX:'/api/v001',
   sessionStorage:{setItem(k,v){stored[k]=v}},serverBuild:input.boardBuild || null,
   codeStale:!!input.boardStale,restarting:!!input.boardRestarting,restartProblem:input.boardProblem||null,
-  streamConnected:true,streamClosedAt:null,streamBoardError:null,pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,STREAM_GRACE_MS:10000,
+  streamConnected:true,streamClosedAt:null,streamBoardError:null,pageOpenedAt:0,pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,STREAM_GRACE_MS:10000,
   subjectEdit:null,detailEditVersion:null,mkAttempt:null,mkFiles:[],relationshipSpecs:()=>[],
   drafts:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
   STALE_RELOAD_STATE_KEY:'saved',STALE_RELOAD_QUERY:'_localswim_build',staleReloadStarted:false,

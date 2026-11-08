@@ -587,7 +587,7 @@ function el(id){if(!elements.has(id))elements.set(id,{textContent:'',title:'',da
  add(k){this.values.add(k)},remove(k){this.values.delete(k)}}});return elements.get(id)}
 const context=vm.createContext({Date:{now:()=>now},document:{getElementById:el},
  window:{WorkspaceUI:null,addEventListener(type,fn){handlers[type]=fn}},EventSource,JSON,encodeURIComponent,
- streamConnected:false,streamClosedAt:null,STREAM_GRACE_MS:10000,
+ streamConnected:false,streamClosedAt:null,pageOpenedAt:0,STREAM_GRACE_MS:10000,
  lastOk:0,fileMs:0,serverBuild:null,codeStale:false,restarting:false,restartProblem:null,
  pushState:null,PAGE_BUILD:'test',clockOf:()=>[1,':00'],agoOf:()=>[1,'second'],
  clearStaleReloadMarker(){},tick(){},reloadForServerBuild(){return false}});

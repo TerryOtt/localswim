@@ -277,8 +277,12 @@ of only that selected board. It does not poll pinned or cached boards in the
 background. The cache never stores projected pending actions or acknowledges
 them as saved. Revision floors still reject older snapshots.
 
-While that read or its card transition is pending, both connection indicators
-remain distinct from connected; the badge says REFRESHING in pale green. New writes are refused while drafts
+While that read or its card transition is pending, the badge says REFRESHING in
+pale green. The breather continues to show SSE health, including its existing
+ten-second disconnect grace; board loading does not turn it red. A fresh page also
+starts with ten seconds of optimistic connection grace while its first stream
+opens. Failed connection attempts do not extend that startup grace.
+New writes are refused while drafts
 remain editable. Already-admitted requests retain original card tokens and board
 revision checks across navigation. Failed refreshes keep the view read-only with
 an explicit Retry; subsequent healthy selected-board notifications can recover it.

@@ -18,7 +18,8 @@ const snapshot={revision:12,lanes:[{state:'backlog',items:[{id:'one',subject:'Sa
 const calls=[],stored=[],paints=[],events=[];
 let phase='refreshing',release,finish,readResult=copy(snapshot);
 const elements=new Map();
-const el=id=>{if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},classList:{toggle(){}},addEventListener(){}});return elements.get(id)};
+const el=id=>{if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},classList:{values:new Set(),
+ toggle(name,on){if(on)this.values.add(name);else this.values.delete(name)},contains(name){return this.values.has(name)}},addEventListener(){}});return elements.get(id)};
 const context=vm.createContext({console,AbortController,AbortSignal,queueMicrotask,Date,
  crypto:require('crypto').webcrypto,setTimeout,clearTimeout,
  window:{workspaceEpoch:3,workspaceReady:true,localswimWorkspace:true,WorkspaceUI:{
@@ -36,7 +37,7 @@ const context=vm.createContext({console,AbortController,AbortSignal,queueMicrota
  apiGet:async()=>readResult,
  fetch:async(path,options)=>{calls.push({path,options});if(calls.length===1)await new Promise(resolve=>release=resolve);
   return {ok:true,status:200,json:async()=>({revision:13,cardVersion:'b'.repeat(64)})}},
- lastOk:0,fileMs:0,streamConnected:true,streamClosedAt:null,streamBoardError:null,
+ lastOk:0,fileMs:0,streamConnected:true,streamClosedAt:null,streamBoardError:null,pageOpenedAt:0,
  serverBuild:null,codeStale:false,restarting:false,restartProblem:null,pushState:null,
  PAGE_BUILD:'test',STREAM_GRACE_MS:10000,clockOf:()=>['12',':34'],agoOf:()=>[1,'second'],
  reloadForServerBuild:()=>false,clearStaleReloadMarker(){}});
@@ -78,12 +79,32 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
   await run("approveLane(lane,'/one',3,12,1,button)");await run('applyTicketOrder()');
   assert.equal(calls.length,0);assert.equal(context.button.disabled,false);
   assert.equal(run('pendingLaneApprovals.size'),0);
+ }else if(input.mode==='startup-status'){
+  let now=100000;context.Date={now:()=>now};
+  const initialStart=input.page.indexOf('const pageOpenedAt =');assert.ok(initialStart>=0);
+  run(input.page.slice(initialStart,input.page.indexOf('\n',input.page.indexOf('let streamConnected =',initialStart))));
+  section('function renderLive()', '// Push-driven snapshots');
+  run('renderLive()');assert.equal(el('dot').classList.contains('alive'),true);
+  phase=null;run('renderLive()');assert.equal(el('badge').textContent,'RECONNECTING');
+  now+=9999;run('renderLive()');assert.equal(el('dot').classList.contains('alive'),true);
+  now++;run('renderLive()');assert.equal(el('dot').classList.contains('stale'),true);
+  run('streamConnected=true;streamClosedAt=null');now+=60000;run('renderLive()');
+  assert.equal(el('dot').classList.contains('alive'),true);
  }else if(input.mode==='status'){
   section('function renderLive()', '// Push-driven snapshots');
   for(const [state,label] of [['refreshing','REFRESHING'],['settling','REFRESHING'],['failed','REFRESH FAILED'],[null,'CONNECTED']]){
    phase=state;run('renderLive()');assert.equal(el('badge').textContent,label);
    assert.equal(el('badge').className,state==='failed'?'warn':state?'refreshing':'');
+   assert.equal(el('dot').classList.contains('alive'),true,'board loading must not signal a lost stream');
+   assert.equal(el('dot').classList.contains('stale'),false);
   }
+  phase='refreshing';context.streamConnected=false;context.streamClosedAt=Date.now()-5000;
+  run('renderLive()');assert.equal(el('dot').classList.contains('alive'),true,'intentional reconnect keeps existing grace');
+  context.streamClosedAt=Date.now()-15000;run('renderLive()');
+  assert.equal(el('dot').classList.contains('stale'),true,'a real stream outage remains visible');
+  assert.equal(el('badge').textContent,'REFRESHING');
+  context.streamConnected=true;context.streamClosedAt=null;run('renderLive()');
+  assert.equal(el('dot').classList.contains('alive'),true);
  }else if(input.mode.startsWith('tick')){
   section('// Pending browser intent','\nfunction acceptRevision(');
   section('function renderLive()', '// Push-driven snapshots');
@@ -176,6 +197,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
         "write-other",
         "direct-writes",
         "status",
+        "startup-status",
         "tick-fresh",
         "tick-error",
         "tick-obsolete",

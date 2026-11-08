@@ -5833,6 +5833,7 @@ function paint(animate = true) {
 
 // ---- connection health and confirmed snapshot age -------------------------
 let lastOk = 0, fileMs = 0;
+const pageOpenedAt = Date.now();
 let streamConnected = false, streamClosedAt = null, streamBoardError = null;
 const STREAM_GRACE_MS = 10000;
 
@@ -5970,8 +5971,8 @@ function clearStaleReloadMarker() {
   window.history.replaceState(null, '', clean.toString());
 }
 
-// The wall clock ticks independently of network activity. Connection indicators
-// stay green while SSE is open, with ten seconds of grace after it disconnects.
+// The wall clock ticks independently of network activity. The breather tracks
+// SSE health; the badge also reports the selected board's snapshot readiness.
 function renderLive() {
   const el = document.getElementById('live');
   const badge = document.getElementById('badge');
@@ -6067,11 +6068,13 @@ function renderLive() {
     .filter(Boolean).join('  ·  ');
 
   const phase = window.WorkspaceUI?.cachePhase?.();
-  const live = !phase && (streamConnected || (streamClosedAt !== null && nowMs - streamClosedAt < STREAM_GRACE_MS));
+  const connectionLive = streamConnected || (streamClosedAt !== null && nowMs - streamClosedAt < STREAM_GRACE_MS);
+  const live = !phase && connectionLive;
+  const breatherLive = connectionLive || nowMs - pageOpenedAt < STREAM_GRACE_MS;
   badge.className = phase === 'failed' ? 'warn' : phase ? 'refreshing' : live ? '' : 'dead';
   badge.textContent = phase === 'failed' ? 'REFRESH FAILED' : phase ? 'REFRESHING' : live ? 'CONNECTED' : 'RECONNECTING';
-  dot.classList.toggle('stale', !live);
-  dot.classList.toggle('alive', live);
+  dot.classList.toggle('stale', !breatherLive);
+  dot.classList.toggle('alive', breatherLive);
 }
 
 // Push-driven snapshots: navigation aborts superseded reads; bursts coalesce.
