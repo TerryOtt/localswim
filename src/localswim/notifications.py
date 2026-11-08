@@ -32,11 +32,11 @@ OPERATIONS: tuple[TicketOperation, ...] = (
     "Created",
     "Contents modified",
     "Comment added",
+    "Ticket numbers reordered",
+    "Moved lanes",
     "Reviewed & approved",
     "Archived",
     "Restored",
-    "Moved lanes",
-    "Ticket numbers reordered",
 )
 
 

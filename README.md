@@ -1167,18 +1167,22 @@ localswim board-change notice
 - Board: Example (`abcd...1234`)
 - Start: 2026-11-08 15:10:27 UTC
 - End: 2026-11-08 15:10:49 UTC
-- Tickets: 0197 (Created), 0199 (Comment added), 0255 (Reviewed & approved), 0288 (Moved lanes)
+- Tickets: Created (1234, 1235), Contents modified (2345, 2346), Reviewed & approved (3456, 3457)
 ```
 
 Hints come from committed writer operations, never from the wording of a comment.
 An ordinary lane move cannot masquerade as review approval. Other hints include
-Contents modified, Archived, Restored and Ticket numbers reordered. A ticket can
-carry several distinct hints when its burst includes several operations. They
+Contents modified, Archived, Restored and Ticket numbers reordered. Operation groups
+use the fixed lifecycle order Created, Contents modified, Comment added, Ticket
+numbers reordered, Moved lanes, Reviewed & approved, Archived, Restored, omitting
+empty groups. This is not chronological event order. Each group lists unique ticket
+numbers in ascending numeric order, padded to at least four digits. A ticket appears
+in every applicable group when its burst includes several operations. These hints
 help the owning chat choose focused activity or card reads; they do not replace
 the activity check or authorize work.
 
 Start is rounded down and end rounded up to whole seconds, retaining exact-second
-endpoints. Ticket numbers are sorted numerically. The fingerprint is abbreviated;
+endpoints. The fingerprint is abbreviated;
 use the configured board path and full identity returned by the CLI for validation.
 Convert the displayed UTC bounds to RFC 3339 when querying activity, for example
 `2026-11-08T15:10:27Z` through `2026-11-08T15:10:49Z`.

@@ -101,7 +101,7 @@ def test_native_queue_is_single_attempt_and_output_is_discarded(
         "- Board: Synthetic board (`aaaa...aaaa`)\n"
         "- Start: 2026-11-07 10:30:00 UTC\n"
         "- End: 2026-11-07 10:31:00 UTC\n"
-        "- Tickets: 0003 (Contents modified), 0012 (Contents modified)"
+        "- Tickets: Contents modified (0003, 0012)"
     )
     assert len(children) == 1 and children[0].poll() is not None
     assert capsys.readouterr() == ("", "")
@@ -178,8 +178,8 @@ def test_message_formats_sorted_tickets_and_abbreviated_identity() -> None:
     )
     assert "- Board: FGA Dev (`bbdf...1198`)\n" in message
     assert message.endswith(
-        "- Tickets: 0439 (Contents modified), 0446 (Contents modified), 0447 (Contents modified), 0448 (Contents modified), "
-        "0449 (Contents modified), 0450 (Contents modified), 10000 (Contents modified) (additional tickets omitted)"
+        "- Tickets: Contents modified (0439, 0446, 0447, 0448, 0449, 0450, 10000) "
+        "(additional tickets omitted)"
     )
 
 
@@ -335,8 +335,49 @@ def test_message_operations_deduplicate_and_preserve_numeric_sort() -> None:
         ),
     )
     assert message.endswith(
-        "- Tickets: 1234 (Created, Contents modified), 2345 (Archived), "
-        "3456 (Contents modified, Moved lanes)"
+        "- Tickets: Created (1234), Contents modified (1234, 3456), "
+        "Moved lanes (3456), Archived (2345)"
+    )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_message_groups_follow_fixed_lifecycle_order(reverse: bool) -> None:
+    expected = (
+        "Created",
+        "Contents modified",
+        "Comment added",
+        "Ticket numbers reordered",
+        "Moved lanes",
+        "Reviewed & approved",
+        "Archived",
+        "Restored",
+    )
+    operations = list(reversed(expected)) if reverse else list(expected)
+    message = signal._message(  # noqa: SLF001 -- formatter contract
+        _THREAD,
+        payload(tickets=[1234] * len(operations), operations=[[label] for label in operations]),
+    )
+    assert message.endswith("- Tickets: " + ", ".join(f"{label} (1234)" for label in expected))
+
+
+def test_message_matches_requested_grouped_example() -> None:
+    message = signal._message(  # noqa: SLF001 -- formatter contract
+        _THREAD,
+        payload(
+            tickets=[3457, 1235, 2346, 1234, 3456, 2345],
+            operations=[
+                ["Reviewed & approved"],
+                ["Created"],
+                ["Contents modified"],
+                ["Created"],
+                ["Reviewed & approved"],
+                ["Contents modified"],
+            ],
+        ),
+    )
+    assert message.endswith(
+        "- Tickets: Created (1234, 1235), Contents modified (2345, 2346), "
+        "Reviewed & approved (3456, 3457)"
     )
 
 
@@ -350,7 +391,12 @@ def test_message_maximum_operation_payload_fits_byte_limit() -> None:
         ),
     )
     assert len(message.encode("utf-8")) <= signal._MAX_MESSAGE_BYTES  # noqa: SLF001
-    assert "0128 (" + ", ".join(OPERATIONS) + ")" in message
+    tickets = ", ".join(f"{ticket:04d}" for ticket in range(1, 129))
+    assert message.endswith(
+        "- Tickets: "
+        + ", ".join(f"{operation} ({tickets})" for operation in OPERATIONS)
+        + " (additional tickets omitted)"
+    )
     assert message.endswith("(additional tickets omitted)")
 
 

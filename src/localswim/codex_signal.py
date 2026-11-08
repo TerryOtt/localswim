@@ -97,7 +97,15 @@ def _message(thread_id: str, payload: Mapping[str, object]) -> str:
         ticket_values, payload.get("operations", [["Contents modified"] for _ in ticket_values])
     )
     ticket_text = (
-        ", ".join(f"{ticket:04d} ({', '.join(by_ticket[ticket])})" for ticket in sorted(by_ticket))
+        ", ".join(
+            f"{operation} ({', '.join(f'{ticket:04d}' for ticket in matching)})"
+            for operation in OPERATIONS
+            if (
+                matching := [
+                    ticket for ticket in sorted(by_ticket) if operation in by_ticket[ticket]
+                ]
+            )
+        )
         or "unspecified"
     )
     if truncated:

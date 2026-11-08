@@ -3072,20 +3072,24 @@ PAGE = """<!doctype html>
   .attachment a { display: block; color: var(--ink); overflow-wrap: anywhere; }
   .attachment-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .attachment-actions button, #p-upload { font: inherit; cursor: pointer; padding: 4px 8px; }
-  .reorder-deps { width: 30px; height: 30px; padding: 3px; margin-left: 4px;
+  .reorder-deps { flex: none; width: 44px; height: 44px; padding: 8px; margin-left: 4px;
     font-size: inherit; display: inline-flex; align-items: center; justify-content: center;
-    border: 0; border-radius: 4px; background: #444; color: #FFF; cursor: pointer; }
-  .reorder-deps:hover { background: #333; }
+    border: 0; border-radius: 4px; background: #444; color: #FFF; cursor: pointer;
+    transition: background-color .2s ease-in, color .2s ease-in; }
+  .reorder-deps:hover:enabled { background: #FFF; color: #444; }
   .reorder-deps:focus-visible { outline: 3px solid #172B4D; outline-offset: 2px; }
-  .reorder-deps:disabled { opacity: .35; cursor: default; }
   /* Match the visible plus ink, which is smaller than its 24px font box. */
   .reorder-deps svg { width: 1em; height: 1em; fill: none; stroke: currentColor;
     stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  .lane-approve { width: 44px; height: 44px; padding: 8px; background: #14663F;
-    color: #FFF; }
-  .lane-approve:hover { background: #104F31; }
+  .lane-approve { background: #14663F; color: #FFF; }
+  .lane-approve:hover:enabled { background: #FFF; color: #14663F; }
   .lane-approve:focus-visible { outline: 3px solid #172B4D; outline-offset: 2px; }
   .lane-approve svg { fill: currentColor; stroke: none; }
+  .reorder-deps:disabled { background: #888; color: #FFF; cursor: default; }
+  .reorder-deps:disabled:hover { background: #777; }
+  @media (prefers-reduced-motion: reduce) {
+    .reorder-deps { transition: none; }
+  }
   #ticket-order-dialog { width: min(740px, 88vw); max-height: 85vh; overflow: auto;
     border: 1px solid var(--line); border-radius: 8px; padding: 20px; color: var(--ink); }
   #ticket-order-dialog::backdrop { background: rgb(0 0 0 / 45%); }
@@ -5142,7 +5146,7 @@ function laneEl(lane) {
     const reorder = document.createElement('button'); reorder.type = 'button';
     const count = lane.items.filter(item => !item.archived).length;
     reorder.className = 'reorder-deps';
-    reorder.title = count === 0 ? 'Disabled; swimlane is empty' : 'Reorder ticket numbers by dependencies';
+    reorder.title = count === 0 ? 'Disabled; no cards in swimlane' : 'Reorder ticket numbers by dependencies';
     reorder.setAttribute('aria-label',count === 0 ? reorder.title : 'Reorder ' + lane.label + ' ticket numbers by dependencies');
     reorder.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
       + '<path d="M3 5h4M3 11h7M3 17h10M18 4v16m-4-4 4 4 4-4"/></svg>';

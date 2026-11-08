@@ -73,7 +73,7 @@ const run=code=>vm.runInContext(code,context),settle=()=>new Promise(resolve=>se
    assert.equal(header.children.length,enabled?1:0);
    if(enabled){const button=header.children[0];assert.equal(button.disabled,expected);
     assert.equal(button.textContent,'');assert.match(button.innerHTML,/<svg/);
-    if(count===archived){assert.equal(button.title,'Disabled; swimlane is empty');
+    if(count===archived){assert.equal(button.title,'Disabled; no cards in swimlane');
       assert.equal(button.attrs['aria-label'],button.title);}
     else {assert.match(button.title,/dependencies/);assert.match(button.attrs['aria-label'],/Ready/);}
     assert.equal(button.type,'button');}

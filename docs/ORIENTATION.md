@@ -1327,10 +1327,13 @@ The simple one-owner path belongs to the live board service, not a new watcher o
 pool. `api_endpoint.py` creates one `notifications.NotificationDispatcher` at service
 setup and closes it at shutdown. After a successful human mutation commit it hands
 off bounded immutable metadata (board identity/label, interval and at most 128 ticket
-numbers and their operation labels, with truncation indicated). Each ticket shows
-all applicable labels once, ordered `Created`, `Contents modified`, `Comment added`,
-`Reviewed & approved`, `Archived`, `Restored`, `Moved lanes`, `Ticket numbers reordered`.
-For example: `1234 (Created, Comment added), 2345 (Reviewed & approved)`.
+numbers and their operation labels, with truncation indicated). Notices group tickets
+by operation in the fixed lifecycle order `Created`, `Contents modified`, `Comment added`,
+`Ticket numbers reordered`, `Moved lanes`, `Reviewed & approved`, `Archived`, `Restored`.
+This is not chronological event order. Empty groups are omitted; each group lists
+unique ticket numbers in ascending numeric order, padded to at least four digits.
+A ticket appears in every applicable group. For example:
+`Created (1234, 1235), Contents modified (2345, 2346), Reviewed & approved (3456, 3457)`.
 The exact single-card or bulk approval command supplies committed item IDs; only
 its own derived comment and move events become `Reviewed & approved`. Ordinary
 comments, copied approval prose, and manual moves to Completed do not imply approval.
