@@ -311,9 +311,9 @@ def test_priority_completion_preserves_another_cards_focus_token() -> None:
 MAKE_DRIVER = r"""
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const input=JSON.parse(fs.readFileSync(0,'utf8'));let resolveResponse,closed=0;
-const fields={'mk-subject':{value:'Subject'},'mk-detail':{value:'Detail'},'mk-priority':{value:'P3'},'mk-owner':{value:'bot'},'mk-go':{disabled:false}};
+const fields={'mk-subject':{value:'Subject'},'mk-detail':{value:'Detail'},'mk-priority':{value:'P3'},'mk-owner':{value:'bot'},'mk-go':{disabled:false},'mk-files':{disabled:false}};
 let links=[];
-const context=vm.createContext({crypto:require('crypto').webcrypto,mkAttempt:null,mkOpen:'backlog',window:{workspaceEpoch:1},API_PREFIX:'/board',
+const context=vm.createContext({crypto:require('crypto').webcrypto,mkFiles:[],mkBusy:false,mkAttempt:null,mkOpen:'backlog',window:{workspaceEpoch:1},API_PREFIX:'/board',
  document:{getElementById:id=>fields[id]},relationshipSpecs:()=>links,toast(){},acceptRevision(){},
  closeMake(){closed++},apiPost:async()=>await new Promise(resolve=>resolveResponse=resolve)});
 const start=input.page.indexOf('function makeDraft()'),end=input.page.indexOf("document.getElementById('mk-go').addEventListener",start);
@@ -350,11 +350,11 @@ def test_add_completion_preserves_changes_to_all_draft_fields(mode: str) -> None
 MAKE_RECOVERY_DRIVER = r"""
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const input=JSON.parse(fs.readFileSync(0,'utf8'));let calls=0,closed=0,posted;
-const fields={'mk-subject':{value:'Subject'},'mk-detail':{value:'Detail'},'mk-priority':{value:'P3'},'mk-owner':{value:'bot'},'mk-go':{disabled:false}};
+const fields={'mk-subject':{value:'Subject'},'mk-detail':{value:'Detail'},'mk-priority':{value:'P3'},'mk-owner':{value:'bot'},'mk-go':{disabled:false},'mk-files':{disabled:false}};
 const initial={revision:1,lanes:[{state:'backlog',items:[]}]};
 const context=vm.createContext({AbortSignal,crypto:require('crypto').webcrypto,
- mkOpen:'backlog',mkAttempt:null,window:{workspaceEpoch:1},API_PREFIX:'/board',API_TOKEN:'synthetic',
- data:initial,authoritativeData:initial,HAY:{clear(){}},paint(){},tick(){},toast(){},
+ mkFiles:[],mkBusy:false,mkOpen:'backlog',mkAttempt:null,window:{workspaceEpoch:1},API_PREFIX:'/board',API_TOKEN:'synthetic',
+ data:initial,authoritativeData:initial,HAY:{clear(){}},paint(){},tick(){},toast(){},renderMakeFiles(){},
  sessionStorage:{getItem(){return null},setItem(){}},
  document:{getElementById:id=>fields[id]},relationshipSpecs:()=>[],
  closeMake(){closed++;context.mkOpen=null;context.mkAttempt=null},

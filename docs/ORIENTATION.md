@@ -278,7 +278,7 @@ background. The cache never stores projected pending actions or acknowledges
 them as saved. Revision floors still reject older snapshots.
 
 While that read or its card transition is pending, both connection indicators
-stay non-green and the badge says REFRESHING. New writes are refused while drafts
+remain distinct from connected; the badge says REFRESHING in pale green. New writes are refused while drafts
 remain editable. Already-admitted requests retain original card tokens and board
 revision checks across navigation. Failed refreshes keep the view read-only with
 an explicit Retry; subsequent healthy selected-board notifications can recover it.
@@ -1357,6 +1357,15 @@ a five-second delivery budget and bounded cleanup of its own CLI child. It never
 logs raw errors or launches/resumes a chat through a separate session API.
 Windows requires native `codex.exe` on the service's PATH and refuses command
 wrappers; other platforms resolve `codex` normally.
+
+The notice formatter uses one `Time` line for raw intervals shorter than one
+second, including zero duration, with the start rounded down to a whole UTC second.
+This can hide a crossing into the next second. Consumers must query the inclusive
+interval [Time, Time + 2 seconds] to include all edits; for example a displayed
+`2026-11-08 18:19:06 UTC` means query `2026-11-08T18:19:06Z` through
+`2026-11-08T18:19:08Z`. Raw metadata bounds are unchanged. Intervals of at least
+one second retain `Start`/`End`, rounded outward to whole UTC seconds while
+preserving exact-second endpoints.
 
 This is process-lifetime best effort: no persistent cursor, journal, catch-up or
 retry. Pending bursts disappear on shutdown; failed or uncertain deliveries are

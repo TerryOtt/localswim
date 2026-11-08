@@ -2584,6 +2584,8 @@ PAGE = """<!doctype html>
            padding: 3px 8px; flex: 0 1 auto; width: 100%; box-sizing: border-box; text-align: center; white-space: nowrap;
            overflow: hidden; text-overflow: ellipsis; transition: background .2s; }
   #badge.warn { background: var(--p1); }
+  #badge.refreshing { background: #E7F5EC; color: #0B4026;
+                      box-shadow: inset 0 0 0 1px #0B4026; }
   #badge.dead { background: var(--p0); }
 
   /* **SEVEN LANES SHARE THE WIDTH RATHER THAN OVERFLOWING IT.** Terry works with the
@@ -3268,6 +3270,12 @@ move any card whoever owns it. Click to hand it over."></button>
         <div class="hint">Enter adds a new line. Use Add card to submit.</div>
       </div>
       <div class="field">
+        <label for="mk-files">Attachments</label>
+        <input id="mk-files" type="file" multiple>
+        <div class="hint">Files upload after the card is created, up to 10 MiB each. Keep this page open until uploads finish.</div>
+        <div id="mk-file-status" role="status"></div>
+      </div>
+      <div class="field">
         <label>Relationships</label>
         <div id="mk-relations"></div>
         <button id="mk-rel-add" type="button">Add relationship</button>
@@ -3400,7 +3408,7 @@ function confirmAddIntent(prefix, body) {
   if (prefix !== API_PREFIX || typeof mkAttempt === 'undefined' || !mkAttempt
       || mkAttempt.id !== body.id) return;
   mkAttempt.confirmed = true;
-  if (mkOpen && sameMakeDraft(makeDraft(), mkAttempt.draft)) closeMake(true);
+  if (mkOpen && (typeof mkFiles === 'undefined' || !mkFiles.length) && sameMakeDraft(makeDraft(), mkAttempt.draft)) closeMake(true);
 }
 // Dismissal is a local acknowledgement, never a retry or a successful-save receipt.
 function savedActionText(action) {
@@ -4887,16 +4895,115 @@ document.getElementById('say').addEventListener('keydown', ev => {
 //
 // **`mkOpen` is still kept**, because the lane a card is being written for has to
 // outlive the repaint too.
-let mkOpen = null, mkAttempt = null;
+let mkOpen = null, mkAttempt = null, mkFiles = [], mkBusy = false;
+
+function renderMakeFiles() {
+  const box = document.getElementById('mk-file-status'); box.replaceChildren();
+  for (const entry of mkFiles) {
+    const row = document.createElement('div');
+    row.textContent = entry.name + ' — ' + (entry.status === 'saved' ? 'Uploaded'
+      : entry.status === 'uploading' ? 'Uploading'
+      : entry.status === 'unknown' ? 'Outcome unconfirmed; inspect saved attachments before any new upload'
+      : !entry.file ? 'Reselect this file to continue' : entry.status === 'refused' ? 'Not uploaded; retry available' : 'Pending');
+    if (!mkAttempt) {
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
+      remove.addEventListener('click',() => {
+        if (mkBusy || mkAttempt) return;
+        mkFiles = mkFiles.filter(item => item !== entry); renderMakeFiles(); captureMakeFiles();
+      }); row.append(remove);
+    }
+    box.append(row);
+  }
+  document.getElementById('mk-go').textContent = mkAttempt?.confirmed ? 'Continue uploads' : 'Add card';
+}
+function captureMakeFiles() { window.WorkspaceUI?.capture(); }
+function restoreMakeFiles(entries) {
+  mkFiles = Array.isArray(entries) ? entries : [];
+  for (const entry of mkFiles) if (entry.status === 'uploading') entry.status = 'unknown';
+  renderMakeFiles();
+}
+document.getElementById('mk-files').addEventListener('change', ev => {
+  if (mkBusy) return;
+  for (const file of ev.target.files) {
+    const missing = mkFiles.find(entry => !entry.file && entry.status !== 'saved'
+      && entry.name === file.name && entry.size === file.size && entry.modified === file.lastModified);
+    if (missing) Object.defineProperty(missing,'file',{value:file,writable:true,configurable:true});
+    else if (!mkAttempt) {
+      const entry = {name:file.name,size:file.size,modified:file.lastModified,status:'pending'};
+      Object.defineProperty(entry,'file',{value:file,writable:true,configurable:true}); mkFiles.push(entry);
+    } else toast('Reselect a pending file with its original name, size and modification date.',true);
+  }
+  ev.target.value = ''; renderMakeFiles(); captureMakeFiles();
+});
+
+async function uploadMakeFiles(attempt, prefix, epoch) {
+  const current = () => mkAttempt === attempt && prefix === API_PREFIX && epoch === window.workspaceEpoch;
+  for (const entry of mkFiles) {
+    if (!current()) return false;
+    if (entry.status === 'saved') continue;
+    const latest = await apiGet(prefix + '/board');
+    if (!current() || !acknowledgeSnapshot(latest,prefix)) return false;
+    const card = snapshotItem(latest,attempt.id);
+    if (!card || card.archived) { toast('Created card is unavailable. Files are preserved.',true); return false; }
+    // Negative readback never proves a timed-out upload cannot commit later.
+    if (entry.status === 'unknown') {
+      const matches = (card.attachments || []).filter(file => !(entry.before || []).includes(file.id)
+        && file.name === entry.name && file.size === entry.size && file.sha256 === entry.digest
+        && file.by === entry.actor);
+      if (matches.length !== 1) { renderMakeFiles(); return false; }
+      entry.status = 'saved';
+      const action = localActions.find(action => action.id === entry.actionId);
+      if (action) forgetAction(action);
+      renderMakeFiles(); captureMakeFiles(); continue;
+    }
+    if (!entry.file) { renderMakeFiles(); return false; }
+    const bytes = await entry.file.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256',bytes);
+    const hash = Array.from(new Uint8Array(digest),byte => byte.toString(16).padStart(2,'0')).join('');
+    if (!current()) return false;
+    if (entry.digest && entry.digest !== hash) {
+      entry.file = null; renderMakeFiles(); captureMakeFiles();
+      toast('Reselected file contents differ. Reselect the original file to continue.',true); return false;
+    }
+    entry.digest = hash; entry.actor = latest.browserUser;
+    const encoded = await fileBase64(entry.file);
+    if (!current()) return false;
+    entry.before = (card.attachments || []).map(file => file.id);
+    entry.status = 'uploading'; renderMakeFiles(); captureMakeFiles();
+    let response, out;
+    try {
+      const sending = apiPost(prefix + '/cards/' + encodeURIComponent(attempt.id) + '/attachment',
+        {name:entry.name,data:encoded},card.cardVersion);
+      const pending = localActions.find(action => action.prefix === prefix && action.cardId === attempt.id
+        && action.kind === 'attachment' && action.body.name === entry.name && action.body.data === encoded);
+      if (pending) entry.actionId = pending.id;
+      captureMakeFiles();
+      response = await sending;
+      out = await response.json();
+    } catch (error) {
+      entry.status = 'unknown';
+      if (current()) { renderMakeFiles(); captureMakeFiles(); }
+      throw error;
+    }
+    entry.status = response.ok ? 'saved' : response.status === 0 || out.intentPending ? 'unknown' : 'refused';
+    const action = localActions.find(action => action.prefix === prefix && action.cardId === attempt.id
+      && action.kind === 'attachment' && action.body.name === entry.name && action.body.data === encoded);
+    if (action) entry.actionId = action.id;
+    if (!current()) return false;
+    renderMakeFiles(); captureMakeFiles();
+    if (!response.ok) { toast(out.error || 'Upload stopped. Remaining files are preserved.',true); return false; }
+  }
+  return true;
+}
 
 function mkDirty() {
   return !!(document.getElementById('mk-subject').value.trim()
          || document.getElementById('mk-detail').value.trim()
-         || document.getElementById('mk-relations').children.length);
+         || document.getElementById('mk-relations').children.length || mkFiles.length);
 }
 
 function openMake(lane) {
-  mkAttempt = null;
+  mkAttempt = null; mkFiles = []; renderMakeFiles();
   mkOpen = lane.state;
   document.getElementById('mk-where').textContent =
     'It will be created in ' + lane.label + ', by ' + userLabel(data.browserUser) + '.';
@@ -4932,13 +5039,17 @@ function openMake(lane) {
 }
 
 function closeMake(force) {
+  if (mkBusy && !force) { toast('Wait for the current save to finish.',true); return; }
   // **Cancelling with text in it ASKS FIRST.** The whole card is about not losing
   // typing, and a stray Escape is one keypress from a paragraph.
   if (!force && mkDirty()
-      && !window.confirm('Discard this card? What you typed will be lost.')) {
+      && !window.confirm(mkAttempt?.confirmed
+        ? 'Close this form? The created card and uploaded files remain; pending selections will be discarded.'
+        : 'Discard this card? What you typed will be lost.')) {
     return;
   }
-  mkOpen = null; mkAttempt = null;
+  mkOpen = null; mkAttempt = null; mkFiles = [];
+  document.getElementById('mk-files').value = ''; renderMakeFiles();
   document.getElementById('mk-subject').value = '';
   document.getElementById('mk-detail').value = '';
   document.getElementById('mk-relations').replaceChildren();
@@ -4970,6 +5081,7 @@ function restoreMakeAttempt(saved) {
   mkAttempt = saved && typeof saved.id === 'string' && saved.draft ? saved : null;
   if (mkAttempt && snapshotItem(authoritativeData || data, mkAttempt.id))
     confirmAddIntent(API_PREFIX, {...mkAttempt.draft, id:mkAttempt.id});
+  renderMakeFiles();
 }
 function makeDraft() {
   return {state:mkOpen,subject:document.getElementById('mk-subject').value.trim(),
@@ -4982,6 +5094,7 @@ function sameMakeDraft(left, right) {
     && JSON.stringify(left.links || []) === JSON.stringify(right.links || []);
 }
 async function submitMake() {
+  if (mkBusy) return;
   const subject = document.getElementById('mk-subject').value.trim();
   if (!mkOpen || !subject) {
     toast('A card needs a title', true);
@@ -4991,22 +5104,34 @@ async function submitMake() {
   const go = document.getElementById('mk-go');
   const sourceLane = mkOpen, epoch = window.workspaceEpoch;
   const submitted = makeDraft();
-  if (mkAttempt && (mkAttempt.confirmed || !sameMakeDraft(submitted, mkAttempt.draft))) {
+  if (mkFiles.some(entry => entry.size > (data.attachmentMaxBytes || 10485760))) {
+    toast('A selected file exceeds the 10 MiB limit. Remove it before creating the card.',true); return;
+  }
+  if (!mkAttempt && mkFiles.some(entry => !entry.file)) {
+    toast('Reselect the pending files before creating this card.',true); return;
+  }
+  if (mkAttempt && !sameMakeDraft(submitted, mkAttempt.draft)) {
     toast(mkAttempt.confirmed ? 'This card was created. Your changed draft is preserved; open a new form to add another card.'
       : 'The original card creation is unconfirmed. Your changed draft is preserved; inspect that card before adding another.', true);
     return;
   }
   if (!mkAttempt) mkAttempt = {id:'card-' + crypto.randomUUID(), draft:submitted, confirmed:false};
-  const attempt = mkAttempt;
-  go.disabled = true;
+  const attempt = mkAttempt, prefix = API_PREFIX;
+  const filesSelected = mkFiles.length > 0;
+  mkBusy = true; go.disabled = true; document.getElementById('mk-files').disabled = true;
   try {
-    const res = await apiPost(API_PREFIX + '/cards', {...submitted, id:attempt.id});
+    const res = attempt.confirmed ? {ok:true,json:async () => ({result:'Card already created'})}
+      : await apiPost(prefix + '/cards', {...submitted, id:attempt.id});
     const out = await res.json();
     if (out.workspaceBoardChanged) return false;
     acceptRevision(out);
     if (!res.ok) {
       if (res.status > 0 && !out.intentPending && mkAttempt === attempt) mkAttempt = null;
       toast(out.error || 'Card refused', true); return;
+    }
+    if (filesSelected) {
+      attempt.confirmed = true; renderMakeFiles(); captureMakeFiles();
+      if (!await uploadMakeFiles(attempt,prefix,epoch)) return;
     }
     // **Only cleared once the server has it.** Clearing on click would throw the
     // text away on a refusal, which is the same defect as the repaint wipe
@@ -5018,7 +5143,7 @@ async function submitMake() {
   } catch (err) {
     toast('Could not reach the board: ' + err, true);
   } finally {
-    go.disabled = false;
+    mkBusy = false; go.disabled = false; document.getElementById('mk-files').disabled = false;
   }
 }
 
@@ -5781,7 +5906,7 @@ function saveStaleReloadState() {
       priority: document.getElementById('mk-priority').value,
       owner: document.getElementById('mk-owner').value,
       links: relationshipSpecs(document.getElementById('mk-relations')),
-      ...(mkAttempt ? {attempt:mkAttempt} : {}),
+      files:mkFiles, ...(mkAttempt ? {attempt:mkAttempt} : {}),
     };
   }
   try {
@@ -5819,6 +5944,7 @@ function restoreStaleReloadState() {
       document.getElementById('mk-owner').value = saved.make.owner || '';
       const relations = document.getElementById('mk-relations'); relations.replaceChildren();
       for (const spec of saved.make.links || []) addRelationshipRow(relations, spec, null);
+      restoreMakeFiles(saved.make.files);
       restoreMakeAttempt(saved.make.attempt);
     }
   }
@@ -5942,7 +6068,7 @@ function renderLive() {
 
   const phase = window.WorkspaceUI?.cachePhase?.();
   const live = !phase && (streamConnected || (streamClosedAt !== null && nowMs - streamClosedAt < STREAM_GRACE_MS));
-  badge.className = phase ? 'warn' : live ? '' : 'dead';
+  badge.className = phase === 'failed' ? 'warn' : phase ? 'refreshing' : live ? '' : 'dead';
   badge.textContent = phase === 'failed' ? 'REFRESH FAILED' : phase ? 'REFRESHING' : live ? 'CONNECTED' : 'RECONNECTING';
   dot.classList.toggle('stale', !live);
   dot.classList.toggle('alive', live);

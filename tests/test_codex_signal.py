@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -131,6 +132,12 @@ def test_message_preserves_label_converts_offsets_and_reports_truncation(harness
     "since,until,expected_start,expected_end",
     [
         (
+            "2026-11-08T18:19:06Z",
+            "2026-11-08T18:19:07Z",
+            "2026-11-08 18:19:06",
+            "2026-11-08 18:19:07",
+        ),
+        (
             "2026-11-08T15:10:27.900000Z",
             "2026-11-08T15:10:48.000001Z",
             "2026-11-08 15:10:27",
@@ -144,15 +151,15 @@ def test_message_preserves_label_converts_offsets_and_reports_truncation(harness
         ),
         (
             "2026-12-31T18:59:59.900000-05:00",
-            "2026-12-31T18:59:59.999999-05:00",
+            "2026-12-31T19:00:00.900000-05:00",
             "2026-12-31 23:59:59",
-            "2027-01-01 00:00:00",
+            "2027-01-01 00:00:01",
         ),
         (
             "2028-03-01T00:29:59.900000+00:30",
-            "2028-03-01T00:29:59.999999+00:30",
+            "2028-03-01T00:30:00.900000+00:30",
             "2028-02-29 23:59:59",
-            "2028-03-01 00:00:00",
+            "2028-03-01 00:00:01",
         ),
     ],
 )
@@ -164,6 +171,54 @@ def test_message_whole_second_utc_bounds(
     )
     assert f"- Start: {expected_start} UTC\n" in message
     assert f"- End: {expected_end} UTC\n" in message
+    assert "- Time:" not in message
+
+
+@pytest.mark.parametrize(
+    "since,until,expected_time",
+    [
+        ("2026-11-08T18:19:06Z", "2026-11-08T18:19:06Z", "2026-11-08 18:19:06"),
+        (
+            "2026-11-08T18:19:06.123456Z",
+            "2026-11-08T18:19:06.123456Z",
+            "2026-11-08 18:19:06",
+        ),
+        (
+            "2026-11-08T18:19:06.900000Z",
+            "2026-11-08T18:19:07.899999Z",
+            "2026-11-08 18:19:06",
+        ),
+        (
+            "2026-11-08T18:19:06.100000Z",
+            "2026-11-08T18:19:06.999999Z",
+            "2026-11-08 18:19:06",
+        ),
+        (
+            "2026-11-08T18:19:06.900000Z",
+            "2026-11-08T18:19:07.100000Z",
+            "2026-11-08 18:19:06",
+        ),
+        (
+            "2026-12-31T18:59:59.900000-05:00",
+            "2026-12-31T19:00:00.100000-05:00",
+            "2026-12-31 23:59:59",
+        ),
+    ],
+)
+def test_message_subsecond_interval_uses_single_utc_time(
+    since: str, until: str, expected_time: str
+) -> None:
+    value = payload(since=since, until=until)
+    original = value.copy()
+    message = signal._message(_THREAD, value)  # noqa: SLF001 - formatter contract
+    assert f"- Time: {expected_time} UTC\n" in message
+    assert "- Start:" not in message and "- End:" not in message
+    assert value == original
+    # The compact display can cross a second boundary; two seconds contain it.
+    display_start = signal._timestamp(expected_time + "+00:00")  # noqa: SLF001
+    raw_start = signal._timestamp(since)  # noqa: SLF001
+    raw_end = signal._timestamp(until)  # noqa: SLF001
+    assert display_start <= raw_start <= raw_end < display_start + timedelta(seconds=2)
 
 
 def test_message_formats_sorted_tickets_and_abbreviated_identity() -> None:
@@ -216,6 +271,7 @@ def test_stop_reaps_exact_child_without_retry(harness: Harness) -> None:
         {"label": "line\nbreak"},
         {"label": "control\x7f"},
         {"since": "2026-11-07T10:32:00Z"},
+        {"since": "2026-11-07T10:31:00.000001Z"},
         {"since": "2026-11-07T10:30:00"},
         {"until": "bad"},
         {"until": "x" * 1000},

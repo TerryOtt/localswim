@@ -40,7 +40,7 @@ const context=vm.createContext({window,location,URL,Date,document:{getElementByI
   sessionStorage:{setItem(k,v){stored[k]=v}},serverBuild:input.boardBuild || null,
   codeStale:!!input.boardStale,restarting:!!input.boardRestarting,restartProblem:input.boardProblem||null,
   streamConnected:true,streamClosedAt:null,streamBoardError:null,pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,STREAM_GRACE_MS:10000,
-  subjectEdit:null,detailEditVersion:null,mkAttempt:null,relationshipSpecs:()=>[],
+  subjectEdit:null,detailEditVersion:null,mkAttempt:null,mkFiles:[],relationshipSpecs:()=>[],
   drafts:{},openId:null,editing:null,query:'needle',unhideOld:false,mkOpen:null,
   STALE_RELOAD_STATE_KEY:'saved',STALE_RELOAD_QUERY:'_localswim_build',staleReloadStarted:false,
   PAGE_BUILD:'aaaaaaa',clockOf:()=>[1,':00:00am'],agoOf:()=>[0,'second']});
@@ -350,7 +350,7 @@ if(input.mode==='card-focus'){
     '// **Card #0072.'),fresh);
   vm.runInContext(section(input.page,'let query =','const HAY ='),fresh);
   vm.runInContext(`let openId=null,editing=null,mkOpen=null,subjectEdit={},detailEditVersion=null;
-    function addRelationshipRow(){} function restoreMakeAttempt(){}
+    function addRelationshipRow(){} function restoreMakeFiles(){} function restoreMakeAttempt(){}
     data.lanes=[{state:'ready_for_work'}];
     function itemById(id){return id==='card-17'?{id}:null}
     function openCard(id){openId=id;document.getElementById('say').value=drafts[id]||''}
@@ -631,6 +631,7 @@ def test_reload_state_roundtrip_executes_shipped_storage_bootstrap_in_fresh_vm()
             "priority": "P3",
             "owner": "bot",
             "links": [],
+            "files": [],
         },
     }
     assert result["restored"] == {

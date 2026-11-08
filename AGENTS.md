@@ -519,7 +519,7 @@ external services or a framework.
 Keep recent confirmed board snapshots only in bounded per-tab memory (30-minute
 view recency, eight boards, 96 MiB serialized UTF-8 budget). Returning to a cached
 board renders it immediately, then forces a fresh selected-board read. Show
-non-green REFRESHING and refuse new mutations until the read and reconciliation
+distinct pale-green REFRESHING and refuse new mutations until the read and reconciliation
 finish. A failed refresh retains the read-only view with Retry. Cache rendering
 must never acknowledge pending actions or advance a revision floor. Preserve
 already-admitted writes, original edit tokens, drafts and navigation fences.
@@ -690,6 +690,9 @@ uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD no
   show UTC whole-second bounds rounded outward. Use the configured board path and
   full CLI identity for validation; convert displayed bounds to RFC 3339 for the
   activity query. Do not treat abbreviated fingerprints as full identity proof.
+  Subsecond notices use one floored UTC `Time` instead. Query from that time
+  through two seconds later so an edit burst crossing a second boundary remains
+  fully covered; the display is compact, not an exact point-time assertion.
 - Per-ticket operation hints summarize committed actions and can guide focused
   reads. Reviewed & approved comes only from the actual single/bulk approval
   command, never a comment mentioning approval or an ordinary move. Multiple

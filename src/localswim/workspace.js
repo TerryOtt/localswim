@@ -183,7 +183,7 @@
     if (mkOpen) saved.make = {state: mkOpen, subject: document.getElementById('mk-subject').value,
       detail: document.getElementById('mk-detail').value, priority: document.getElementById('mk-priority').value,
       owner: document.getElementById('mk-owner').value, links: relationshipSpecs(document.getElementById('mk-relations')),
-      ...(mkAttempt ? {attempt:mkAttempt} : {})};
+      files:mkFiles, ...(mkAttempt ? {attempt:mkAttempt} : {})};
     const drawer = document.querySelector('#panel .body');
     saved.drawerScroll = drawer ? drawer.scrollTop : 0;
     state.records[current] = saved; state.lastBoard = current;
@@ -229,6 +229,7 @@
         for (const field of ['subject', 'detail', 'priority', 'owner']) document.getElementById('mk-' + field).value = saved.make[field] || '';
         const relations = document.getElementById('mk-relations'); relations.replaceChildren();
         for (const spec of saved.make.links || []) addRelationshipRow(relations, spec, null);
+        restoreMakeFiles(saved.make.files);
         restoreMakeAttempt(saved.make.attempt);
       }
     }
@@ -623,7 +624,7 @@
     if (tail.length === 1 && tail[0] === 'cards' && saved.make
         && saved.make.attempt?.id === body.id) {
       saved.make.attempt.confirmed = true;
-      if (sameMakeDraft({...saved.make, subject:saved.make.subject.trim()}, body)) delete saved.make;
+      if (!(saved.make.files || []).length && sameMakeDraft({...saved.make, subject:saved.make.subject.trim()}, body)) delete saved.make;
     }
     try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }

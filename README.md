@@ -136,7 +136,7 @@ workspace URL such as **http://127.0.0.1:8810/board/localswim/localswim**. The k
 relative path without `.json`, so changing the displayed project name preserves the
 bookmark. Switching boards updates the URL and contents without reloading the page.
 Returning to a recently viewed board shows its last confirmed snapshot immediately
-with a non-green **REFRESHING** indicator. A fresh read of that selected board
+with a pale-green **REFRESHING** indicator. A fresh read of that selected board
 reconciles moved, added and removed cards before saving becomes available again.
 Failed refreshes keep the old view visible with **Retry**. This per-tab memory
 cache holds up to eight boards and 96 MiB of serialized snapshots, expires boards
@@ -547,6 +547,15 @@ The snapshot stores a card's `archived` flag only when true and an append-only
 `archiveHistory` array after the first archive operation.
 
 ## Card attachments and cover photos
+
+The **New card** dialog also accepts multiple attachments before you choose **Add card**.
+It creates the card once, then uploads files in sequence; this is not an atomic operation.
+Each file shows whether it uploaded or remains pending. **Continue uploads** retries
+known refusals without creating another card or resending successful files. An
+unconfirmed upload is checked against fresh saved attachment metadata, never blindly
+replayed. Keep the page open while uploads finish. Workspace navigation retains file
+selections in memory; after a reload, reselect any pending files when prompted.
+Closing the form does not undo a created card or its successful uploads.
 
 Open a card and choose **Upload attachment**. Files up to **10 MiB each** are accepted;
 a larger file opens an explanatory refusal dialog without changing the board.
@@ -1181,8 +1190,15 @@ in every applicable group when its burst includes several operations. These hint
 help the owning chat choose focused activity or card reads; they do not replace
 the activity check or authorize work.
 
-Start is rounded down and end rounded up to whole seconds, retaining exact-second
-endpoints. The fingerprint is abbreviated;
+For raw intervals shorter than one second, including zero duration, the two time
+lines become one, for example `- Time: 2026-11-08 18:19:06 UTC`. Time is the start
+rounded down to a whole UTC second. This compact display can cover edits crossing
+into the next second; consumers must query from Time through Time + 2 seconds
+(for example `2026-11-08T18:19:06Z` through `2026-11-08T18:19:08Z`) to include every
+edit. The raw metadata bounds are unchanged.
+
+For intervals of at least one second, Start is rounded down and End rounded up to
+whole seconds, retaining exact-second endpoints. The fingerprint is abbreviated;
 use the configured board path and full identity returned by the CLI for validation.
 Convert the displayed UTC bounds to RFC 3339 when querying activity, for example
 `2026-11-08T15:10:27Z` through `2026-11-08T15:10:49Z`.

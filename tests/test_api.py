@@ -1313,7 +1313,7 @@ def test_new_card_dialog_exposes_repeatable_relationship_controls(api: RunningAp
         "document.getElementById('mk-go').addEventListener", 1
     )[0]
     assert "const submitted = makeDraft();" in submit
-    assert "apiPost(API_PREFIX + '/cards', {...submitted, id:attempt.id})" in submit
+    assert "apiPost(prefix + '/cards', {...submitted, id:attempt.id})" in submit
     assert "sameMakeDraft(makeDraft(), submitted)" in submit
 
 

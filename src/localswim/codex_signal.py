@@ -110,15 +110,21 @@ def _message(thread_id: str, payload: Mapping[str, object]) -> str:
     )
     if truncated:
         ticket_text += " (additional tickets omitted)"
-    # Round outward so the displayed whole-second interval contains every edit.
-    since = since.replace(microsecond=0)
-    if until.microsecond:
-        until = until.replace(microsecond=0) + timedelta(seconds=1)
+    if until - since < timedelta(seconds=1):
+        # Compact display only: consumers query this second plus the next second.
+        time_text = f"- Time: {since:%Y-%m-%d %H:%M:%S} UTC\n"
+    else:
+        # Round outward so the displayed whole-second interval contains every edit.
+        since = since.replace(microsecond=0)
+        if until.microsecond:
+            until = until.replace(microsecond=0) + timedelta(seconds=1)
+        time_text = (
+            f"- Start: {since:%Y-%m-%d %H:%M:%S} UTC\n- End: {until:%Y-%m-%d %H:%M:%S} UTC\n"
+        )
     message = (
         "localswim board-change notice\n\n"
         f"- Board: {label} (`{identity[:4]}...{identity[-4:]}`)\n"
-        f"- Start: {since:%Y-%m-%d %H:%M:%S} UTC\n"
-        f"- End: {until:%Y-%m-%d %H:%M:%S} UTC\n"
+        f"{time_text}"
         f"- Tickets: {ticket_text}"
     )
     if len(message.encode("utf-8")) > _MAX_MESSAGE_BYTES:

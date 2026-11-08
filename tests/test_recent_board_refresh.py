@@ -82,7 +82,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
   section('function renderLive()', '// Push-driven snapshots');
   for(const [state,label] of [['refreshing','REFRESHING'],['settling','REFRESHING'],['failed','REFRESH FAILED'],[null,'CONNECTED']]){
    phase=state;run('renderLive()');assert.equal(el('badge').textContent,label);
-   assert.equal(el('badge').className,state?'warn':'');
+   assert.equal(el('badge').className,state==='failed'?'warn':state?'refreshing':'');
   }
  }else if(input.mode.startsWith('tick')){
   section('// Pending browser intent','\nfunction acceptRevision(');
