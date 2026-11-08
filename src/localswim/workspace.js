@@ -179,6 +179,7 @@
     if (pending === null) pending = state.records[current] || {};
     window.workspaceEpoch++; lastOk = 0;
     closeCard(); closeMake(true); closeEditors();
+    if (typeof closeTicketOrder === 'function') closeTicketOrder();
     window.workspaceReady = false; board.replaceChildren();
     const surface = document.createElement('div'); surface.className = 'ws-error';
     const title = document.createElement('h2'); title.textContent = 'Board unavailable';
@@ -201,6 +202,7 @@
     if (key === current && window.workspaceReady) return;
     persist(); window.workspaceEpoch++; window.workspaceReady = false;
     closeCard(); closeMake(true); closeEditors();
+    if (typeof closeTicketOrder === 'function') closeTicketOrder();
     current = key; state.lastBoard = key;
     if (history === 'push') window.history.pushState({}, '', route(key));
     if (history === 'replace') window.history.replaceState({}, '', route(key));

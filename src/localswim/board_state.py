@@ -75,6 +75,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Self, cast
 
 from . import attachments as card_attachments
+from . import ticket_order
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
@@ -88,6 +89,7 @@ type JsonObject = dict[str, JsonValue]
 # **The file is JSON so a person can read the diff**, and that is worth two dozen lines.
 
 SCHEMA = 4
+TICKET_ORDER_SCHEMA = 6
 PREVIOUS_BOARD_SCHEMA = 2
 EMBEDDED_POLICY_PREVIOUS_SCHEMA = 3
 DESCRIPTION_SCHEMA = 1
@@ -559,6 +561,19 @@ class LaneRules:
 # from the version that spelled the permission model in Python. `NOBODY` is still used.
 NOBODY: frozenset[str] = frozenset()
 
+REVIEW_APPROVAL_MESSAGE = "Reviewed & approved, moving to Completed."
+MAX_APPROVAL_MESSAGE = 4000
+
+
+def approval_message(value: object) -> str:
+    """Validate bounded, nonempty approval prose without coercing its type."""
+    if not isinstance(value, str) or not value.strip() or len(value) > MAX_APPROVAL_MESSAGE:
+        raise BoardError(
+            f"approvalMessage must be nonempty text of at most {MAX_APPROVAL_MESSAGE} characters"
+        )
+    return value.strip()
+
+
 # **THE RULES LIVE IN `rules.json`, NOT HERE.** Terry, 2026-08-18: *"can we move
 # rules outside code? I'd like that to be like a JSON so it acts more like a rules
 # engine. I hate to recompile code when rules for rules engine change."*
@@ -783,6 +798,14 @@ def _parse_lanes(
         labels.add(folded_label)
         if not isinstance(create, list) or not all(isinstance(actor, str) for actor in create):
             raise BoardError(f"{path}: {spot}.create is not a list of actor ids")
+        if "reorderByDependencies" in lane and not isinstance(lane["reorderByDependencies"], bool):
+            raise BoardError(f"{path}: {spot}.reorderByDependencies must be a boolean")
+        if "approveAll" in lane and not isinstance(lane["approveAll"], bool):
+            raise BoardError(f"{path}: {spot}.approveAll must be a boolean")
+        if "approvalMessage" in lane:
+            approval_message(lane["approvalMessage"])
+        if lane.get("approveAll") is True and lane_id != "ready_for_review":
+            raise BoardError(f"{path}: approveAll is only supported for ready_for_review")
         lanes.append(lane)
         order.append((lane_id, label))
 
@@ -1015,6 +1038,22 @@ class TransitionPolicy:
     @property
     def states(self) -> tuple[str, ...]:
         return tuple(state for state, _ in self.lanes)
+
+    @property
+    def reorder_lanes(self) -> frozenset[str]:
+        """Lanes explicitly exposing the dependency ticket-order browser action."""
+        lanes = cast("list[JsonObject]", self.rules.document["lanes"])
+        return frozenset(
+            str(lane["id"]) for lane in lanes if lane.get("reorderByDependencies") is True
+        )
+
+    def lane_approval(self, lane: str) -> tuple[bool, str]:
+        """Return independent optional bulk-review settings for one lane."""
+        lanes = cast("list[JsonObject]", self.rules.document["lanes"])
+        row = next((row for row in lanes if row["id"] == lane), cast("JsonObject", {}))
+        return row.get("approveAll") is True, approval_message(
+            row.get("approvalMessage", REVIEW_APPROVAL_MESSAGE)
+        )
 
     @property
     def retired_lanes(self) -> frozenset[str]:
@@ -2151,6 +2190,8 @@ class ActivityEvent:
     parent_to_ticket: int | None = None
     parent_to_id: str | None = None
     sequence: int = 0
+    ticket_from: int | None = None
+    ticket_to: int | None = None
 
     def _timestamp(self) -> str:
         """Serialize only the parsed timestamp, retaining customary UTC notation."""
@@ -2167,6 +2208,10 @@ class ActivityEvent:
             "at": self._timestamp(),
             "by": self.by,
         }
+        if self.ticket_from is not None:
+            out["ticketFrom"] = self.ticket_from
+        if self.ticket_to is not None:
+            out["ticketTo"] = self.ticket_to
         if self.lane_from is not None:
             out["from"] = self.lane_from
         if self.lane_to is not None:
@@ -2202,6 +2247,8 @@ class ActivityEvent:
         if self.kind in {"created", "moved"}:
             source = self.lane_from if self.lane_from is not None else "(new)"
             return f"{base}  {source} -> {self.lane_to}"
+        if self.kind == "ticket_changed":
+            return f"{base}  #{self.ticket_from:04d} -> #{self.ticket_to:04d}"
         if self.kind == "assigned":
             return f"{base}  {self.owner_from} -> {self.owner_to}"
         if self.kind == "prioritized":
@@ -2258,7 +2305,8 @@ class Item:
     miserable.
 
     **So the two identifiers have different jobs.** The slug is the machine's; the
-    number is the conversation's. Both are permanent, and `find()` accepts either.
+    number is the conversation's. IDs are permanent; explicit audited reordering may
+    change ticket numbers. `find()` accepts either current identifier.
     """
 
     id: str
@@ -2303,6 +2351,12 @@ class Item:
         default_factory=list[card_attachments.AttachmentEvent]
     )
     cover_attachment: str | None = None
+    origin_ticket: int | None = None
+
+    @property
+    def storage_ticket(self) -> int:
+        """Immutable attachment-directory anchor after the first renumbering."""
+        return self.origin_ticket if self.origin_ticket is not None else self.ticket
 
     @property
     def created_at(self) -> str | None:
@@ -2382,6 +2436,8 @@ class Item:
             "owner": self.owner,
             "history": history,
         }
+        if self.origin_ticket is not None:
+            out["originTicket"] = self.origin_ticket
         # Omitted at top level, so 60-odd parentless cards stay readable.
         if self.parent:
             out["parent"] = self.parent
@@ -2423,6 +2479,9 @@ class Item:
         ticket = raw.get("ticket", 0)
         if type(ticket) is not int or ticket < 0:
             raise BoardError(f"{where}: ticket {ticket!r} is not a positive integer")
+        origin_ticket = raw.get("originTicket")
+        if "originTicket" in raw and (type(origin_ticket) is not int or origin_ticket < 1):
+            raise BoardError(f"{where}: originTicket must be a positive integer")
         # **"Exactly one owner" is ENFORCED here rather than assumed.** An unknown
         # actor is refused outright: a card owned by nobody, or by a name no lane
         # header can render, is a data error and `from_json` REFUSES rather than
@@ -2454,6 +2513,7 @@ class Item:
             subject=subject,
             state=state,
             ticket=ticket,
+            origin_ticket=cast("int | None", origin_ticket),
             priority=priority,
             detail=detail,
             # **A card with no `owner` reads as Claude's**, which is the migration for
@@ -2624,9 +2684,9 @@ class Board:
 
     # **The next ticket to hand out. It only ever goes UP.**
     #
-    # **A number MUST NOT be reused, even after a card is archived.** The
-    # whole point is that Terry can say "ticket 137" and mean one thing forever; two
-    # pieces of work sharing a reference in git history would destroy that.
+    # **Allocation MUST NOT reuse a number, even after a card is archived.**
+    # Explicit ticket ordering permutes existing numbers without changing this
+    # allocator. Historical numeric prose remains unchanged; IDs stay permanent.
     #
     # **Stored rather than derived.** `len(items) + 1` and `max(ticket) + 1` both
     # look correct and both collide the moment anything is removed -- the first
@@ -2657,6 +2717,9 @@ class Board:
     # Schema-4 boards without these records start with every card unarchived.
     # Cards, relationships, and all other history remain intact when hidden.
     archive_history: list[ArchiveChange] = field(default_factory=list[ArchiveChange])
+    ticket_history: list[ticket_order.TicketBatch] = field(
+        default_factory=list[ticket_order.TicketBatch]
+    )
 
     # **THE CAST LIVES WITH THE DATA, NOT WITH THE CODE. Card #0083.**
     #
@@ -2749,7 +2812,11 @@ class Board:
         ]
         items: list[JsonValue] = [item.to_json() for item in self.items]
         out: JsonObject = {
-            "schema": SCHEMA,
+            "schema": (
+                TICKET_ORDER_SCHEMA
+                if self.ticket_history or any(item.origin_ticket is not None for item in self.items)
+                else SCHEMA
+            ),
             "revision": self.revision,
             "project": self.project,
             "port": self.port,
@@ -2783,6 +2850,8 @@ class Board:
             ]
         if self.archive_history:
             out["archiveHistory"] = [change.to_json() for change in self.archive_history]
+        if self.ticket_history:
+            out["ticketHistory"] = [change.to_json() for change in self.ticket_history]
         return out
 
     @classmethod
@@ -2805,8 +2874,7 @@ class Board:
         """
         if not isinstance(raw, dict):
             raise BoardError(f"{where}: top level is {type(raw).__name__}, want object")
-        if raw.get("schema") != SCHEMA:
-            raise BoardError(f"{where}: schema {raw.get('schema')!r}, this build reads {SCHEMA}")
+        ticket_order.validate_schema(raw, where)
         items_raw = raw.get("items")
         if not isinstance(items_raw, list):
             raise BoardError(f"{where}: 'items' is missing or not a list")
@@ -2893,7 +2961,112 @@ class Board:
         )
         board.policy = active_policy
         _check_parents(board, seen, where)
+        ticket_order.load_metadata(board, raw, where)
         return board
+
+    def set_ticket_order_enabled(self, lane: str, enabled: bool, by: str) -> str:
+        """Set one lane action preference through the configured CLI actor."""
+        if not by or by != self.cli_user:
+            raise BoardError("ticket-order settings require the configured CLI actor")
+        if lane not in self.policy.states or lane in self.policy.retired_lanes:
+            raise BoardError("ticket-order settings require an active lane")
+        if not isinstance(cast("object", enabled), bool):
+            raise BoardError("ticket-order enabled must be a boolean")
+        document = self.policy.to_json()
+        for row in cast("list[JsonObject]", document["lanes"]):
+            if row["id"] == lane:
+                row["reorderByDependencies"] = enabled
+        self.policy = TransitionPolicy.from_json(document, "ticket-order settings")
+        return f"Dependency ticket ordering {'enabled' if enabled else 'disabled'} for {lane}"
+
+    def configure_lane_approval(
+        self, lane: str, enabled: bool, message: str | None, by: str
+    ) -> str:
+        """Configure the optional lane action without changing its transition grants."""
+        if not by or by != self.cli_user:
+            raise BoardError("lane approval settings require the configured CLI actor")
+        if lane != "ready_for_review" or lane not in self.policy.active_states:
+            raise BoardError("lane approval requires the active ready_for_review lane")
+        if type(enabled) is not bool:
+            raise BoardError("lane approval enabled must be a boolean")
+        text = approval_message(message) if message is not None else None
+        document = self.policy.to_json()
+        for row in cast("list[JsonObject]", document["lanes"]):
+            if row["id"] == lane:
+                row["approveAll"] = enabled
+                if text is not None:
+                    row["approvalMessage"] = text
+        self.policy = TransitionPolicy.from_json(document, "lane approval settings")
+        return f"Lane approval {'enabled' if enabled else 'disabled'} for {lane}"
+
+    def lane_approval_items(self, lane: str, actor: Actor) -> list[Item]:
+        """Authorize the configured human browser action before inspecting its cards."""
+        if actor != self.browser_user or not any(
+            user.id == actor and user.user_class == HUMAN for user in self.users
+        ):
+            raise BoardError("lane approval requires the configured human browser actor")
+        if lane != "ready_for_review" or lane not in self.policy.active_states:
+            raise BoardError("lane approval requires the active ready_for_review lane")
+        if not self.policy.lane_approval(lane)[0]:
+            raise BoardError("lane approval is disabled")
+        if "completed" not in self.policy.active_states:
+            raise BoardError("lane approval requires the active completed lane")
+        if not self.policy.may_move(actor, lane, "completed"):
+            raise BoardError(self.policy.explain_refusal(actor, lane, "completed"))
+        return [item for item in self.items if item.state == lane and not item.archived]
+
+    def approve_lane(self, lane: str, actor: Actor) -> int:
+        """Approve all active review cards with one verification and full rollback."""
+        items = self.lane_approval_items(lane, actor)
+        message = self.policy.lane_approval(lane)[1]
+        before = [(item, item.state, len(item.history), len(item.comments)) for item in items]
+        links_length, relations_length = len(self.links), len(self.relationship_history)
+        accepted = False
+        try:
+            for item in items:
+                at = now()
+                item.comments.append(Comment(at=at, by=actor, text=message))
+                self._links_from_text(item, message, actor, at)
+                item.history.append(Change(at=now(), frm=lane, to="completed", by=actor))
+                item.state = "completed"
+            if problems := self.verify():
+                raise BoardError(
+                    "lane approval would leave an invalid board: " + "; ".join(problems)
+                )
+            accepted = True
+            return len(items)
+        finally:
+            if not accepted:
+                for item, state, history_length, comment_length in before:
+                    item.state = state
+                    del item.history[history_length:]
+                    del item.comments[comment_length:]
+                del self.links[links_length:]
+                del self.relationship_history[relations_length:]
+
+    def ticket_order_plan(self, lane: str, refs: Sequence[str] | None = None) -> JsonObject:
+        """Preview the stable dependency-first permutation without changing the board."""
+        return ticket_order.plan(self, lane, refs)
+
+    def reorder_tickets(self, lane: str, refs: Sequence[str] | None, by: str) -> JsonObject:
+        """Apply one audited ticket permutation under the configured actor identity."""
+        return ticket_order.apply(self, lane, refs, by)
+
+    def ticket_history_by_item(self) -> dict[str, tuple[JsonObject, ...]]:
+        """Build all per-card token inputs in one linear pass over ticket history."""
+        grouped: dict[str, list[JsonObject]] = {}
+        for batch in self.ticket_history:
+            for change in batch.changes:
+                grouped.setdefault(change.id, []).append(
+                    {
+                        "at": batch.at,
+                        "by": batch.by,
+                        "lane": batch.lane,
+                        "from": change.frm,
+                        "to": change.to,
+                    }
+                )
+        return {card_id: tuple(rows) for card_id, rows in grouped.items()}
 
     # ---- reading -------------------------------------------------------------
 
@@ -3035,6 +3208,8 @@ class Board:
             for index, change in enumerate(self.relationship_history)
             if change.by not in known_actors
         ]
+        if self.ticket_history or any(item.origin_ticket is not None for item in self.items):
+            problems.extend(ticket_order.audit_problems(self))
         problems.extend(self._parent_history_problems(known_actors))
         problems.extend(self._archive_history_problems())
         for item in self.items:
@@ -3725,7 +3900,7 @@ class Board:
         comment_count = len(item.comments)
         accepted = False
         try:
-            self.comment(reference, "Reviewed & approved, moving to Completed.", actor)
+            self.comment(reference, REVIEW_APPROVAL_MESSAGE, actor)
             result = self.move(reference, target, actor)
             accepted = True
             return result
@@ -4115,7 +4290,14 @@ def _description_lanes(
         where = f"{path}: lanes[{index}]"
         if not isinstance(row, dict):
             raise BoardError(f"{where} is not an object")
-        unknown = set(row) - {"name", "id", "note"}
+        unknown = set(row) - {
+            "name",
+            "id",
+            "note",
+            "reorderByDependencies",
+            "approveAll",
+            "approvalMessage",
+        }
         if unknown:
             raise BoardError(f"{where} has unknown field(s): {', '.join(sorted(unknown))}")
         name = row.get("name")
@@ -4139,6 +4321,17 @@ def _description_lanes(
             if not isinstance(note, str):
                 raise BoardError(f"{where}.note is not a string")
             lane["note"] = note
+        if "reorderByDependencies" in row:
+            enabled = row["reorderByDependencies"]
+            if not isinstance(enabled, bool):
+                raise BoardError(f"{where}.reorderByDependencies must be a boolean")
+            lane["reorderByDependencies"] = enabled
+        if "approveAll" in row:
+            if type(row["approveAll"]) is not bool:
+                raise BoardError(f"{where}.approveAll must be a boolean")
+            lane["approveAll"] = row["approveAll"]
+        if "approvalMessage" in row:
+            lane["approvalMessage"] = approval_message(row["approvalMessage"])
         lanes.append(lane)
     return lanes, name_to_id
 
@@ -4378,6 +4571,15 @@ def _policy_document(raw: JsonObject, target: pathlib.Path) -> JsonObject:
     return policy
 
 
+def _maintenance_board_document(target: pathlib.Path) -> JsonObject:
+    """Read a supported ordinary board without activating private schema prototypes."""
+    raw = _read_json(target)
+    if not isinstance(raw, dict):
+        raise BoardError(f"{target}: top level is not an object")
+    ticket_order.validate_schema(raw, str(target))
+    return raw
+
+
 def _lane_insertion_index(lanes: list[JsonValue], before: str | None, after: str | None) -> int:
     """Resolve a single stable lane anchor without changing the policy."""
     if before is not None and after is not None:
@@ -4410,9 +4612,7 @@ def add_lane(  # explicit optional maintenance settings
     label = label.strip()
     lane_id = lane_slug(label)
     with _maintenance_locked(target):
-        raw = _read_json(target)
-        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
-            raise BoardError(f"{target}: lane add needs a schema-{SCHEMA} board")
+        raw = _maintenance_board_document(target)
         _require_board_port_stopped(target, raw)
         policy = _policy_document(raw, target)
         active_states = TransitionPolicy.from_json(policy, f"{target}: policy").active_states
@@ -4465,9 +4665,7 @@ def retire_lane(path: pathlib.Path, lane_id: str) -> str:
     if lane_id == "completed":
         raise BoardError("cannot retire reserved lane ID 'completed'")
     with _maintenance_locked(target):
-        raw = _read_json(target)
-        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
-            raise BoardError(f"{target}: lane retirement needs a schema-{SCHEMA} board")
+        raw = _maintenance_board_document(target)
         _require_board_port_stopped(target, raw)
         board = Board.from_json(raw, str(target), install_context=False)
         if lane_id not in board.policy.states:
@@ -4500,9 +4698,7 @@ def rename_lane_label(path: pathlib.Path, lane_id: str, label: str) -> str:
     if not label:
         raise BoardError("lane label is empty")
     with _maintenance_locked(target):
-        raw = _read_json(target)
-        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
-            raise BoardError(f"{target}: label rename needs a schema-{SCHEMA} board")
+        raw = _maintenance_board_document(target)
         _require_board_port_stopped(target, raw)
         policy = _policy_document(raw, target)
         lanes = policy.get("lanes")
@@ -4571,13 +4767,12 @@ def migrate_lane_id(path: pathlib.Path, source: str, destination: str) -> str:
     if source == destination:
         raise BoardError("lane migration needs two different IDs")
     with _maintenance_locked(target):
-        raw = _read_json(target)
-        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
-            raise BoardError(f"{target}: lane-ID migration needs a schema-{SCHEMA} board")
+        raw = _maintenance_board_document(target)
         _require_board_port_stopped(target, raw)
         policy = _policy_document(raw, target)
         policy_replacements = _rewrite_policy_lane_id(policy, target, source, destination)
         board_replacements = _rewrite_lane_values(target, raw, source, destination)
+        board_replacements += ticket_order.rewrite_lane(raw, source, destination)
         migrated = Board.from_json(raw, str(target))
         migrated.enforce_dependency_priorities(migrated.cli_user)
         if problems := migrated.verify():
@@ -6143,6 +6338,26 @@ def activity_events(
                 ),
             )
         )
+    lookup = {item.id: item for item in board.items}
+    for index, batch in enumerate(board.ticket_history):
+        instant = _event_instant(batch.at, f"ticketHistory[{index}]")
+        if instant < start or (end is not None and instant > end):
+            continue
+        for change in batch.changes:
+            item = lookup[change.id]
+            events.append(
+                ActivityEvent(
+                    ticket=item.ticket,
+                    item_id=item.id,
+                    kind="ticket_changed",
+                    at=batch.at,
+                    instant=instant,
+                    by=batch.by,
+                    ticket_from=change.frm,
+                    ticket_to=change.to,
+                    sequence=index,
+                )
+            )
     events.extend(_subject_activity_events(board, start, end))
     events.extend(_detail_activity_events(board, start, end))
     events.extend(_archive_activity_events(board, start, end))

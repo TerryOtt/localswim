@@ -40,7 +40,8 @@
           "bot",
           "terry"
         ],
-        "note": "Work Terry has explicitly held back, work that is not yet scoped well enough for Bot to perform, and optional umbrella cards that organize executable child cards."
+        "note": "Work Terry has explicitly held back, work that is not yet scoped well enough for Bot to perform, and optional umbrella cards that organize executable child cards.",
+        "reorderByDependencies": true
       },
       {
         "id": "ready_for_work",
@@ -79,7 +80,8 @@
         "id": "ready_for_review",
         "label": "Ready for review",
         "create": [],
-        "note": "Bot believes the work is complete and awaits Terry's review; Bot may not sign off its own work."
+        "note": "Bot believes the work is complete and awaits Terry's review; Bot may not sign off its own work.",
+        "approveAll": true
       },
       {
         "id": "completed",

@@ -18,6 +18,7 @@ TERRY_LANE_POLICY: list[board_state.JsonObject] = [
     {
         "id": "backlog",
         "label": "Backlog",
+        "reorderByDependencies": True,
         "create": ["bot", "terry"],
         "note": (
             "Work Terry has explicitly held back, work that is not yet scoped well enough "
@@ -62,6 +63,7 @@ TERRY_LANE_POLICY: list[board_state.JsonObject] = [
         "id": "ready_for_review",
         "label": "Ready for review",
         "create": [],
+        "approveAll": True,
         "note": (
             "Bot believes the work is complete and awaits Terry's review; Bot may not sign "
             "off its own work."

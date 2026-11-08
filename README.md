@@ -56,7 +56,7 @@ independently of Codex. Follow the
 [detached launch and logging procedure](docs/ORIENTATION.md#shared-gateway-under-codex-on-windows)
 when starting or recreating that task.
 
-The gateway discovers schema-4 boards below the directory and presents one active
+The gateway discovers supported schema-4 and schema-6 boards below the directory and presents one active
 board at a time. Existing healthy board services are reused; absent services start
 on available loopback ports. If a writer is restarting,
 the gateway waits for its rendezvous to recover instead of starting another writer.
@@ -230,11 +230,21 @@ actor; Bot cannot approve its own work. After confirmed approval, the drawer clo
 and retains any unsent comment draft for that card. Refused or failed approvals leave
 it open; a delayed response cannot close a different card or board.
 
+The Ready for review lane can optionally show a single **Approve all** thumbs-up
+button. It approves every nonarchived card in that lane in one revision-checked
+transaction, adding the configured approval comment to each card. The action is
+available only to the configured human browser actor; the CLI cannot approve cards.
+It has no preview step. Empty lanes are no-ops. Configure the opt-in with
+`board set-approval-button LANE --enabled [--message TEXT]`; disabling uses
+`--disabled`. The optional message is trimmed and must contain 1–4000 characters;
+omitting it when changing the enabled state preserves the current message. Generic
+boards default to disabled; the Terry workflow example opts in for Ready for review.
+
 The important fields are:
 
 | Field | Meaning |
 |---|---|
-| schema | Board format version; currently 4. |
+| schema | Board format version; 4 ordinarily, or 6 after an actual ticket reorder. |
 | project | Name shown in the browser. |
 | port | Loopback TCP port; defaults to 8792 if omitted. |
 | policy | Resolved lanes, priorities, creation rights, and transition edges. |
@@ -586,6 +596,56 @@ silently added to that inventory.
 Downloads validate size/digest and serve only current attachments; generic files,
 including HTML/SVG, are forced to download rather than execute in the board origin.
 
+## Dependency-first ticket numbers
+
+Use the live board service to preview renumbering within one active lane:
+
+```powershell
+uv run --frozen localswim-cli boards/my-project.json board reorder-tickets backlog --json
+uv run --frozen localswim-cli boards/my-project.json board reorder-tickets backlog 21 8 34 --json
+uv run --frozen localswim-cli boards/my-project.json board reorder-tickets backlog --cards-file selection.json --apply --expected-revision 42
+```
+
+`board reorder-tickets LANE [REFERENCES...]` previews by default. Omit references
+for every unarchived card in that lane, or use `--cards-file` with a nonempty JSON
+array of positive ticket numbers or card-reference strings (not both input forms).
+References are an unordered selection, not a requested sequence. The operation
+orders blockers before dependents using full direct and indirect `blocks` paths,
+including paths through unselected cards and other lanes. Eligible ties keep the
+old ticket order. A blocking cycle involving a selected card refuses the operation.
+Only the selected cards' existing number pool is permuted; other tickets and
+`nextTicket` stay unchanged. Selection is limited to 10,000 cards.
+
+Review the old/new numbers, then use `--apply` to commit. `--expected-revision`
+binds an earlier preview to its board revision; stale requests require a new
+preview. `--json` returns the revision and complete plan. A no-op does not save,
+advance the revision, or upgrade the schema. If a write outcome is uncertain,
+inspect the board before retrying.
+
+Stable card IDs retain their subjects, details, comments, ownership, lane,
+priority, parents, relationships, and existing histories. Historical numeric
+references in prose are not rewritten. Changed cards receive immutable
+`originTicket` storage anchors so attachment folders remain in their original
+physical location. The first actual reorder writes board schema 6 and appends
+`ticketHistory`; later reorders append to that audit. Older writers that support
+only schema 4 refuse schema 6. Use this version of the shared service and CLI
+before applying. This does not activate the private schema-5 restore protocol.
+
+The browser lane-header reorder glyph opens a preview; only **Apply** commits it.
+Expose or hide it per lane through the live CLI:
+
+```powershell
+uv run --frozen localswim-cli boards/my-project.json board set-reorder-button backlog --enabled
+uv run --frozen localswim-cli boards/my-project.json board set-reorder-button backlog --disabled
+```
+
+The setting is optional Boolean `reorderByDependencies` on the lane definition;
+omission or `false` keeps the glyph hidden. Generic defaults remain off. The Terry
+workflow template enables it for Backlog; existing boards require an explicit
+configuration change. The glyph setting alone does not renumber or upgrade a board.
+This numbering operation is separate from the existing priority-based lane display
+order and does not change priority inheritance.
+
 ## Dependency priority inheritance
 
 An unfinished blocker must be at least as urgent as every unfinished card it blocks.
@@ -755,6 +815,7 @@ POST /api/v001/cards/<id>/cover
 GET  /api/v001/cards/<id>/attachments/<attachment-guid>
 POST /api/v001/board/project
 POST /api/v001/board/permissions
+POST /api/v001/board/ticket-order/{preview,apply,config}
 POST /api/v001/shutdown
 ~~~
 
@@ -1090,6 +1151,23 @@ On Windows, the service's PATH must resolve native `codex.exe`; command wrappers
 are refused so delivery can bound and stop its own child process.
 The writer performs no notification configuration reads, delivery I/O or subprocess
 launches. Notification failure cannot turn a committed edit into a failed edit.
+
+Notices use a compact, human-readable format:
+
+```text
+localswim board-change notice
+
+- Board: Example (`abcd...1234`)
+- Start: 2026-11-08 15:10:27 UTC
+- End: 2026-11-08 15:10:49 UTC
+- Tickets: 0197, 0199, 0255, 0288
+```
+
+Start is rounded down and end rounded up to whole seconds, retaining exact-second
+endpoints. Ticket numbers are sorted numerically. The fingerprint is abbreviated;
+use the configured board path and full identity returned by the CLI for validation.
+Convert the displayed UTC bounds to RFC 3339 when querying activity, for example
+`2026-11-08T15:10:27Z` through `2026-11-08T15:10:49Z`.
 
 Delivery is best effort within the board service's process lifetime. There is no
 durable cursor, startup catch-up or delivery retry; shutdown or a failed delivery

@@ -49,6 +49,7 @@
   "lanes": [
     {
       "name": "Backlog",
+      "reorderByDependencies": true,
       "note": "Work Terry has explicitly held back, work that is not yet scoped well enough for Bot to perform, and optional umbrella cards that organize executable child cards."
     },
     {
@@ -70,6 +71,7 @@
     },
     {
       "name": "Ready for review",
+      "approveAll": true,
       "note": "Bot believes the work is complete and awaits Terry's review; Bot may not sign off its own work."
     },
     {

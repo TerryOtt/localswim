@@ -132,12 +132,33 @@ legacy watcher commands and their optional native watching dependency are remove
   duplicate the comment. Close the source drawer only after confirmed success and
   preserve its comment draft; failures and stale navigation responses must not close
   another drawer.
+  Optional lane-wide approval is a separate explicit opt-in: one human browser action
+  comments and moves every nonarchived card in the enabled lane atomically, with no
+  preview. Require the exact rendered card membership and original per-card tokens
+  as well as the board revision before any mutation. Empty lanes are no-ops; stale
+  revisions reject the batch, and uncertain POSTs
+  are never replayed. Only `ready_for_review` can enable it. CLI may configure the lane
+  with `board set-approval-button`, but cannot approve cards. Generic examples default
+  off; the Terry workflow example enables the Ready for review lane.
 - Terry and Bot may create in Blocked and Needs Terry and move there from Backlog.
   Keep these grants in the Terry template; upgrade live boards only through the
   CLI-authenticated, revision-checked additive permission route in the sole writer.
   Validate the complete request before changing any permissions.
 - Keep the checked generic and Terry-workflow examples distinct. Terry's seven-lane
   workflow is an intentional public example of how he works, not a universal default.
+
+- Dependency ticket ordering is explicit opt-in, separate from priority-based
+  rendering. Preview before a revision-bound apply; references are an unordered
+  subset of one active lane (omitted means all unarchived cards). Follow full
+  blocking paths, refuse selected cycles, break ties by old ticket and permute only
+  the selected number pool. Preserve IDs, content, histories, parents and relations;
+  never rewrite historical numeric prose. Immutable `originTicket` anchors preserve
+  physical attachment folders. Only an actual permutation appends `ticketHistory`
+  and opts into board schema 6; no-op and ordinary boards remain schema 4. Older
+  schema-4-only writers must refuse schema 6; private schema 5 stays inactive.
+  Configure optional Boolean lane `reorderByDependencies` through live
+  `board set-reorder-button LANE --enabled/--disabled`; omission/false hides the
+  preview-then-Apply glyph. Terry's Backlog template opts in; generic defaults do not.
 
 - Cards may be archived and unarchived, never deleted. Preserve their IDs, tickets,
   lane states, relationships, contents, and history. Archive changes use the live
@@ -656,6 +677,10 @@ uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD no
   retries; shutdown may lose pending bursts. Windows requires native `codex.exe` on
   the service PATH. Queue acceptance is not completed work. The qualified idle-chat
   test woke a chat immediately; do not claim delivery waits for manual input.
+- Notices abbreviate the board fingerprint, sort zero-padded ticket numbers, and
+  show UTC whole-second bounds rounded outward. Use the configured board path and
+  full CLI identity for validation; convert displayed bounds to RFC 3339 for the
+  activity query. Do not treat abbreviated fingerprints as full identity proof.
 - A notice does not authorize work past ticket gates. Inspect sanitized activity
   metadata first using its interval/tickets, then focused cards as needed. Proven
   complete, nonempty Bot-only activity requires no card inspection or work resumption.

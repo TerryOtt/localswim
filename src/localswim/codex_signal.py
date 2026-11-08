@@ -6,7 +6,6 @@ settings or retry uncertain delivery. Call only from the background worker.
 """
 
 import contextlib
-import json
 import re
 import shutil
 import subprocess
@@ -15,7 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
 type DeliveryCode = Literal[
@@ -62,16 +61,19 @@ def _message(thread_id: str, payload: Mapping[str, object]) -> str:
     ):
         raise ValueError
     ticket_numbers = sorted(set(cast("list[int]", ticket_values)))
-    ticket_text = ", ".join(f"#{ticket:04d}" for ticket in ticket_numbers) or "unspecified"
+    ticket_text = ", ".join(f"{ticket:04d}" for ticket in ticket_numbers) or "unspecified"
     if truncated:
         ticket_text += " (additional tickets omitted)"
+    # Round outward so the displayed whole-second interval contains every edit.
+    since = since.replace(microsecond=0)
+    if until.microsecond:
+        until = until.replace(microsecond=0) + timedelta(seconds=1)
     message = (
-        "localswim board-change notice (metadata only).\n"
-        f"Board label: {json.dumps(label, ensure_ascii=False)}\n"
-        f"Board identity: {identity}\n"
-        f"Committed activity: {since.isoformat()} through {until.isoformat()}\n"
-        f"Tickets: {ticket_text}\n"
-        "Inspect activity before acting; follow the board's authorization gates."
+        "localswim board-change notice\n\n"
+        f"- Board: {label} (`{identity[:4]}...{identity[-4:]}`)\n"
+        f"- Start: {since:%Y-%m-%d %H:%M:%S} UTC\n"
+        f"- End: {until:%Y-%m-%d %H:%M:%S} UTC\n"
+        f"- Tickets: {ticket_text}"
     )
     if len(message.encode("utf-8")) > _MAX_MESSAGE_BYTES:
         raise ValueError

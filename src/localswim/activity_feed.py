@@ -121,6 +121,7 @@ _ARRAYS = (
     "subject_history",
     "detail_history",
     "archive_history",
+    "ticket_history",
 )
 
 

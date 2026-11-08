@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, cast
 
 import click
 
-from localswim import attachments, board_state, monitor_activity_client
+from localswim import attachments, board_state, monitor_activity_client, ticket_order_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -163,6 +163,116 @@ def board_show(context: CliContext, *, as_json: bool, include_archived: bool) ->
 def board_verify(context: CliContext) -> None:
     """Replay every history and refuse state or permission-table drift."""
     board_state.report_board(_load(context), as_json=False, verify=True)
+
+
+@board_commands.command("reorder-tickets")
+@click.argument("lane")
+@click.argument("references", nargs=-1)
+@click.option("--cards-file", type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path))
+@click.option(
+    "--apply", "apply_order", is_flag=True, help="Apply the previewed permutation atomically."
+)
+@click.option("--expected-revision", type=click.IntRange(min=0), default=None)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_obj
+def board_reorder_tickets(
+    context: CliContext,
+    lane: str,
+    references: tuple[str, ...],
+    cards_file: pathlib.Path | None,
+    expected_revision: int | None,
+    *,
+    apply_order: bool,
+    as_json: bool,
+) -> None:
+    """Preview dependency-first numbering in LANE, optionally limited to REFERENCES.
+
+    Omit references for the whole active lane. Input order is irrelevant; indirect
+    blocking paths count. Existing numbers are reused and all card content stays
+    with its stable ID. Historical numeric text is not rewritten. No changes occur
+    without --apply. Use --expected-revision to bind an earlier reviewed preview.
+    """
+    if cards_file is not None and references:
+        raise click.UsageError("use REFERENCES or --cards-file, not both")
+    selected: list[str] | None = list(references) if references else None
+    if cards_file is not None:
+        try:
+            with cards_file.open("rb") as stream:
+                raw = stream.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("selection exceeds 1 MiB")
+            entries = cast("board_state.JsonValue", json.loads(raw.decode("utf-8-sig")))
+            if not isinstance(entries, list) or not entries:
+                raise ValueError("selection must be a nonempty JSON array")
+            selected = []
+            for entry in entries:
+                if type(entry) is int and entry > 0:
+                    selected.append(str(entry))
+                elif isinstance(entry, str) and entry.strip():
+                    selected.append(entry)
+                else:
+                    raise ValueError(
+                        "selection entries must be positive integers or card references"
+                    )
+        except (OSError, ValueError) as error:
+            raise click.BadParameter(str(error), param_hint="--cards-file") from error
+    response = _board_call(
+        lambda: ticket_order_client.order_tickets(
+            context.board.resolve(),
+            lane,
+            selected,
+            apply=apply_order,
+            expected_revision=expected_revision,
+        )
+    )
+    if as_json:
+        click.echo(json.dumps(response, ensure_ascii=False, indent=2))
+        return
+    plan = cast("board_state.JsonObject", response["plan"])
+    rows = cast("list[board_state.JsonObject]", plan["cards"])
+    verb = "Applied" if response["applied"] else "Preview"
+    click.echo(
+        f"{verb}: {plan['selectedCount']} cards, {plan['changedCount']} number changes; revision {response['revision']}."
+    )
+    for row in rows:
+        click.echo(
+            f"  #{row['oldTicket']:04d} -> #{row['newTicket']:04d}  {row['subject']}  [{row['id']}]"
+        )
+    if not apply_order:
+        click.echo(
+            "No changes made. Add --apply to execute; use --expected-revision to bind this preview."
+        )
+
+
+@board_commands.command("set-reorder-button")
+@click.argument("lane")
+@click.option("--enabled/--disabled", default=None, required=True)
+@click.pass_obj
+def board_set_reorder_button(context: CliContext, lane: str, *, enabled: bool | None) -> None:
+    """Configure one lane's opt-in dependency-order button in the live board."""
+    if enabled is None:
+        raise click.UsageError("specify --enabled or --disabled")
+    response = _board_call(
+        lambda: ticket_order_client.set_button(context.board.resolve(), lane, enabled)
+    )
+    click.echo(str(response["result"]))
+
+
+@board_commands.command("set-approval-button")
+@click.argument("lane")
+@click.option("--enabled/--disabled", default=None, required=True)
+@click.option("--message", default=None, help="Optional bulk approval comment (1–4000 characters).")
+@click.pass_obj
+def board_set_approval_button(
+    context: CliContext, lane: str, *, enabled: bool | None, message: str | None
+) -> None:
+    """Configure the one-click human review approval button in the live board."""
+    if enabled is None:
+        raise click.UsageError("specify --enabled or --disabled")
+    body: dict[str, object] = {"lane": lane, "enabled": enabled}
+    if message is not None:
+        body["message"] = _board_call(lambda: board_state.approval_message(message))
+    _mutate(context, board_state.API_PREFIX + "/board/lane-approval/config", body)
 
 
 @board_commands.command("shutdown")

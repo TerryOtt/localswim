@@ -148,7 +148,8 @@ def _read_candidate(path: pathlib.Path) -> _Candidate | None:
         raw = cast("board_state.JsonValue", json.loads(blob.decode("utf-8")))
         if (
             isinstance(raw, dict)
-            and raw.get("schema") == board_state.SCHEMA
+            and type(raw.get("schema")) is int
+            and raw.get("schema") in {board_state.SCHEMA, board_state.TICKET_ORDER_SCHEMA}
             and all(field in raw for field in ("project", "items", "policy"))
         ):
             return _Candidate(path, identity, digest=hashlib.sha256(blob).digest())

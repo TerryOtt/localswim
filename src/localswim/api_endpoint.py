@@ -169,6 +169,8 @@ def build_id() -> str:
                 pathlib.Path(__file__).with_name("codex_signal.py"),
                 pathlib.Path(__file__).with_name("browser_events.py"),
                 pathlib.Path(__file__).with_name("workspace_events.py"),
+                pathlib.Path(__file__).with_name("ticket_order.py"),
+                pathlib.Path(__file__).with_name("ticket_order_client.py"),
                 pathlib.Path(__file__).with_name("browser_stream.js"),
                 pathlib.Path(__file__).with_name("workspace.js"),
                 pathlib.Path(__file__).with_name("workspace.css"),
@@ -239,6 +241,8 @@ CODE_FILES = (
     pathlib.Path(__file__).with_name("browser_stream.js"),
     pathlib.Path(__file__).with_name("workspace.js"),
     pathlib.Path(__file__).with_name("workspace.css"),
+    pathlib.Path(__file__).with_name("ticket_order.py"),
+    pathlib.Path(__file__).with_name("ticket_order_client.py"),
 )
 
 
@@ -961,14 +965,14 @@ def _snapshot_paths(board_path: pathlib.Path, board: board_state.Board | None = 
         board = board_state.load(board_path)
         for item in board.items:
             for file in item.attachments:
-                attachments.read_blob(board_path, item.ticket, file)
+                attachments.read_blob(board_path, item.storage_ticket, file)
     return [
         str(board_path),
         *sorted(
             {
                 str(
                     attachments.blob_path(
-                        board_path, item.ticket, event.attachment_id, event.extension
+                        board_path, item.storage_ticket, event.attachment_id, event.extension
                     )
                 )
                 for item in board.items
@@ -996,8 +1000,10 @@ def _capture_board_snapshot(
         raise ValueError(f"invalid snapshot audit: {problems[0]}")
     paths = _snapshot_paths(board_path, board)
     active = {
-        attachments.blob_path(board_path, item.ticket, file.id, attachments.extension(file.name)): (
-            item.ticket,
+        attachments.blob_path(
+            board_path, item.storage_ticket, file.id, attachments.extension(file.name)
+        ): (
+            item.storage_ticket,
             file,
         )
         for item in board.items
@@ -1384,7 +1390,12 @@ class CardRevisionConflict(RevisionConflict):
     code = "card_revision_conflict"
 
 
-def card_version(board: board_state.Board, item: board_state.Item) -> str:
+def card_version(
+    board: board_state.Board,
+    item: board_state.Item,
+    *,
+    ticket_history: dict[str, tuple[board_state.JsonObject, ...]] | None = None,
+) -> str:
     """Bind optimistic card edits to every persisted field, including audit history."""
     identity = item.id
     state = {
@@ -1409,6 +1420,11 @@ def card_version(board: board_state.Board, item: board_state.Item) -> str:
             event.to_json() for event in board.archive_history if event.item_id == identity
         ],
     }
+    ticket_events = (
+        board.ticket_history_by_item() if ticket_history is None else ticket_history
+    ).get(identity, ())
+    if ticket_events:
+        state["tickets"] = list(ticket_events)
     return hashlib.sha256(json.dumps(state, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -1623,7 +1639,7 @@ class BoardStore:
             self.policy = board.policy
             item = board.find(reference)
             file = next(file for file in item.attachments if file.id == attachment_id)
-            return item.ticket, file
+            return item.storage_ticket, file
 
     def disk_status(self) -> tuple[str | None, float, str, float | None, str | None, int]:
         """Return one protected admission and its successful file-read timestamp."""
@@ -1720,6 +1736,122 @@ class BoardStore:
                 self._submit_notification(committed, events, previous_project)
             return result, committed.revision
 
+    def configure_ticket_order(
+        self, expected: int, lane: str, enabled: bool, actor: str
+    ) -> tuple[str, int]:
+        if self._external_policy:
+            raise board_state.BoardError("ticket-order configuration requires embedded policy")
+        return self.execute(
+            expected,
+            lambda board: board.set_ticket_order_enabled(lane, enabled, actor),
+            notification_actor=actor,
+        )
+
+    def configure_lane_approval(
+        self, expected: int, lane: str, enabled: bool, message: str | None, actor: str
+    ) -> tuple[str, int]:
+        if self._external_policy:
+            raise board_state.BoardError("lane approval configuration requires embedded policy")
+        return self.execute(
+            expected,
+            lambda board: board.configure_lane_approval(lane, enabled, message, actor),
+            notification_actor=actor,
+        )
+
+    @staticmethod
+    def _check_lane_approval(
+        board: board_state.Board, lane: str, actor: str, cards: dict[str, str]
+    ) -> list[board_state.Item]:
+        items = board.lane_approval_items(lane, actor)
+        if set(cards) != {item.id for item in items}:
+            raise CardRevisionConflict("review lane membership changed; refresh before approving")
+        history = board.ticket_history_by_item()
+        if any(
+            card_version(board, item, ticket_history=history) != cards[item.id] for item in items
+        ):
+            raise CardRevisionConflict("review card changed; refresh before approving")
+        return items
+
+    def approve_lane(
+        self, expected: int, lane: str, actor: str, cards: dict[str, str]
+    ) -> board_state.JsonObject:
+        """Keep empty lanes read-only; execute nonempty approval in one CAS transaction."""
+        with self._mutex:
+            candidate = self._ticket_order_snapshot()
+            if candidate.revision != expected:
+                raise RevisionConflict("board changed; refresh before approving the lane")
+            if not self._check_lane_approval(candidate, lane, actor, cards):
+                return {
+                    "result": "No review cards to approve",
+                    "revision": expected,
+                    "approvedCount": 0,
+                }
+            count = 0
+
+            def mutate(board: board_state.Board) -> str:
+                nonlocal count
+                self._check_lane_approval(board, lane, actor, cards)
+                count = board.approve_lane(lane, actor)
+                return f"Approved {count} review card(s), moving to Completed."
+
+            result, revision = self.execute(expected, mutate, notification_actor=actor)
+            return {"result": result, "revision": revision, "approvedCount": count}
+
+    def _ticket_order_snapshot(self) -> board_state.Board:
+        """Read a preview without publishing, reconciling or rewriting the snapshot."""
+        candidate = board_state.load_bytes(
+            self.path.read_bytes(), self.path, self.policy if self._external_policy else None
+        )
+        if problems := candidate.verify():
+            raise board_state.BoardError("disk snapshot rejected: " + "; ".join(problems))
+        return candidate
+
+    @staticmethod
+    def _allow_ticket_order(board: board_state.Board, lane: str, actor: str) -> None:
+        if actor not in {board.cli_user, board.browser_user}:
+            raise board_state.BoardError("ticket ordering requires a configured actor")
+        if actor != board.cli_user and lane not in board.policy.reorder_lanes:
+            raise board_state.BoardError("dependency ticket ordering is disabled for this lane")
+
+    def ticket_order(
+        self,
+        lane: str,
+        references: list[str] | None,
+        actor: str,
+        *,
+        apply: bool = False,
+        expected_revision: int | None = None,
+    ) -> board_state.JsonObject:
+        """Preview or apply a revision-bound permutation; a no-op does not save."""
+        with self._mutex:
+            candidate = self._ticket_order_snapshot()
+            if expected_revision is not None and candidate.revision != expected_revision:
+                raise RevisionConflict("board changed; refresh the ticket-order preview")
+            self._allow_ticket_order(candidate, lane, actor)
+            plan = candidate.ticket_order_plan(lane, references)
+            if not apply or plan["changedCount"] == 0:
+                return {
+                    "result": "Preview ready"
+                    if not apply
+                    else "Ticket order already matches dependencies",
+                    "revision": candidate.revision,
+                    "plan": plan,
+                    "applied": False,
+                }
+            if expected_revision is None:
+                raise board_state.BoardError("applying ticket order requires a board revision")
+            result_plan: board_state.JsonObject = {}
+
+            def mutate(board: board_state.Board) -> str:
+                self._allow_ticket_order(board, lane, actor)
+                if problems := board.verify():
+                    raise board_state.BoardError("disk snapshot rejected: " + "; ".join(problems))
+                result_plan.update(board.reorder_tickets(lane, references, actor))
+                return f"Reordered {result_plan['changedCount']} ticket numbers in {lane}"
+
+            result, revision = self.execute(expected_revision, mutate, notification_actor=actor)
+            return {"result": result, "revision": revision, "plan": result_plan, "applied": True}
+
     def monitor_activity(
         self, start: dt.datetime, end: dt.datetime | None, cursor: str | None = None
     ) -> board_state.JsonObject:
@@ -1779,9 +1911,9 @@ class BoardStore:
         def attach(board: board_state.Board) -> str:
             nonlocal created_path
             item = board.find(ref)
-            if attachments.write_blob(self.path, item.ticket, file, blob):
+            if attachments.write_blob(self.path, item.storage_ticket, file, blob):
                 created_path = attachments.blob_path(
-                    self.path, item.ticket, file.id, attachments.extension(file.name)
+                    self.path, item.storage_ticket, file.id, attachments.extension(file.name)
                 )
             return board.add_attachment(ref, file)
 
@@ -2911,6 +3043,21 @@ PAGE = """<!doctype html>
   .attachment a { display: block; color: var(--ink); overflow-wrap: anywhere; }
   .attachment-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .attachment-actions button, #p-upload { font: inherit; cursor: pointer; padding: 4px 8px; }
+  .reorder-deps { width: 25px; height: 25px; padding: 3px; margin-left: 4px;
+    border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+  .reorder-deps:hover { background: #DCE1EB; }
+  .reorder-deps:disabled { opacity: .35; cursor: default; }
+  .reorder-deps svg { width: 19px; height: 19px; fill: none; stroke: currentColor;
+    stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #ticket-order-dialog { width: min(740px, 88vw); max-height: 85vh; overflow: auto;
+    border: 1px solid var(--line); border-radius: 8px; padding: 20px; color: var(--ink); }
+  #ticket-order-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+  #ticket-order-dialog table { width: 100%; border-collapse: collapse; }
+  #ticket-order-dialog td, #ticket-order-dialog th { text-align: left; padding: 5px;
+    border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  #ticket-order-dialog .ticket-number { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #ticket-order-dialog button { font: inherit; margin: 6px 6px 0 0; padding: 6px 10px; cursor: pointer; }
+  #ticket-order-error { color: var(--p0); }
   #save-recovery { align-self: flex-start; margin: 8px 12px; padding: 6px 10px;
     font: inherit; cursor: pointer; }
   #save-recovery-dialog { max-width: min(640px, 85vw); max-height: 80vh; overflow: auto;
@@ -3094,6 +3241,19 @@ move any card whoever owns it. Click to hand it over."></button>
   </div>
   <div id="toast"></div>
 
+<dialog id="ticket-order-dialog" aria-labelledby="ticket-order-title">
+  <h2 id="ticket-order-title">Reorder by dependencies</h2>
+  <p id="ticket-order-summary"></p>
+  <p>Cards and their history stay together. Existing number references in text are not rewritten.</p>
+  <table><thead><tr><th scope="col">Current</th><th scope="col">New</th><th scope="col">Card</th></tr></thead>
+    <tbody id="ticket-order-rows"></tbody></table>
+  <div><button id="ticket-order-prev" type="button">Previous</button>
+    <span id="ticket-order-page"></span><button id="ticket-order-next" type="button">Next</button></div>
+  <p id="ticket-order-error" role="status"></p>
+  <button id="ticket-order-refresh" type="button">Refresh preview</button>
+  <button id="ticket-order-close" type="button">Close</button>
+  <button id="ticket-order-apply" type="button">Apply</button>
+</dialog>
 <dialog id="save-recovery-dialog" aria-labelledby="save-recovery-title">
   <h2 id="save-recovery-title">Review unconfirmed saves</h2>
   <p>A request may have saved even if its response was lost. Check the card's comments
@@ -4178,13 +4338,13 @@ function openCard(id) {
   // the columns line up across every entry rather than within each one.
   const tr = document.getElementById('p-trail');
   tr.replaceChildren();
-  if (!it.history.length) {
+  if (!it.history.length && !(it.attachmentHistory || []).length && !(it.ticketHistory || []).length) {
     const e = document.createElement('div');
     e.className = 'empty';
     e.textContent = 'No recorded history \\u2014 migrated before the trail existed.';
     tr.appendChild(e);
   }
-  const history = [...it.history, ...(it.attachmentHistory || [])]
+  const history = [...it.history, ...(it.attachmentHistory || []), ...(it.ticketHistory || [])]
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   for (const h of history) {
     const at = document.createElement('div');
@@ -4203,7 +4363,10 @@ function openCard(id) {
     //
     // **Terry's own wording for the line**: "Ticket ownership change: Terry -> Claude".
     const name = userLabel;
-    if (h.action) {
+    if (Number.isInteger(h.ticketTo)) {
+      what.textContent = 'Ticket number: #' + String(h.ticketFrom).padStart(4,'0')
+        + ' → #' + String(h.ticketTo).padStart(4,'0');
+    } else if (h.action) {
       what.textContent = ({attached: 'Attached file', attachment_removed: 'Removed attachment',
         cover_set: 'Set cover photo', cover_cleared: 'Cleared cover photo'})[h.action];
     } else if (h.ownerTo) {
@@ -4265,7 +4428,7 @@ document.addEventListener('keydown', ev => {
   // asks before discarding; `closeCard()` never needs to, because it STASHES the
   // comment draft rather than dropping it.
   if (ev.key !== 'Escape') return;
-  if (document.getElementById('save-recovery-dialog').open) return;
+  if (document.getElementById('save-recovery-dialog').open || document.getElementById('ticket-order-dialog').open) return;
   if (mkOpen) { closeMake(false); return; }
   // **Escape clears the search BEFORE it closes a card**, because a filtered board with
   // an open card is a state where Escape has two plausible meanings, and the narrower
@@ -4312,6 +4475,207 @@ async function postComment() {
 
 document.getElementById('post').addEventListener('click', postComment);
 document.getElementById('save-recovery').addEventListener('click', reviewUnconfirmedSaves);
+
+// ---- lane review approval -------------------------------------------------
+const pendingLaneApprovals = new Set();
+const unconfirmedLaneApprovals = new Map();
+function laneApprovalKey(prefix,lane) { return JSON.stringify([prefix,lane]); }
+function canApproveLane(lane) {
+  return lane.approveAll === true && lane.state === 'ready_for_review'
+    && (data.actors || []).some(actor => actor.id === data.browserUser && actor.class === 'human')
+    && data.lanes.some(row => row.state === 'completed') && allowed(lane.state,'completed');
+}
+function laneApprovalBusy(prefix) {
+  return localActions.some(action => action.prefix === prefix && action.phase !== 'dismissed');
+}
+function laneApprovalButton(lane) {
+  if (!canApproveLane(lane)) return null;
+  const button = document.createElement('button');
+  const prefix = API_PREFIX, epoch = window.workspaceEpoch, revision = data.revision;
+  const count = lane.items.filter(item => !item.archived).length;
+  const key = laneApprovalKey(prefix,lane.state);
+  button.type = 'button'; button.className = 'reorder-deps lane-approve';
+  button.textContent = '👍';
+  button.title = 'Approve all ' + count + ' cards in ' + lane.label + ' and move to Completed';
+  button.setAttribute('aria-label',button.title);
+  button.disabled = count === 0 || laneApprovalBusy(prefix) || pendingLaneApprovals.has(key) || unconfirmedLaneApprovals.get(key) === data;
+  button.addEventListener('click',() => approveLane(lane,prefix,epoch,revision,count,button));
+  return button;
+}
+async function approveLane(lane,prefix,epoch,revision,count,button) {
+  const key = laneApprovalKey(prefix,lane.state), snapshot = data;
+  const current = () => prefix === API_PREFIX && epoch === window.workspaceEpoch;
+  const cards = Object.fromEntries(lane.items.filter(item => !item.archived).map(item => [item.id,item.cardVersion]));
+  if (!current() || laneApprovalBusy(prefix) || !canApproveLane(lane) || !count || pendingLaneApprovals.has(key)
+      || unconfirmedLaneApprovals.get(key) === data) return;
+  pendingLaneApprovals.add(key); button.disabled = true;
+  try {
+    const response = await fetch(prefix + '/board/lane-approval/apply',{
+      method:'POST',signal:AbortSignal.timeout(20000),
+      headers:{'Authorization':'Bearer ' + API_TOKEN,'Content-Type':'application/json',
+        'If-Match':'"revision-' + revision + '"'},body:JSON.stringify({lane:lane.state,cards})});
+    let out;
+    try { out = await response.json(); } catch (_) {
+      if (!response.ok && response.status < 500) out = {error:'Lane approval was refused (HTTP ' + response.status + ').'};
+      else throw new Error('Unknown result');
+    }
+    if (response.status >= 500) throw new Error('Unknown result');
+    if (!response.ok) {
+      if (current()) toast(out?.error || 'Lane approval was refused. Refresh before trying again.',true);
+      return;
+    }
+    if (!out || out.revision !== revision + 1 || out.approvedCount !== count || typeof out.result !== 'string')
+      throw new Error('Unknown result');
+    revisionFloors.set(prefix,Math.max(revisionFloors.get(prefix) || 0,out.revision));
+    unconfirmedLaneApprovals.delete(key);
+    if (current()) { acceptRevision(out); toast(out.result); }
+  } catch (_) {
+    unconfirmedLaneApprovals.set(key,current() ? data : snapshot);
+    if (current()) toast('Approval outcome unconfirmed. Check the refreshed lane before trying again.',true);
+  } finally {
+    pendingLaneApprovals.delete(key);
+    if (current()) {
+      seen = null;
+      try { await tick(true); } catch (_) {
+        toast('Could not refresh the board. Check its current state before trying again.',true);
+      }
+      button.disabled = true;
+    }
+  }
+}
+// ---- end lane review approval --------------------------------------------
+
+// ---- dependency ticket ordering -----------------------------------------
+let ticketOrderPreview = null, ticketOrderSerial = 0;
+const ticketOrderPending = new Set(), TICKET_ORDER_PAGE = 100;
+function validTicketOrder(out) {
+  if (!out || !Number.isInteger(out.revision) || out.revision < 0 || !out.plan
+      || !Array.isArray(out.plan.cards) || typeof out.plan.lane !== 'string') return false;
+  const rows = out.plan.cards, ids = new Set(), old = new Set(), next = new Set();
+  let last = 0, changed = 0;
+  for (const row of rows) {
+    if (!row || typeof row.id !== 'string' || !row.id || typeof row.subject !== 'string'
+        || !Number.isSafeInteger(row.oldTicket) || row.oldTicket < 1
+        || !Number.isSafeInteger(row.newTicket) || row.newTicket <= last
+        || ids.has(row.id) || old.has(row.oldTicket)) return false;
+    ids.add(row.id); old.add(row.oldTicket); next.add(row.newTicket); last = row.newTicket;
+    changed += row.oldTicket !== row.newTicket;
+  }
+  return out.plan.selectedCount === rows.length && out.plan.changedCount === changed
+    && old.size === next.size && [...old].every(number => next.has(number));
+}
+function closeTicketOrder() {
+  ticketOrderSerial++;
+  ticketOrderPreview = null;
+  const dialog = document.getElementById('ticket-order-dialog');
+  if (dialog.open) dialog.close();
+}
+function currentTicketOrder(state) {
+  return state && state === ticketOrderPreview && state.prefix === API_PREFIX
+    && state.epoch === window.workspaceEpoch;
+}
+function paintTicketOrder() {
+  const state = ticketOrderPreview; if (!state) return;
+  const rows = state.plan.cards, start = state.page * TICKET_ORDER_PAGE;
+  const body = document.getElementById('ticket-order-rows'); body.replaceChildren();
+  for (const row of rows.slice(start,start + TICKET_ORDER_PAGE)) {
+    const tr = document.createElement('tr');
+    for (const value of ['#' + String(row.oldTicket).padStart(4,'0'),
+      '#' + String(row.newTicket).padStart(4,'0'),row.subject]) {
+      const td = document.createElement('td'); td.textContent = value;
+      if (tr.children.length < 2) td.className = 'ticket-number'; tr.append(td);
+    }
+    body.append(tr);
+  }
+  document.getElementById('ticket-order-summary').textContent = rows.length + ' cards; '
+    + state.plan.changedCount + ' number changes. Prerequisites come first.';
+  document.getElementById('ticket-order-page').textContent = rows.length
+    ? (start + 1) + '–' + Math.min(start + TICKET_ORDER_PAGE,rows.length) + ' of ' + rows.length : 'No cards';
+  document.getElementById('ticket-order-prev').disabled = state.page === 0;
+  document.getElementById('ticket-order-next').disabled = start + TICKET_ORDER_PAGE >= rows.length;
+  document.getElementById('ticket-order-error').textContent = state.error || '';
+  document.getElementById('ticket-order-apply').disabled = state.applying || state.invalid || !state.plan.changedCount;
+  document.getElementById('ticket-order-refresh').disabled = state.applying;
+}
+async function openTicketOrder(lane) {
+  const prefix = API_PREFIX, epoch = window.workspaceEpoch, serial = ++ticketOrderSerial;
+  const key = JSON.stringify([prefix,lane]);
+  if (ticketOrderPending.has(key)) { toast('This lane is still saving. Wait for its result.',true); return; }
+  try {
+    const response = await fetch(prefix + '/board/ticket-order/preview',{
+      method:'POST',signal:AbortSignal.timeout(20000),
+      headers:{'Authorization':'Bearer ' + API_TOKEN,'Content-Type':'application/json'},
+      body:JSON.stringify({lane,cards:null})});
+    const out = await response.json();
+    if (prefix !== API_PREFIX || epoch !== window.workspaceEpoch || serial !== ticketOrderSerial) return;
+    if (!response.ok) { toast(out.error || 'Could not prepare ticket order',true); return; }
+    if (!validTicketOrder(out) || out.applied !== false || out.plan.lane !== lane)
+      throw new Error('Invalid preview');
+    ticketOrderPreview = {prefix,epoch,lane,plan:out.plan,revision:out.revision,page:0,
+      applying:false,invalid:false,error:''};
+    paintTicketOrder();
+    const dialog = document.getElementById('ticket-order-dialog');
+    if (!dialog.open) dialog.showModal();
+  } catch (_) {
+    if (prefix === API_PREFIX && epoch === window.workspaceEpoch && serial === ticketOrderSerial)
+      toast('Could not read the ticket-order preview. No reorder was submitted.',true);
+  }
+}
+async function applyTicketOrder() {
+  const state = ticketOrderPreview;
+  if (!currentTicketOrder(state) || state.applying || state.invalid || !state.plan.changedCount) return;
+  const key = JSON.stringify([state.prefix,state.lane]);
+  if (ticketOrderPending.has(key)) return;
+  state.applying = true; ticketOrderPending.add(key); paintTicketOrder();
+  try {
+    const response = await fetch(state.prefix + '/board/ticket-order/apply',{
+      method:'POST',signal:AbortSignal.timeout(20000),
+      headers:{'Authorization':'Bearer ' + API_TOKEN,'Content-Type':'application/json',
+        'If-Match':'"revision-' + state.revision + '"'},
+      body:JSON.stringify({lane:state.lane,cards:state.plan.cards.map(row => row.id)})});
+    let out;
+    try { out = await response.json(); } catch (_) {
+      if (!response.ok && response.status < 500) out = {error:'The reorder was refused (HTTP ' + response.status + '). Refresh its preview.'};
+      else throw new Error('Unknown result');
+    }
+    if (response.status >= 500) throw new Error('Unknown result');
+    if (!response.ok) {
+      if (currentTicketOrder(state)) {
+        state.invalid = true; state.error = out?.error || 'The reorder was refused. Refresh its preview.';
+      }
+      return;
+    }
+    if (!validTicketOrder(out) || out.applied !== true || out.revision !== state.revision + 1
+        || JSON.stringify(out.plan) !== JSON.stringify(state.plan)) throw new Error('Unknown result');
+    revisionFloors.set(state.prefix,Math.max(revisionFloors.get(state.prefix) || 0,out.revision));
+    if (currentTicketOrder(state)) {
+      closeTicketOrder(); acceptRevision(out); seen = null;
+      toast('Reordered ' + out.plan.changedCount + ' ticket numbers'); await tick(true);
+    }
+  } catch (_) {
+    if (currentTicketOrder(state)) {
+      state.invalid = true;
+      state.error = 'Outcome unconfirmed. Check the current order with Refresh preview before trying again.';
+    }
+  } finally {
+    ticketOrderPending.delete(key); state.applying = false;
+    if (currentTicketOrder(state)) paintTicketOrder();
+  }
+}
+document.getElementById('ticket-order-apply').addEventListener('click',applyTicketOrder);
+document.getElementById('ticket-order-close').addEventListener('click',closeTicketOrder);
+document.getElementById('ticket-order-dialog').addEventListener('cancel',ev => { ev.preventDefault(); closeTicketOrder(); });
+document.getElementById('ticket-order-refresh').addEventListener('click',() => {
+  if (currentTicketOrder(ticketOrderPreview)) openTicketOrder(ticketOrderPreview.lane);
+});
+for (const [id,delta] of [['ticket-order-prev',-1],['ticket-order-next',1]])
+  document.getElementById(id).addEventListener('click',() => {
+    if (!currentTicketOrder(ticketOrderPreview)) return;
+    ticketOrderPreview.page = Math.max(0,Math.min(Math.ceil(ticketOrderPreview.plan.cards.length / TICKET_ORDER_PAGE) - 1,
+      ticketOrderPreview.page + delta)); paintTicketOrder();
+  });
+// ---- end dependency ticket ordering -------------------------------------
+
 
 // **Cards #0081 and #0082.** Click the text to edit it -- the whole line is the target,
 // so no icon competes with the title for the eye.
@@ -4717,6 +5081,20 @@ function laneEl(lane) {
     add.title = 'Add a card to ' + lane.label;
     add.addEventListener('click', ev => { ev.stopPropagation(); openMake(lane); });
     el.querySelector('h2').appendChild(add);
+  }
+  if (lane.reorderByDependencies) {
+    const reorder = document.createElement('button'); reorder.type = 'button';
+    reorder.className = 'reorder-deps'; reorder.title = 'Reorder ticket numbers by dependencies';
+    reorder.setAttribute('aria-label','Reorder ' + lane.label + ' ticket numbers by dependencies');
+    reorder.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+      + '<path d="M3 5h4M3 11h7M3 17h10M18 4v16m-4-4 4 4 4-4"/></svg>';
+    reorder.disabled = lane.items.filter(item => !item.archived).length < 2;
+    reorder.addEventListener('click', ev => { ev.stopPropagation(); openTicketOrder(lane.state); });
+    el.querySelector('h2').appendChild(reorder);
+  }
+  if (lane.approveAll) {
+    const approve = laneApprovalButton(lane);
+    if (approve) el.querySelector('h2').appendChild(approve);
   }
   // **Card #0063. Old finished work is hidden by default.** Terry: "cards in COMPLETED
   // for >= 24 hours should not be shown", with a checkbox to bring them back, and his
@@ -5610,10 +5988,12 @@ def payload() -> bytes:
                 {"ticket": child.label, "subject": child.subject}
             )
 
+    ticket_versions = board.ticket_history_by_item()
+
     def render_item(item: board_state.Item, lane_label: str) -> dict[str, object]:
         return {
             "id": item.id,
-            "cardVersion": card_version(board, item),
+            "cardVersion": card_version(board, item, ticket_history=ticket_versions),
             "ticket": item.label,
             "state": item.state,
             "laneLabel": lane_label,
@@ -5627,6 +6007,22 @@ def payload() -> bytes:
                 for file in item.attachments
             ],
             "coverAttachment": item.cover_attachment,
+            **(
+                {
+                    "ticketHistory": [
+                        {
+                            "by": entry["by"],
+                            "at": entry["at"],
+                            "when": when(str(entry["at"])),
+                            "ticketFrom": entry["from"],
+                            "ticketTo": entry["to"],
+                        }
+                        for entry in reversed(ticket_versions[item.id])
+                    ]
+                }
+                if item.id in ticket_versions
+                else {}
+            ),
             "attachmentHistory": [
                 {**event.to_json(), "when": when(event.at)}
                 for event in reversed(item.attachment_history)
@@ -5719,6 +6115,8 @@ def payload() -> bytes:
                     # offer a lane the POST would refuse. Adding a lane to `create` in
                     # `rules.json` grows a `+` with no code change here or in the page.
                     "creatable": policy.may_create(board.browser_user, lane.state),
+                    "reorderByDependencies": lane.state in policy.reorder_lanes,
+                    "approveAll": policy.lane_approval(lane.state)[0],
                     # **Card #0063. Counted on the server, beside the flag it counts**, so the
                     # checkbox label and the hiding can never disagree about how many.
                     "oldCount": sum(1 for i in lane.items if not i.archived and is_old(i)),
@@ -6608,7 +7006,156 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None, None
         return self._read_json(unique_fields=is_permissions), expected_card
 
+    def _ticket_order_post(self, action: str) -> None:
+        actor = self._actor()
+        if actor is None:
+            self._json({"error": "missing or invalid service credential"}, 401)
+            return
+        if action == "config" and self.headers.get("Authorization", "") != f"Bearer {CLI_TOKEN}":
+            self._json({"error": "ticket-order configuration requires the CLI credential"}, 403)
+            return
+        expected = None
+        if action != "preview" or self.headers.get("If-Match") is not None:
+            expected = self._expected_revision()
+            if expected is None:
+                self._json({"error": "If-Match must name the expected board revision"}, 428)
+                return
+        body = self._read_json(unique_fields=True)
+        if body is None:
+            return
+        with _command_gate:
+            if not self._admit_transport():
+                return
+            if _shutdown_requested.is_set():
+                self._json({"error": "board service shutdown is in progress"}, 503)
+                return
+            store = STORE
+            if store is None:
+                self._json({"error": "board store is not initialized"}, 409)
+                return
+            try:
+                required = {"lane", "enabled"} if action == "config" else {"lane", "cards"}
+                if set(body) != required or not isinstance(body["lane"], str):
+                    raise board_state.BoardError("invalid ticket-order fields")
+                lane = body["lane"]
+                if action == "config":
+                    enabled = body["enabled"]
+                    if type(enabled) is not bool:
+                        raise board_state.BoardError(
+                            "ticket-order configuration requires a boolean and embedded policy"
+                        )
+                    result, revision = store.configure_ticket_order(
+                        cast("int", expected), lane, enabled, actor
+                    )
+                    response: board_state.JsonObject = {
+                        "result": result,
+                        "revision": revision,
+                        "enabled": enabled,
+                    }
+                else:
+                    cards = body["cards"]
+                    if cards is not None and (
+                        not isinstance(cards, list)
+                        or any(not isinstance(ref, str) or not ref for ref in cards)
+                    ):
+                        raise board_state.BoardError(
+                            "cards must be null or a list of reference strings"
+                        )
+                    response = store.ticket_order(
+                        lane,
+                        cast("list[str] | None", cards),
+                        actor,
+                        apply=action == "apply",
+                        expected_revision=expected,
+                    )
+            except RevisionConflict as exc:
+                self._json({"error": str(exc), "code": exc.code}, 412)
+                return
+            except (ValueError, OSError) as exc:
+                error, code = _command_error_response(exc)
+                self._json(error, code)
+                return
+        self._json(response)
+
+    def _lane_approval_post(self, *, configure: bool) -> None:
+        actor = self._actor()
+        if actor is None:
+            self._json({"error": "missing or invalid service credential"}, 401)
+            return
+        token = CLI_TOKEN if configure else BROWSER_TOKEN
+        if self.headers.get("Authorization", "") != f"Bearer {token}":
+            self._json({"error": "lane approval requires the matching service credential"}, 403)
+            return
+        expected = self._expected_revision()
+        if expected is None:
+            self._json({"error": "If-Match must name the expected board revision"}, 428)
+            return
+        valid, _ = self._card_precondition(is_card=False)
+        if not valid:
+            return
+        body = self._read_json(unique_fields=True)
+        if body is None:
+            return
+        with _command_gate:
+            if not self._admit_transport():
+                return
+            if _shutdown_requested.is_set():
+                self._json({"error": "board service shutdown is in progress"}, 503)
+                return
+            store = STORE
+            if store is None:
+                self._json({"error": "board store is not initialized"}, 409)
+                return
+            try:
+                fields = set(body)
+                allowed = {"lane", "enabled", "message"} if configure else {"lane", "cards"}
+                required = {"lane", "enabled"} if configure else {"lane", "cards"}
+                if not required <= fields <= allowed or not isinstance(body["lane"], str):
+                    raise board_state.BoardError("invalid lane approval fields")
+                if configure:
+                    if type(body["enabled"]) is not bool:
+                        raise board_state.BoardError("lane approval enabled must be a boolean")
+                    message = (
+                        board_state.approval_message(body["message"]) if "message" in body else None
+                    )
+                    result, revision = store.configure_lane_approval(
+                        expected, body["lane"], body["enabled"], message, actor
+                    )
+                    response: board_state.JsonObject = {"result": result, "revision": revision}
+                else:
+                    cards = body["cards"]
+                    if not isinstance(cards, dict) or any(
+                        not key
+                        or not isinstance(value, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                        for key, value in cards.items()
+                    ):
+                        raise board_state.BoardError(
+                            "cards must map stable IDs to rendered cardVersion tokens"
+                        )
+                    response = store.approve_lane(
+                        expected, body["lane"], actor, cast("dict[str, str]", cards)
+                    )
+            except RevisionConflict as exc:
+                self._json({"error": str(exc), "code": exc.code}, 412)
+                return
+            except (ValueError, OSError) as exc:
+                error, code = _command_error_response(exc)
+                self._json(error, code)
+                return
+        self._json(response)
+
     def _control_post(self, route: str) -> bool:
+        if route in {
+            API_PREFIX + "/board/lane-approval/config",
+            API_PREFIX + "/board/lane-approval/apply",
+        }:
+            self._lane_approval_post(configure=route.endswith("/config"))
+            return True
+        for action in ("preview", "apply", "config"):
+            if route == API_PREFIX + "/board/ticket-order/" + action:
+                self._ticket_order_post(action)
+                return True
         if route == API_PREFIX + "/notifications":
             self._notifications_request(write=True)
             return True

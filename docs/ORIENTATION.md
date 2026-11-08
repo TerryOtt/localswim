@@ -112,7 +112,7 @@ interpreter pin are honored.
 
 Passing a directory to `localswim` selects workspace mode; passing a JSON snapshot keeps
 individual-board mode. The workspace default port is 8810. It discovers validated
-schema-4 snapshots recursively, excluding hidden directories, Git metadata, attachment
+schema-4 and schema-6 snapshots recursively, excluding hidden directories, Git metadata, attachment
 storage, and symbolic-link escapes. Nonboard JSON is ignored; malformed schema-4 boards
 remain visible as unavailable entries with an error instead of being partially loaded.
 
@@ -361,7 +361,7 @@ Three JSON shapes have separate version numbers because they change independentl
 
 | Data | Schema | Owner and lifetime |
 |---|---:|---|
-| Board snapshot | 4 | Per project, durable, selected on the command line. |
+| Board snapshot | 4, or 6 after actual ticket renumbering | Per project, durable, selected on the command line. |
 | Embedded transition policy | 6 | Per board, durable, resolved during initialization. |
 | Initialization description | 1 | Human-readable input; lane IDs are optional. |
 | Initialization permissions | 1 | Human-readable input using user and lane names. |
@@ -642,6 +642,13 @@ Four conventions matter beyond a simple `may_move()` lookup:
    transition policy permits Bot to move to Completed. A confirmed success closes the
    source drawer through its existing draft-preserving close path. Refusals, failures,
    and delayed responses after switching cards or boards do not close the current drawer.
+   A lane may separately opt in to a one-click thumbs-up button that approves all
+   nonarchived cards in that lane atomically, with a comment and move for each. This
+   has no preview; empty lanes are no-ops. Only the configured human browser actor can
+   use it, and the CLI cannot approve. `board set-approval-button LANE --enabled` or
+   `--disabled` configures the lane; `--message TEXT` replaces the approval message,
+   while omission preserves it. The message is trimmed and limited to 1–4000 characters.
+   Only `ready_for_review` may enable this feature, and it defaults off.
 4. The human actor may move `ready_for_work -> in_progress` when starting selected
    work directly in the browser. Card ownership remains independent of movement
    permission.
@@ -890,6 +897,8 @@ POST /api/v001/cards/<id>/cover
 GET  /api/v001/cards/<id>/attachments/<attachment-guid>
 POST /api/v001/board/project
 POST /api/v001/board/permissions
+POST /api/v001/board/ticket-order/{preview,apply,config}
+POST /api/v001/board/lane-approval/{config,apply}
 ```
 
 The server maps credentials to actors; request bodies cannot select who is acting. The
@@ -926,6 +935,16 @@ and request revision. It validates the `ready_for_review -> completed` move befo
 appending `Reviewed & approved, moving to Completed.` and changing state in the same transaction. Bot actors
 cannot invoke this special action even where the general transition policy permits that
 move; stale, repeated, or failed requests do not leave a comment behind.
+
+Lane approval configuration uses CLI-only `POST /api/v001/board/lane-approval/config`
+with `{lane, enabled, message?}` and the current revision. Omitting `message` preserves
+the saved value. Browser `POST /api/v001/board/lane-approval/apply` takes
+`{lane, cards: {stableID: renderedCardVersion, ...}}`. It atomically comments and
+moves every nonarchived card in the enabled lane only when the rendered membership
+and every original card token still match. A stale board revision, new arrival, or
+changed card rejects the batch before any comment or move. Empty lanes return
+without writing. Never replay an uncertain mutation; inspect state and require a fresh
+human action.
 
 `board grant-permissions` adds creation lanes and moves for each selected actor
 through `POST /api/v001/board/permissions`. Its exact body is
@@ -1351,11 +1370,44 @@ Human/unknown alerts and normal ticket gates. This in-memory metadata is not a d
 journal and cannot recover unsupported transient manual JSON writes overwritten
 outside the writer protocol.
 
+## Dependency ticket ordering (#0226)
+
+`ticket_order.py` plans dependency-first permutations and validates the immutable
+`ticketHistory` audit. `Board.ticket_order_plan()` and `reorder_tickets()` expose
+the domain behavior; `ticket_order_client.py` performs live CLI preview and a
+single revision-bound apply. `board reorder-tickets LANE [REFERENCES...]` defaults
+to preview, accepts alternative `--cards-file` JSON selection, and supports
+`--apply`, `--expected-revision` and `--json`. No selection means the whole active,
+unarchived lane. References form a set, never an input ordering.
+
+Planning follows full `blocks` paths through any cards/lanes, refuses cycles that
+contain a selected card, breaks eligible ties by old ticket, and redistributes
+only the selected ticket pool. It preserves stable IDs, content, current state,
+parents, relationships and existing histories; numeric prose is not rewritten.
+Changed cards retain immutable `originTicket` anchors for attachment storage.
+Reverse replay must recover those globally unique origins. A real permutation
+appends one audit batch and opts into board schema 6. New and ordinary boards remain schema 4; no-op operations preserve the existing
+schema; older schema-4-only writers refuse schema 6. Private schema 5
+remains inactive. Existing priority-based rendering is an independent operation.
+
+`POST /api/v001/board/ticket-order/preview` accepts `{lane, cards}` (`cards: null`
+selects the lane), returning the revision and plan. `apply` uses the same shape
+with `If-Match`; validation and the permutation occur in the sole writer's locked
+transaction. No-op plans do not save or increment revision. Do not retry an
+uncertain apply without inspecting current state.
+
+`POST /api/v001/board/ticket-order/config` accepts `{lane, enabled}` with the CLI
+credential and `If-Match`. The public CLI is `board set-reorder-button LANE
+--enabled` or `--disabled`. Optional Boolean lane `reorderByDependencies` defaults
+off; the Terry Backlog template opts in while generic examples stay off. The
+browser glyph previews the lane and requires explicit Apply, bound to that
+preview's revision. Enabling the glyph alone leaves numbering/schema unchanged.
+
 ## Private schema-5 preparation (#0129)
 
 `write_protocol.py` provides an inert preparation boundary for the accepted restore
-protocol. Production `SCHEMA`, initialization, load/save, HTTP, CLI, browser and
-workspace behavior remain schema 4 / write protocol 1. There is no feature switch,
+protocol. Production `SCHEMA` and initialization remain schema 4; actual ticket
+reorders opt into schema 6. Both use write protocol 1. There is no feature switch,
 public schema-5 writer, migration command or runtime generation allocation.
 
 The private envelope contains the existing `Board`, one canonical lowercase UUID

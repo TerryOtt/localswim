@@ -636,26 +636,7 @@ def test_dirty_build_id_includes_source_fingerprint(
         return api_endpoint.subprocess.CompletedProcess(args, 0, stdout=reply, stderr="")
 
     sources = {
-        name: f"known source bytes: {name}\n".encode()
-        for name in (
-            "api_endpoint.py",
-            "board_state.py",
-            "attachments.py",
-            "workspace.py",
-            "workspace_config.py",
-            "gateway_publish.py",
-            "service_ownership.py",
-            "service_output.py",
-            "activity_feed.py",
-            "monitor_activity_client.py",
-            "notifications.py",
-            "codex_signal.py",
-            "browser_events.py",
-            "workspace_events.py",
-            "browser_stream.js",
-            "workspace.js",
-            "workspace.css",
-        )
+        path.name: f"known source bytes: {path.name}\n".encode() for path in api_endpoint.CODE_FILES
     }
 
     def source_bytes(path: pathlib.Path) -> bytes:
@@ -671,19 +652,7 @@ def test_dirty_build_id_includes_source_fingerprint(
     assert len(ident.removeprefix("deadbee-").removesuffix("-dirty")) == 8
     assert api_endpoint.build_id() == ident
 
-    for name in (
-        "api_endpoint.py",
-        "service_output.py",
-        "activity_feed.py",
-        "monitor_activity_client.py",
-        "notifications.py",
-        "codex_signal.py",
-        "browser_events.py",
-        "workspace_events.py",
-        "browser_stream.js",
-        "workspace.js",
-        "workspace.css",
-    ):
+    for name in sources:
         original = sources[name]
         sources[name] = original + b"changed bytes\n"
         changed = api_endpoint.build_id()

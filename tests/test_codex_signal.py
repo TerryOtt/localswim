@@ -96,18 +96,17 @@ def test_native_queue_is_single_attempt_and_output_is_discarded(
     arguments = captured["arguments"]
     assert arguments[:4] == ["queue", "--thread", _THREAD, "--message"]
     assert arguments[4] == (
-        "localswim board-change notice (metadata only).\n"
-        'Board label: "Synthetic board"\n'
-        f"Board identity: {'a' * 64}\n"
-        "Committed activity: 2026-11-07T10:30:00+00:00 through 2026-11-07T10:31:00+00:00\n"
-        "Tickets: #0003, #0012\n"
-        "Inspect activity before acting; follow the board's authorization gates."
+        "localswim board-change notice\n\n"
+        "- Board: Synthetic board (`aaaa...aaaa`)\n"
+        "- Start: 2026-11-07 10:30:00 UTC\n"
+        "- End: 2026-11-07 10:31:00 UTC\n"
+        "- Tickets: 0003, 0012"
     )
     assert len(children) == 1 and children[0].poll() is not None
     assert capsys.readouterr() == ("", "")
 
 
-def test_message_quotes_label_offsets_and_reports_truncation(harness: Harness) -> None:
+def test_message_preserves_label_converts_offsets_and_reports_truncation(harness: Harness) -> None:
     capture, _children = harness("accept")
     assert (
         signal.deliver(
@@ -122,9 +121,64 @@ def test_message_quotes_label_offsets_and_reports_truncation(harness: Harness) -
         == "accepted"
     )
     message = json.loads(capture.read_text(encoding="utf-8"))["arguments"][-1]
-    assert 'Board label: "Synthetic \\"quoted\\""' in message
-    assert "2026-11-07T10:30:00+00:00" in message
-    assert "Tickets: unspecified (additional tickets omitted)" in message
+    assert '- Board: Synthetic "quoted" (`aaaa...aaaa`)' in message
+    assert "- Start: 2026-11-07 10:30:00 UTC" in message
+    assert "- Tickets: unspecified (additional tickets omitted)" in message
+
+
+@pytest.mark.parametrize(
+    "since,until,expected_start,expected_end",
+    [
+        (
+            "2026-11-08T15:10:27.900000Z",
+            "2026-11-08T15:10:48.000001Z",
+            "2026-11-08 15:10:27",
+            "2026-11-08 15:10:49",
+        ),
+        (
+            "2026-11-08T15:10:27Z",
+            "2026-11-08T15:10:49Z",
+            "2026-11-08 15:10:27",
+            "2026-11-08 15:10:49",
+        ),
+        (
+            "2026-12-31T18:59:59.900000-05:00",
+            "2026-12-31T18:59:59.999999-05:00",
+            "2026-12-31 23:59:59",
+            "2027-01-01 00:00:00",
+        ),
+        (
+            "2028-03-01T00:29:59.900000+00:30",
+            "2028-03-01T00:29:59.999999+00:30",
+            "2028-02-29 23:59:59",
+            "2028-03-01 00:00:00",
+        ),
+    ],
+)
+def test_message_whole_second_utc_bounds(
+    since: str, until: str, expected_start: str, expected_end: str
+) -> None:
+    message = signal._message(  # noqa: SLF001 - formatter contract
+        _THREAD, payload(since=since, until=until)
+    )
+    assert f"- Start: {expected_start} UTC\n" in message
+    assert f"- End: {expected_end} UTC\n" in message
+
+
+def test_message_formats_sorted_tickets_and_abbreviated_identity() -> None:
+    message = signal._message(  # noqa: SLF001 - formatter contract
+        _THREAD,
+        payload(
+            boardIdentity="bbdf" + "0" * 56 + "1198",
+            label="FGA Dev",
+            tickets=[10000, 450, 439, 446, 448, 447, 449, 439],
+            truncated=True,
+        ),
+    )
+    assert "- Board: FGA Dev (`bbdf...1198`)\n" in message
+    assert message.endswith(
+        "- Tickets: 0439, 0446, 0447, 0448, 0449, 0450, 10000 (additional tickets omitted)"
+    )
 
 
 def test_timeout_reaps_exact_child_without_retry(

@@ -38,10 +38,14 @@ _EVENT_FIELDS = frozenset(
         "parentFromId",
         "parentToTicket",
         "parentToId",
+        "ticketFrom",
+        "ticketTo",
     }
 )
 _EVENT_REQUIRED = frozenset({"ticket", "id", "kind", "at", "by"})
-_INTEGER_FIELDS = frozenset({"ticket", "otherTicket", "parentFromTicket", "parentToTicket"})
+_INTEGER_FIELDS = frozenset(
+    {"ticket", "otherTicket", "parentFromTicket", "parentToTicket", "ticketFrom", "ticketTo"}
+)
 _NULLABLE_FIELDS = frozenset({"parentFromTicket", "parentToTicket", "parentFromId", "parentToId"})
 _EVENT_KINDS = frozenset(
     {
@@ -62,6 +66,7 @@ _EVENT_KINDS = frozenset(
         "unlinked",
         "parented",
         "unparented",
+        "ticket_changed",
     }
 )
 

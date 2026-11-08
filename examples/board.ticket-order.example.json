@@ -1,0 +1,213 @@
+{
+  "schema": 6,
+  "revision": 0,
+  "project": "Synthetic ticket-order example",
+  "port": 8792,
+  "policy": {
+    "schema": 6,
+    "note": "Resolved once from board description and name-based permissions during initialization.",
+    "priorities": [
+      {
+        "id": "P1",
+        "label": "Urgent"
+      },
+      {
+        "id": "P2",
+        "label": "Normal"
+      },
+      {
+        "id": "P3",
+        "label": "Low"
+      }
+    ],
+    "lanes": [
+      {
+        "id": "backlog",
+        "label": "Backlog",
+        "create": [
+          "bot",
+          "terry"
+        ],
+        "note": "Someday work selected by the human.",
+        "reorderByDependencies": true
+      },
+      {
+        "id": "ready_for_work",
+        "label": "Ready For Work",
+        "create": [
+          "bot",
+          "terry"
+        ],
+        "note": "Selected work, ordered by priority."
+      },
+      {
+        "id": "in_progress",
+        "label": "In Progress",
+        "create": [],
+        "note": "Work being performed now."
+      },
+      {
+        "id": "ready_for_review",
+        "label": "Ready For Review",
+        "create": [],
+        "note": "Completed work awaiting human signoff."
+      },
+      {
+        "id": "completed",
+        "label": "Completed",
+        "create": [],
+        "note": "Signed-off terminal work."
+      }
+    ],
+    "edges": {
+      "terry": [
+        {
+          "from": "backlog",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "backlog",
+          "to": "in_progress"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "backlog"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "in_progress"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_review"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "in_progress"
+        },
+        {
+          "from": "ready_for_review",
+          "to": "completed"
+        }
+      ],
+      "bot": [
+        {
+          "from": "backlog",
+          "to": "ready_for_work",
+          "description": "Use only after the human explicitly selects the card."
+        },
+        {
+          "from": "ready_for_work",
+          "to": "backlog"
+        },
+        {
+          "from": "ready_for_work",
+          "to": "in_progress"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_work"
+        },
+        {
+          "from": "in_progress",
+          "to": "ready_for_review"
+        }
+      ]
+    },
+    "defaultPriority": "P2"
+  },
+  "users": [
+    {
+      "id": "terry",
+      "label": "Terry",
+      "class": "human",
+      "color": "#2266AA"
+    },
+    {
+      "id": "bot",
+      "label": "Bot",
+      "class": "bot",
+      "color": "#AA6622"
+    }
+  ],
+  "browserUser": "terry",
+  "cliUser": "bot",
+  "defaultOwner": "bot",
+  "nextTicket": 3,
+  "items": [
+    {
+      "id": "dependent",
+      "ticket": 2,
+      "priority": "P2",
+      "state": "backlog",
+      "subject": "Synthetic dependent",
+      "detail": "",
+      "owner": "bot",
+      "history": [
+        {
+          "at": "2026-11-08T12:00:00Z",
+          "to": "backlog",
+          "by": "bot"
+        }
+      ],
+      "originTicket": 1
+    },
+    {
+      "id": "prerequisite",
+      "ticket": 1,
+      "priority": "P2",
+      "state": "backlog",
+      "subject": "Synthetic prerequisite",
+      "detail": "",
+      "owner": "bot",
+      "history": [
+        {
+          "at": "2026-11-08T12:00:00Z",
+          "to": "backlog",
+          "by": "bot"
+        }
+      ],
+      "originTicket": 2
+    }
+  ],
+  "links": [
+    {
+      "from": "prerequisite",
+      "kind": "blocks",
+      "to": "dependent"
+    }
+  ],
+  "relationshipHistory": [
+    {
+      "at": "2026-11-08T12:00:01Z",
+      "by": "bot",
+      "action": "linked",
+      "from": "prerequisite",
+      "kind": "blocks",
+      "to": "dependent"
+    }
+  ],
+  "ticketHistory": [
+    {
+      "at": "2026-11-08T12:00:02Z",
+      "by": "bot",
+      "lane": "backlog",
+      "changes": [
+        {
+          "id": "prerequisite",
+          "from": 2,
+          "to": 1
+        },
+        {
+          "id": "dependent",
+          "from": 1,
+          "to": 2
+        }
+      ]
+    }
+  ]
+}
