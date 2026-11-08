@@ -1,0 +1,1629 @@
+{
+  "schema": 1,
+  "scope": "Investigation only; no production cache rollout",
+  "baseline_commit": "54f4b23183ebd0932eb12980dbad1f81b9d427b3",
+  "host": {
+    "physical_ram_bytes": 68374552576,
+    "logical_cpus": 20,
+    "installed_chrome": "157.0.8103.39",
+    "python": "3.15.2"
+  },
+  "harness_sha256": "786ce0946a60ed40b693691914545752361b522bf8327ba0dc312150eef191a2",
+  "probe_sha256": "c6605cfae1215d87fd129ffb5d1cc2f2ee4e4c52143a1b4f9eb927551e875dcc",
+  "browser_runs": [
+    {
+      "case": "baseline-2",
+      "cold_selections": 2,
+      "warm_samples": 20,
+      "readiness_proxy_ms": {
+        "median": 4289.699999988079,
+        "minimum": 3350.600000023842,
+        "maximum": 5108.5
+      },
+      "warm_get_starts_inside_readiness_windows": 40,
+      "phase_totals": {
+        "gets": 44,
+        "completedGets": 44,
+        "failedGets": 0,
+        "announcedBytes": 1039875716,
+        "completedBytes": 1039875716,
+        "bodyJsonMs": 5313.3999999165535,
+        "longTasks": 100,
+        "longTaskMs": 57683,
+        "maxLongTaskMs": 1174,
+        "peakReportedHeapBytes": 628338333,
+        "inFlightGets": 0,
+        "maxInFlightGets": 1
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 3,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 4634.900000035763,
+          "appReadyMs": 2575.100000023842,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 4,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4029.699999988079,
+          "appReadyMs": 2306.699999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 5,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 4447,
+          "appReadyMs": 2715.699999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 6,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 3976.899999976158,
+          "appReadyMs": 2342.199999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 4645.100000023842,
+          "appReadyMs": 2792.899999976158,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4313.700000047684,
+          "appReadyMs": 2468.2000000476837,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 9,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 3886.7999999523163,
+          "appReadyMs": 2621.899999976158,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 10,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4293.399999976158,
+          "appReadyMs": 2403.100000023842,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 11,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 5108.5,
+          "appReadyMs": 3227.5,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 12,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4376.800000011921,
+          "appReadyMs": 2604.699999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 13,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 4409,
+          "appReadyMs": 2698.800000011921,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 14,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4159.5,
+          "appReadyMs": 2344.699999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 15,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 4605.900000035763,
+          "appReadyMs": 2685.400000035763,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 16,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 3350.600000023842,
+          "appReadyMs": 2490,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 17,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 3664.800000011921,
+          "appReadyMs": 1535,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 18,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4100.100000023842,
+          "appReadyMs": 2360.900000035763,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 19,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 4499.199999988079,
+          "appReadyMs": 2663.399999976158,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 20,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4261.100000023842,
+          "appReadyMs": 2356.7000000476837,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 21,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 3978.5,
+          "appReadyMs": 2179.199999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 22,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 4286,
+          "appReadyMs": 2516.199999988079,
+          "getsDuring": 2
+        }
+      ],
+      "raw_sha256": "3f724e635a55e93e03fc63b7cee2e45ce7a83a8eea0370f5ffe29607bd5ccd03",
+      "warmup_get_starts": 4,
+      "warm_phase_get_starts_including_tails": 40,
+      "warm_phase_completed_payload_bytes_including_tails": 945341560
+    },
+    {
+      "case": "baseline-3",
+      "cold_selections": 3,
+      "warm_samples": 20,
+      "readiness_proxy_ms": {
+        "median": 1541.9000000059605,
+        "minimum": 1393.4000000357628,
+        "maximum": 2018.3999999761581
+      },
+      "warm_get_starts_inside_readiness_windows": 40,
+      "phase_totals": {
+        "gets": 46,
+        "completedGets": 46,
+        "failedGets": 0,
+        "announcedBytes": 1087142794,
+        "completedBytes": 1087142794,
+        "bodyJsonMs": 2070.600000202656,
+        "longTasks": 77,
+        "longTaskMs": 16990,
+        "maxLongTaskMs": 891,
+        "peakReportedHeapBytes": 700652572,
+        "inFlightGets": 0,
+        "maxInFlightGets": 1
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 4,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1404.1000000238419,
+          "appReadyMs": 1344,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 5,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1421.800000011921,
+          "appReadyMs": 1378.1000000238419,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 6,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1393.4000000357628,
+          "appReadyMs": 1338.1000000238419,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1486.0999999642372,
+          "appReadyMs": 1430.8999999761581,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1577.2999999523163,
+          "appReadyMs": 1524.8999999761581,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 9,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1927.9000000357628,
+          "appReadyMs": 1867.6000000238419,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 10,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1527.1000000238419,
+          "appReadyMs": 1470.199999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 11,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1625.9000000357628,
+          "appReadyMs": 1569.7000000476837,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 12,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1646.300000011921,
+          "appReadyMs": 1588.300000011921,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 13,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1702.300000011921,
+          "appReadyMs": 1646.9000000357628,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 14,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1424.300000011921,
+          "appReadyMs": 1373.3999999761581,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 15,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1409.1000000238419,
+          "appReadyMs": 1363.6000000238419,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 16,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1630.699999988079,
+          "appReadyMs": 1569,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 17,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1556.699999988079,
+          "appReadyMs": 1494.3999999761581,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 18,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1456.300000011921,
+          "appReadyMs": 1411.4000000357628,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 19,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1427.5,
+          "appReadyMs": 1374.300000011921,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 20,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1795.300000011921,
+          "appReadyMs": 1740.199999988079,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 21,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1469.9000000357628,
+          "appReadyMs": 1413.5,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 22,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2018.3999999761581,
+          "appReadyMs": 1941.8999999761581,
+          "getsDuring": 2
+        },
+        {
+          "sequence": 23,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1585,
+          "appReadyMs": 1523.7000000476837,
+          "getsDuring": 2
+        }
+      ],
+      "raw_sha256": "288010f6391280a5229d0118c4b2f331a122fcb93ec068dae9dfc4e159803854",
+      "warmup_get_starts": 6,
+      "warm_phase_get_starts_including_tails": 40,
+      "warm_phase_completed_payload_bytes_including_tails": 945341560
+    },
+    {
+      "case": "selected-2",
+      "cold_selections": 2,
+      "warm_samples": 20,
+      "readiness_proxy_ms": {
+        "median": 2262.7499999701977,
+        "minimum": 2142.699999988079,
+        "maximum": 2459.199999988079
+      },
+      "warm_get_starts_inside_readiness_windows": 20,
+      "phase_totals": {
+        "gets": 24,
+        "completedGets": 24,
+        "failedGets": 0,
+        "announcedBytes": 567204936,
+        "completedBytes": 567204936,
+        "bodyJsonMs": 2102.2000000476837,
+        "longTasks": 54,
+        "longTaskMs": 27048,
+        "maxLongTaskMs": 933,
+        "peakReportedHeapBytes": 1034033163,
+        "inFlightGets": 0,
+        "maxInFlightGets": 1
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 3,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2459.199999988079,
+          "appReadyMs": 2382.099999964237,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 4,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2298.399999976158,
+          "appReadyMs": 2230.300000011921,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 5,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2403.399999976158,
+          "appReadyMs": 2306.099999964237,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 6,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2292.5,
+          "appReadyMs": 2210.900000035763,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2209.5,
+          "appReadyMs": 2120.199999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2142.699999988079,
+          "appReadyMs": 2059.399999976158,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 9,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2270.2999999523163,
+          "appReadyMs": 2184.099999964237,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 10,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2242.900000035763,
+          "appReadyMs": 2171.400000035763,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 11,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2345.699999988079,
+          "appReadyMs": 2265.600000023842,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 12,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2234.7999999523163,
+          "appReadyMs": 2178.2999999523163,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 13,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2218.900000035763,
+          "appReadyMs": 2154.800000011921,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 14,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2357.699999988079,
+          "appReadyMs": 2248.199999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 15,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2255.199999988079,
+          "appReadyMs": 2192.699999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 16,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2403,
+          "appReadyMs": 2314.699999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 17,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2242.599999964237,
+          "appReadyMs": 2174.5,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 18,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2313,
+          "appReadyMs": 2217.199999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 19,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2171.699999988079,
+          "appReadyMs": 2112.899999976158,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 20,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2325.7999999523163,
+          "appReadyMs": 2252.399999976158,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 21,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2166.800000011921,
+          "appReadyMs": 2074.400000035763,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 22,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2171.099999964237,
+          "appReadyMs": 2109.699999988079,
+          "getsDuring": 1
+        }
+      ],
+      "raw_sha256": "e7cbfdf4fbc08f8ef021974ff86d60f96113c521c5bd34bcad4704e7f85bab24",
+      "warmup_get_starts": 4,
+      "warm_phase_get_starts_including_tails": 20,
+      "warm_phase_completed_payload_bytes_including_tails": 472670780
+    },
+    {
+      "case": "selected-3",
+      "cold_selections": 3,
+      "warm_samples": 20,
+      "readiness_proxy_ms": {
+        "median": 2417.649999976158,
+        "minimum": 2234.100000023842,
+        "maximum": 2658.899999976158
+      },
+      "warm_get_starts_inside_readiness_windows": 20,
+      "phase_totals": {
+        "gets": 23,
+        "completedGets": 23,
+        "failedGets": 0,
+        "announcedBytes": 543571397,
+        "completedBytes": 543571397,
+        "bodyJsonMs": 1910.5999999642372,
+        "longTasks": 49,
+        "longTaskMs": 25532,
+        "maxLongTaskMs": 1139,
+        "peakReportedHeapBytes": 819074580,
+        "inFlightGets": 0,
+        "maxInFlightGets": 1
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 4,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2568.199999988079,
+          "appReadyMs": 2459.599999964237,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 5,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2544.399999976158,
+          "appReadyMs": 2479.099999964237,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 6,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 2618.399999976158,
+          "appReadyMs": 2552.599999964237,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2355.099999964237,
+          "appReadyMs": 2293.199999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2344.199999988079,
+          "appReadyMs": 2288.5,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 9,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 2333.699999988079,
+          "appReadyMs": 2250.099999964237,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 10,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2311.600000023842,
+          "appReadyMs": 2231.300000011921,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 11,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2279.399999976158,
+          "appReadyMs": 2186.699999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 12,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 2375,
+          "appReadyMs": 2297.300000011921,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 13,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2263.100000023842,
+          "appReadyMs": 2202.7000000476837,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 14,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2234.100000023842,
+          "appReadyMs": 2177.300000011921,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 15,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 2485.400000035763,
+          "appReadyMs": 2429.100000023842,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 16,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2486.7000000476837,
+          "appReadyMs": 2428.7000000476837,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 17,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2658.899999976158,
+          "appReadyMs": 2610.199999988079,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 18,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 2481,
+          "appReadyMs": 2393.7000000476837,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 19,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2549.5,
+          "appReadyMs": 2473.800000011921,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 20,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2319.900000035763,
+          "appReadyMs": 2264.900000035763,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 21,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 2392.699999988079,
+          "appReadyMs": 2327.5,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 22,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 2463.7999999523163,
+          "appReadyMs": 2387.7999999523163,
+          "getsDuring": 1
+        },
+        {
+          "sequence": 23,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 2442.599999964237,
+          "appReadyMs": 2356.599999964237,
+          "getsDuring": 1
+        }
+      ],
+      "raw_sha256": "7e372950a7b27ad06ca0295f6d1405f37867f21c2d3621d26ce4cdb5b3e71add",
+      "warmup_get_starts": 3,
+      "warm_phase_get_starts_including_tails": 20,
+      "warm_phase_completed_payload_bytes_including_tails": 472670780
+    },
+    {
+      "case": "live-2",
+      "cold_selections": 2,
+      "warm_samples": 20,
+      "readiness_proxy_ms": {
+        "median": 543.9499999880791,
+        "minimum": 469.60000002384186,
+        "maximum": 686.8999999761581
+      },
+      "warm_get_starts_inside_readiness_windows": 0,
+      "phase_totals": {
+        "gets": 5,
+        "completedGets": 5,
+        "failedGets": 0,
+        "announcedBytes": 118167695,
+        "completedBytes": 118167695,
+        "bodyJsonMs": 471.2999999523163,
+        "longTasks": 30,
+        "longTaskMs": 14765,
+        "maxLongTaskMs": 1027,
+        "peakReportedHeapBytes": 536163911,
+        "inFlightGets": 0,
+        "maxInFlightGets": 2
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 3,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 469.60000002384186,
+          "appReadyMs": 416.19999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 4,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 554,
+          "appReadyMs": 497.19999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 5,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 686.8999999761581,
+          "appReadyMs": 628.1999999880791,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 6,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 545.5,
+          "appReadyMs": 492.19999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 521.8000000119209,
+          "appReadyMs": 466.9000000357628,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 571.5,
+          "appReadyMs": 519.3999999761581,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 9,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 496,
+          "appReadyMs": 440,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 10,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 520.3999999761581,
+          "appReadyMs": 456,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 11,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 618.5999999642372,
+          "appReadyMs": 558.5999999642372,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 12,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 528.9000000357628,
+          "appReadyMs": 472.30000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 13,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 585.1000000238419,
+          "appReadyMs": 526.1999999880791,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 14,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 640.5999999642372,
+          "appReadyMs": 583.8999999761581,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 15,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 533,
+          "appReadyMs": 480,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 16,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 543.8000000119209,
+          "appReadyMs": 472.7000000476837,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 17,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 512.8999999761581,
+          "appReadyMs": 449.5,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 18,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 499.30000001192093,
+          "appReadyMs": 465.30000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 19,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 544.0999999642372,
+          "appReadyMs": 494.69999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 20,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 589.8000000119209,
+          "appReadyMs": 541.5,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 21,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 539.5,
+          "appReadyMs": 484.89999997615814,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 22,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 590.5,
+          "appReadyMs": 533.5,
+          "getsDuring": 0
+        }
+      ],
+      "raw_sha256": "99501c8a1951d744a501ab4afade1c9ce481e7aa67fed6feb3030849690882b6",
+      "warmup_get_starts": 5,
+      "warm_phase_get_starts_including_tails": 0,
+      "warm_phase_completed_payload_bytes_including_tails": 0
+    },
+    {
+      "case": "live-3",
+      "cold_selections": 3,
+      "warm_samples": 20,
+      "readiness_proxy_ms": {
+        "median": 183.75,
+        "minimum": 165.39999997615814,
+        "maximum": 260.69999998807907
+      },
+      "warm_get_starts_inside_readiness_windows": 0,
+      "phase_totals": {
+        "gets": 9,
+        "completedGets": 9,
+        "failedGets": 0,
+        "announcedBytes": 212701851,
+        "completedBytes": 212701851,
+        "bodyJsonMs": 769.1000000238419,
+        "longTasks": 31,
+        "longTaskMs": 6621,
+        "maxLongTaskMs": 997,
+        "peakReportedHeapBytes": 720744414,
+        "inFlightGets": 0,
+        "maxInFlightGets": 3
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 4,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 175.60000002384186,
+          "appReadyMs": 156.60000002384186,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 5,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 188.19999998807907,
+          "appReadyMs": 166.5,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 6,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 180.5,
+          "appReadyMs": 162.29999995231628,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 227.89999997615814,
+          "appReadyMs": 205.80000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 177.19999998807907,
+          "appReadyMs": 162.10000002384186,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 9,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 178.39999997615814,
+          "appReadyMs": 161.39999997615814,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 10,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 181.5,
+          "appReadyMs": 163.4000000357628,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 11,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 208,
+          "appReadyMs": 191.80000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 12,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 199.69999998807907,
+          "appReadyMs": 179.19999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 13,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 173.5,
+          "appReadyMs": 157.0999999642372,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 14,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 173.4000000357628,
+          "appReadyMs": 156.5,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 15,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 203.19999998807907,
+          "appReadyMs": 188.89999997615814,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 16,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 186,
+          "appReadyMs": 170.4000000357628,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 17,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 165.39999997615814,
+          "appReadyMs": 150,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 18,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 177.4000000357628,
+          "appReadyMs": 160.9000000357628,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 19,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 224.5999999642372,
+          "appReadyMs": 207.5999999642372,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 20,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 246.80000001192093,
+          "appReadyMs": 219.30000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 21,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 245.5,
+          "appReadyMs": 226.80000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 22,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 260.69999998807907,
+          "appReadyMs": 238.30000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 23,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 170.19999998807907,
+          "appReadyMs": 156.5,
+          "getsDuring": 0
+        }
+      ],
+      "raw_sha256": "c683fd9ecdf693b46ddd367b6a7054cc9698cd8214bf26d3c23a4e012f552c93",
+      "warmup_get_starts": 9,
+      "warm_phase_get_starts_including_tails": 0,
+      "warm_phase_completed_payload_bytes_including_tails": 0
+    },
+    {
+      "case": "detail-3-96",
+      "cold_selections": 3,
+      "warm_samples": 6,
+      "readiness_proxy_ms": {
+        "median": 1974.0499999821186,
+        "minimum": 1902.6000000238419,
+        "maximum": 1985.1000000238419
+      },
+      "warm_get_starts_inside_readiness_windows": 24,
+      "phase_totals": {
+        "gets": 47,
+        "completedGets": 40,
+        "failedGets": 7,
+        "announcedBytes": 1677907160,
+        "completedBytes": 1677907160,
+        "bodyJsonMs": 7252.099999964237,
+        "longTasks": 83,
+        "longTaskMs": 33955,
+        "maxLongTaskMs": 1172,
+        "peakReportedHeapBytes": 1102232277,
+        "inFlightGets": 0,
+        "maxInFlightGets": 3
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 4,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1985.1000000238419,
+          "appReadyMs": 1945,
+          "getsDuring": 4
+        },
+        {
+          "sequence": 5,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1977.8999999761581,
+          "appReadyMs": 1946.800000011921,
+          "getsDuring": 4
+        },
+        {
+          "sequence": 6,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1972.0999999642372,
+          "appReadyMs": 1933.7999999523163,
+          "getsDuring": 4
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 1906,
+          "appReadyMs": 1850.8999999761581,
+          "getsDuring": 4
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 1976,
+          "appReadyMs": 1936.5,
+          "getsDuring": 4
+        },
+        {
+          "sequence": 9,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 1902.6000000238419,
+          "appReadyMs": 1877.300000011921,
+          "getsDuring": 4
+        }
+      ],
+      "raw_sha256": "2f99eb85d32907d50e6e6b282071476661ae54daf8fbe95951851b35e5fe4d5a",
+      "warmup_get_starts": 11,
+      "warm_phase_get_starts_including_tails": 36,
+      "warm_phase_completed_payload_bytes_including_tails": 1258430370
+    },
+    {
+      "case": "detail-3-256",
+      "cold_selections": 3,
+      "warm_samples": 20,
+      "readiness_proxy_ms": {
+        "median": 279.90000000596046,
+        "minimum": 210.19999998807907,
+        "maximum": 487.5
+      },
+      "warm_get_starts_inside_readiness_windows": 0,
+      "phase_totals": {
+        "gets": 9,
+        "completedGets": 9,
+        "failedGets": 0,
+        "announcedBytes": 377529111,
+        "completedBytes": 377529111,
+        "bodyJsonMs": 2280.099999964237,
+        "longTasks": 39,
+        "longTaskMs": 13158,
+        "maxLongTaskMs": 1148,
+        "peakReportedHeapBytes": 1187697301,
+        "inFlightGets": 0,
+        "maxInFlightGets": 3
+      },
+      "warm_samples_reduced": [
+        {
+          "sequence": 4,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 210.19999998807907,
+          "appReadyMs": 179.30000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 5,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 311,
+          "appReadyMs": 290.80000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 6,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 286,
+          "appReadyMs": 257.69999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 7,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 301.30000001192093,
+          "appReadyMs": 271.10000002384186,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 8,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 264,
+          "appReadyMs": 246.19999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 9,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 293,
+          "appReadyMs": 272.2000000476837,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 10,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 302.5999999642372,
+          "appReadyMs": 274.19999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 11,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 260.7000000476837,
+          "appReadyMs": 234,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 12,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 288,
+          "appReadyMs": 274.2999999523163,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 13,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 487.5,
+          "appReadyMs": 464.30000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 14,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 243.30000001192093,
+          "appReadyMs": 223.9000000357628,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 15,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 277.19999998807907,
+          "appReadyMs": 250.89999997615814,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 16,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 244.39999997615814,
+          "appReadyMs": 214.10000002384186,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 17,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 212,
+          "appReadyMs": 192.80000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 18,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 210.89999997615814,
+          "appReadyMs": 182.5999999642372,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 19,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 262,
+          "appReadyMs": 246.5999999642372,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 20,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 284.80000001192093,
+          "appReadyMs": 249.69999998807907,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 21,
+          "key": "hot-2",
+          "revision": 0,
+          "presentedReadyMs": 253.20000004768372,
+          "appReadyMs": 229.30000001192093,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 22,
+          "key": "hot-0",
+          "revision": 0,
+          "presentedReadyMs": 282.60000002384186,
+          "appReadyMs": 257,
+          "getsDuring": 0
+        },
+        {
+          "sequence": 23,
+          "key": "hot-1",
+          "revision": 0,
+          "presentedReadyMs": 454.0999999642372,
+          "appReadyMs": 427.80000001192093,
+          "getsDuring": 0
+        }
+      ],
+      "raw_sha256": "10bfe897951e8337c8455b812fcc989169c95a521ae51d670dd5c5e96ff67859",
+      "warmup_get_starts": 9,
+      "warm_phase_get_starts_including_tails": 0,
+      "warm_phase_completed_payload_bytes_including_tails": 0
+    }
+  ],
+  "backend_phases": [
+    {
+      "total_boards": 2,
+      "subscribed_boards": 1,
+      "phase": "selected-idle",
+      "interval_seconds": 45.09246479999274,
+      "confirmed_writes": 0,
+      "write_median_seconds": null,
+      "write_max_seconds": null,
+      "cpu_seconds": 1.015625,
+      "ending_total_rss_bytes": 217804800,
+      "approximate_health_logical_mib_per_second": 4.214242983870868,
+      "approximate_catalog_logical_mib_per_second": 3.7459937634407714
+    },
+    {
+      "total_boards": 2,
+      "subscribed_boards": 2,
+      "phase": "retained-idle",
+      "interval_seconds": 45.079475600039586,
+      "confirmed_writes": 0,
+      "write_median_seconds": null,
+      "write_max_seconds": null,
+      "cpu_seconds": 1.03125,
+      "ending_total_rss_bytes": 223797248,
+      "approximate_health_logical_mib_per_second": 8.430914551661138,
+      "approximate_catalog_logical_mib_per_second": 3.747073134071617
+    },
+    {
+      "total_boards": 2,
+      "subscribed_boards": 2,
+      "phase": "retained-churn",
+      "interval_seconds": 20.13800010003615,
+      "confirmed_writes": 16,
+      "write_median_seconds": 0.3782721499737818,
+      "write_max_seconds": 0.40628280001692474,
+      "cpu_seconds": 4.859375,
+      "ending_total_rss_bytes": 235921408,
+      "approximate_health_logical_mib_per_second": 30.406983008838104,
+      "approximate_catalog_logical_mib_per_second": 8.388199301867305
+    },
+    {
+      "total_boards": 3,
+      "subscribed_boards": 1,
+      "phase": "selected-idle",
+      "interval_seconds": 45.13716959999874,
+      "confirmed_writes": 0,
+      "write_median_seconds": null,
+      "write_max_seconds": null,
+      "cpu_seconds": 1.296875,
+      "ending_total_rss_bytes": 303874048,
+      "approximate_health_logical_mib_per_second": 3.742283652605236,
+      "approximate_catalog_logical_mib_per_second": 5.613425478907854
+    },
+    {
+      "total_boards": 3,
+      "subscribed_boards": 3,
+      "phase": "retained-idle",
+      "interval_seconds": 45.083464100025594,
+      "confirmed_writes": 0,
+      "write_median_seconds": null,
+      "write_max_seconds": null,
+      "cpu_seconds": 1.71875,
+      "ending_total_rss_bytes": 314732544,
+      "approximate_health_logical_mib_per_second": 12.645253012536736,
+      "approximate_catalog_logical_mib_per_second": 5.620112450016327
+    },
+    {
+      "total_boards": 3,
+      "subscribed_boards": 3,
+      "phase": "retained-churn",
+      "interval_seconds": 21.42218180000782,
+      "confirmed_writes": 21,
+      "write_median_seconds": 0.39016309997532517,
+      "write_max_seconds": 0.7360531999729574,
+      "cpu_seconds": 8.453125,
+      "ending_total_rss_bytes": 362561536,
+      "approximate_health_logical_mib_per_second": 42.383425038309106,
+      "approximate_catalog_logical_mib_per_second": 11.827954266733606
+    }
+  ],
+  "browser_churn": {
+    "seconds": 35.06512510002358,
+    "confirmed_writes": 33,
+    "write_median_seconds": 0.45722060004482046,
+    "write_max_seconds": 0.5991401000064798,
+    "additional_completed_snapshot_gets": 33,
+    "additional_completed_payload_bytes": 779926131,
+    "final_views": [
+      {
+        "key": "hot-0",
+        "revision": 11,
+        "presentedReadyMs": 292.10000002384186,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-2",
+        "revision": 11,
+        "presentedReadyMs": 254,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-1",
+        "revision": 11,
+        "presentedReadyMs": 239.89999997615814,
+        "getsDuring": 0
+      }
+    ],
+    "navigation_samples_during_and_after_churn": [
+      {
+        "key": "hot-0",
+        "revision": 4,
+        "presentedReadyMs": 254.60000002384186,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-2",
+        "revision": 5,
+        "presentedReadyMs": 272.69999998807907,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-1",
+        "revision": 6,
+        "presentedReadyMs": 250.29999995231628,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-0",
+        "revision": 7,
+        "presentedReadyMs": 243.19999998807907,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-2",
+        "revision": 8,
+        "presentedReadyMs": 260,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-1",
+        "revision": 9,
+        "presentedReadyMs": 263.69999998807907,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-0",
+        "revision": 10,
+        "presentedReadyMs": 217.39999997615814,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-2",
+        "revision": 11,
+        "presentedReadyMs": 224.10000002384186,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-1",
+        "revision": 11,
+        "presentedReadyMs": 197.5,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-0",
+        "revision": 11,
+        "presentedReadyMs": 292.10000002384186,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-2",
+        "revision": 11,
+        "presentedReadyMs": 254,
+        "getsDuring": 0
+      },
+      {
+        "key": "hot-1",
+        "revision": 11,
+        "presentedReadyMs": 239.89999997615814,
+        "getsDuring": 0
+      }
+    ]
+  },
+  "limitations": [
+    "Logical application reads, not physical disk I/O",
+    "Raw interval counters update every second and have up to one second endpoint uncertainty",
+    "Tail captures follow two seconds with no new harness operations; closed streams may finish existing work",
+    "Successful writer response inventory, not periodic counters, establishes exact churn count",
+    "Warm GETs excluded from internal raw interval; external pre/tail captures include warmup",
+    "Each churn write first requests live status revision, adding health reads and latency",
+    "All N sole writers are prestarted, even during selected-only phase",
+    "CPU/RSS include counter and one-second private metric flush overhead",
+    "Old baseline-* runs are exploratory and superseded",
+    "Readiness proxy is not completed-render proof",
+    "Active workstation, sequential runs; repository verification also overlapped later browser runs",
+    "Sampled JS heap and endpoint working sets are not peak total RAM",
+    "Warm GET starts inside readiness windows omit trailing requests; phase totals after drain are authoritative",
+    "Early backend runs superseded; ten boards not exercised"
+  ]
+}
