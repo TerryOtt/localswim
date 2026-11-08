@@ -3208,7 +3208,7 @@ move any card whoever owns it. Click to hand it over."></button>
       <h3>Attachments</h3>
       <button id="p-upload" type="button">Upload attachment</button>
       <input id="p-upload-file" type="file" hidden aria-label="Attachment file">
-      <div class="keyhint">Maximum 10 MiB per file.</div>
+      <div class="keyhint">Upload a file or paste a screen clip (Ctrl+V) anywhere in this card. Maximum 10 MiB per file.</div>
       <div id="p-attachments"></div>
       <h3 id="p-rel-h">Relationships
         <button class="rel-add" id="p-rel-add" type="button"
@@ -3272,7 +3272,7 @@ move any card whoever owns it. Click to hand it over."></button>
       <div class="field">
         <label for="mk-files">Attachments</label>
         <input id="mk-files" type="file" multiple>
-        <div class="hint">Files upload after the card is created, up to 10 MiB each. Keep this page open until uploads finish.</div>
+        <div class="hint">Choose files or paste a screen clip (Ctrl+V) anywhere in this form. Files upload after the card is created, up to 10 MiB each. Keep this page open until uploads finish.</div>
         <div id="mk-file-status" role="status"></div>
       </div>
       <div class="field">
@@ -4232,28 +4232,60 @@ function fileBase64(file) {
   });
 }
 
-document.getElementById('p-upload').addEventListener('click', () => {
-  if (openId) document.getElementById('p-upload-file').click();
-});
-document.getElementById('p-upload-file').addEventListener('change', async (ev) => {
-  const source = openId;
-  const cardVersion = itemById(source)?.cardVersion;
-  const epoch = window.workspaceEpoch;
-  const file = ev.target.files[0];
+// Clipboard access is limited to a user paste event; prose keeps its native paste.
+function clipboardImages(event) {
+  const clipboard = event.clipboardData;
+  if (!clipboard || event.defaultPrevented || ['text/plain','text/html'].some(type => clipboard.getData(type))) return [];
+  return Array.from(clipboard.items || []).filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .map(item => item.getAsFile()).filter(Boolean);
+}
+function clipboardName(file) {
+  const suffix = {'image/png':'png','image/jpeg':'jpg','image/gif':'gif','image/webp':'webp'}[file.type];
+  return 'screen-clip-' + crypto.randomUUID() + '.' + (suffix || 'bin');
+}
+function attachmentInputReady(source) {
+  return workspaceCanMutate() && !!itemById(source) && !document.getElementById('p-upload').disabled
+    && !localActions.some(action => action.prefix === API_PREFIX && action.cardId === source && action.phase !== 'dismissed');
+}
+async function uploadCardFiles(files) {
+  const source = openId, prefix = API_PREFIX, epoch = window.workspaceEpoch;
+  if (!attachmentInputReady(source)) { toast('Wait for the board and pending saves before attaching files.',true); return; }
   const upload = document.getElementById('p-upload');
-  if (!source || !file) return;
-  const limit = data.attachmentMaxBytes || 10485760;
-  if (file.size > limit) {
-    attachmentRefusal(file.name + ' is too large. The maximum is 10 MiB per file for Git storage.');
-    ev.target.value = ''; return;
-  }
+  const current = () => epoch === window.workspaceEpoch && prefix === API_PREFIX && openId === source;
+  let version = itemById(source).cardVersion;
   upload.disabled = true;
   try {
-    const bytes = await fileBase64(file);
-    if (epoch !== window.workspaceEpoch) return;
-    await attachmentCommand(source, 'attachment', {name: file.name, data: bytes}, cardVersion);
-  } catch (err) { attachmentRefusal(String(err)); }
-  finally { upload.disabled = false; ev.target.value = ''; }
+    for (const [index,file] of files.entries()) {
+      if (!current() || !workspaceCanMutate()) return;
+      if (file.size > (data.attachmentMaxBytes || 10485760)) {
+        attachmentRefusal(file.name + ' is too large. The maximum is 10 MiB per file for Git storage.'); return;
+      }
+      const bytes = await fileBase64(file);
+      if (!current() || !workspaceCanMutate()) return;
+      if (!await attachmentCommand(source, 'attachment', {name:file.name,data:bytes}, version)) return;
+      if (!current() || index === files.length - 1) return;
+      const latest = await apiGet(prefix + '/board');
+      if (!current() || !acknowledgeSnapshot(latest,prefix)) return;
+      version = snapshotItem(latest,source)?.cardVersion;
+      if (!version) return;
+    }
+  } catch (err) { if (current()) attachmentRefusal(String(err)); }
+  finally { upload.disabled = false; }
+}
+document.getElementById('p-upload').addEventListener('click', () => {
+  if (attachmentInputReady(openId)) document.getElementById('p-upload-file').click();
+});
+document.getElementById('p-upload-file').addEventListener('change', async (ev) => {
+  const files = Array.from(ev.target.files || []);
+  try { if (files.length) await uploadCardFiles(files); }
+  finally { ev.target.value = ''; }
+});
+document.getElementById('panel').addEventListener('paste', event => {
+  if (!openId || mkOpen) return;
+  const images = clipboardImages(event);
+  if (!images.length) return;
+  event.preventDefault();
+  void uploadCardFiles(images.map(file => new File([file],clipboardName(file),{type:file.type})));
 });
 
 // ---- the detail panel ----------------------------------------------------
@@ -4904,7 +4936,7 @@ function renderMakeFiles() {
     row.textContent = entry.name + ' — ' + (entry.status === 'saved' ? 'Uploaded'
       : entry.status === 'uploading' ? 'Uploading'
       : entry.status === 'unknown' ? 'Outcome unconfirmed; inspect saved attachments before any new upload'
-      : !entry.file ? 'Reselect this file to continue' : entry.status === 'refused' ? 'Not uploaded; retry available' : 'Pending');
+      : !entry.file ? entry.source === 'clipboard' ? 'Paste the original screen clip again to continue' : 'Reselect this file to continue' : entry.status === 'refused' ? 'Not uploaded; retry available' : 'Pending');
     if (!mkAttempt) {
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
       remove.addEventListener('click',() => {
@@ -4922,18 +4954,31 @@ function restoreMakeFiles(entries) {
   for (const entry of mkFiles) if (entry.status === 'uploading') entry.status = 'unknown';
   renderMakeFiles();
 }
-document.getElementById('mk-files').addEventListener('change', ev => {
-  if (mkBusy) return;
-  for (const file of ev.target.files) {
-    const missing = mkFiles.find(entry => !entry.file && entry.status !== 'saved'
-      && entry.name === file.name && entry.size === file.size && entry.modified === file.lastModified);
+function selectMakeFiles(files, source) {
+  if (mkBusy || !workspaceCanMutate()) return;
+  for (const file of files) {
+    const candidates = mkFiles.filter(entry => !entry.file && !['saved','unknown'].includes(entry.status)
+      && (source === 'clipboard' ? entry.source === source && entry.size === file.size && entry.type === file.type
+        : entry.name === file.name && entry.size === file.size && entry.modified === file.lastModified));
+    const missing = candidates.length === 1 ? candidates[0] : null;
     if (missing) Object.defineProperty(missing,'file',{value:file,writable:true,configurable:true});
-    else if (!mkAttempt) {
-      const entry = {name:file.name,size:file.size,modified:file.lastModified,status:'pending'};
+    else if (!mkAttempt && !candidates.length) {
+      const entry = {name:source === 'clipboard' ? clipboardName(file) : file.name,
+        size:file.size,modified:file.lastModified,status:'pending',source,type:file.type};
       Object.defineProperty(entry,'file',{value:file,writable:true,configurable:true}); mkFiles.push(entry);
-    } else toast('Reselect a pending file with its original name, size and modification date.',true);
+    } else toast(source === 'clipboard' ? 'Paste one original pending screen clip with matching size and type. Unconfirmed uploads cannot be repeated.'
+      : 'Reselect a pending file with its original name, size and modification date.',true);
   }
-  ev.target.value = ''; renderMakeFiles(); captureMakeFiles();
+  renderMakeFiles(); captureMakeFiles();
+}
+document.getElementById('mk-files').addEventListener('change', ev => {
+  selectMakeFiles(ev.target.files, 'file'); ev.target.value = '';
+});
+document.getElementById('mk').addEventListener('paste', event => {
+  if (!mkOpen) return;
+  const images = clipboardImages(event);
+  if (!images.length) return;
+  event.preventDefault(); selectMakeFiles(images,'clipboard');
 });
 
 async function uploadMakeFiles(attempt, prefix, epoch) {

@@ -19,7 +19,7 @@ el('mk-subject').value='New';el('mk-detail').value='Draft';el('mk-priority').val
 let board={revision:1,browserUser:'human',lanes:[{state:'backlog',items:[]}]},fail=true,closed=0;
 const ctx=vm.createContext({crypto:require('crypto').webcrypto,Uint8Array,
  document:{getElementById:el,createElement:node},window:{workspaceEpoch:1},API_PREFIX:'/one',
- data:board,authoritativeData:board,localActions:[],
+ data:board,authoritativeData:board,localActions:[],workspaceCanMutate:()=>true,
  toast(text){notices.push(text)},relationshipSpecs:()=>[],acceptRevision(){},
  snapshotItem:(b,id)=>b.lanes.flatMap(l=>l.items).find(c=>c.id===id),
  acknowledgeSnapshot(b){ctx.authoritativeData=b;return true},forgetAction(action){ctx.localActions.splice(ctx.localActions.indexOf(action),1)},
@@ -44,6 +44,8 @@ const ctx=vm.createContext({crypto:require('crypto').webcrypto,Uint8Array,
  return {ok:true,status:200,json:async()=>({revision:board.revision})};
  }});
 const start=input.page.indexOf('let mkOpen ='),end=input.page.indexOf('// ---- the board ',start);
+const clipStart=input.page.indexOf('function clipboardImages(');
+vm.runInContext(input.page.slice(clipStart,input.page.indexOf('function attachmentInputReady(',clipStart)),ctx);
 vm.runInContext(input.page.slice(start,end),ctx);
 const confirmStart=input.page.indexOf('function confirmAddIntent(');
 vm.runInContext(input.page.slice(confirmStart,input.page.indexOf('// Dismissal',confirmStart)),ctx);
@@ -51,9 +53,14 @@ const run=code=>vm.runInContext(code,ctx);
 // Keep real cancellation elsewhere; count only successful close in this harness.
 ctx.closed=()=>closed++;run('closeMake = () => closed()');
 run("mkOpen='backlog'");
-function file(name,size=1){return {name,size,lastModified:1,arrayBuffer:async()=>Uint8Array.from([1]).buffer}}
+function file(name,size=1){return {name,size,type:input.clipboard?'image/png':'text/plain',lastModified:1,arrayBuffer:async()=>Uint8Array.from([1]).buffer}}
+function select(files){
+ if(input.clipboard)el('mk').paste({clipboardData:{getData:()=>'',items:files.map(f=>({kind:'file',type:f.type,getAsFile:()=>f}))},preventDefault(){}});
+ else el('mk-files').change({target:{files,value:''}});
+}
 const selected=[file('first.txt'),file('second.txt')];if(input.mode==='oversize')selected[1].size=10485761;
-el('mk-files').change({target:{files:selected,value:''}});
+select(selected);
+if(input.clipboard){assert.match(run('mkFiles[0].name'),/^screen-clip-.*\.png$/);assert.notEqual(run('mkFiles[0].name'),run('mkFiles[1].name'))}
 (async()=>{
  await run('submitMake()');
  if(input.mode==='oversize'){assert.equal(calls.length,0);assert.equal(run('mkFiles.length'),2);return}
@@ -75,10 +82,10 @@ el('mk-files').change({target:{files:selected,value:''}});
  if(input.mode==='wrongfile'){
   run('mkFiles[1].file=null');
   const wrong=file('second.txt');wrong.arrayBuffer=async()=>Uint8Array.from([2]).buffer;
-  el('mk-files').change({target:{files:[wrong],value:''}});
+  select([wrong]);
   await run('submitMake()');assert.equal(calls.length,before);
   assert.equal(run('mkFiles[1].file'),null);
-  el('mk-files').change({target:{files:[file('second.txt')],value:''}});
+  select([file('second.txt')]);
  }
  await run('submitMake()');
  assert.equal(calls.filter(c=>c.path.endsWith('/cards')).length,1);
@@ -117,13 +124,14 @@ el('mk-files').change({target:{files:selected,value:''}});
         "reload-controls",
     ],
 )
-def test_create_files_preserve_intent_and_partial_results(mode: str) -> None:
+@pytest.mark.parametrize("clipboard", [False, True])
+def test_create_files_preserve_intent_and_partial_results(mode: str, clipboard: bool) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Optional Node.js executable is unavailable.")
     result = subprocess.run(
         [node, "-e", DRIVER],
-        input=json.dumps({"page": api_endpoint.PAGE, "mode": mode}),
+        input=json.dumps({"page": api_endpoint.PAGE, "mode": mode, "clipboard": clipboard}),
         capture_output=True,
         text=True,
         encoding="utf-8",

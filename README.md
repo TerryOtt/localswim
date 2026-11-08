@@ -548,6 +548,10 @@ The snapshot stores a card's `archived` flag only when true and an append-only
 
 ## Card attachments and cover photos
 
+Paste an image screen clip with **Ctrl+V** while the card drawer or **New card** dialog
+has focus, without saving a file first. Text and HTML pastes keep their normal behavior.
+Images receive a unique `screen-clip-…` filename; normal file upload remains available.
+
 The **New card** dialog also accepts multiple attachments before you choose **Add card**.
 It creates the card once, then uploads files in sequence; this is not an atomic operation.
 Each file shows whether it uploaded or remains pending. **Continue uploads** retries
@@ -555,7 +559,12 @@ known refusals without creating another card or resending successful files. An
 unconfirmed upload is checked against fresh saved attachment metadata, never blindly
 replayed. Keep the page open while uploads finish. Workspace navigation retains file
 selections in memory; after a reload, reselect any pending files when prompted.
-Closing the form does not undo a created card or its successful uploads.
+Closing the form does not undo a created card or its successful uploads. After a reload,
+paste the original pending screen clip again when prompted; its original upload name is
+retained and an already attempted file must match its original content digest. If several
+missing clips have the same size and type, reselection is ambiguous: inspect the created
+card and its saved attachments before closing the form. Unconfirmed uploads are never
+repeated by pasting again.
 
 Open a card and choose **Upload attachment**. Files up to **10 MiB each** are accepted;
 a larger file opens an explanatory refusal dialog without changing the board.
