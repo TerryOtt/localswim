@@ -84,7 +84,8 @@ vm.runInContext(input.page.slice(start,end),context);
   assert.equal(result.ok,false);assert.equal(stored.length,1);
   if(input.mode==='laterconflict'){server.lanes[0].items[0].subject='Other';server.lanes[0].items[0].cardVersion='c'.repeat(64);}
   context.latest=copy(server);vm.runInContext('acknowledgeSnapshot(latest,API_PREFIX);repaintActions()',context);
-  assert.equal(stored.length,0);
+  assert.equal(stored.length,input.mode==='laterconflict'?1:0);
+  if(input.mode==='laterconflict'){assert.equal(stored[0].phase,'dismissed');assert.equal(stored[0].body.subject,'After');}
   assert.equal(context.data.lanes[0].items[0].subject,input.mode==='laterconflict'?'Other':'After');
  }else if(['refusal','cardconflict','changed','knownsame'].includes(input.mode))assert.equal(result.ok,false);
  else if(['commentlost','gateway502comment','gatewayrefusedadd','gatewayrefusedscalar'].includes(input.mode)){

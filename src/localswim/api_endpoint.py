@@ -955,12 +955,13 @@ def push_board(board_path: pathlib.Path) -> tuple[bool, str]:
         return False, f"repository autopush failed: {exc!s:.200}"
 
 
-def _snapshot_paths(board_path: pathlib.Path) -> list[str]:
+def _snapshot_paths(board_path: pathlib.Path, board: board_state.Board | None = None) -> list[str]:
     """Bound Git staging to the snapshot and filenames in its attachment audit."""
-    board = board_state.load(board_path)
-    for item in board.items:
-        for file in item.attachments:
-            attachments.read_blob(board_path, item.ticket, file)
+    if board is None:
+        board = board_state.load(board_path)
+        for item in board.items:
+            for file in item.attachments:
+                attachments.read_blob(board_path, item.ticket, file)
     return [
         str(board_path),
         *sorted(
@@ -977,14 +978,122 @@ def _snapshot_paths(board_path: pathlib.Path) -> list[str]:
     ]
 
 
+def _capture_board_snapshot(
+    board_path: pathlib.Path, root: pathlib.Path, target: pathlib.Path
+) -> list[str]:
+    """Capture board bytes briefly, then verify/copy immutable blobs outside admission.
+
+    Uploads flush immutable GUID files before saving board references, and removal
+    retains those files. A captured board therefore owns a stable inventory even
+    while later commands add or detach attachments. Copy the verified bytes, never
+    ask Git to reopen live files after verification.
+    """
+    with _command_gate:
+        data = board_path.read_bytes()
+    board = board_state.load_bytes(data, board_path)
+    problems = board.verify()
+    if problems:
+        raise ValueError(f"invalid snapshot audit: {problems[0]}")
+    paths = _snapshot_paths(board_path, board)
+    active = {
+        attachments.blob_path(board_path, item.ticket, file.id, attachments.extension(file.name)): (
+            item.ticket,
+            file,
+        )
+        for item in board.items
+        for file in item.attachments
+    }
+    relative_paths: list[str] = []
+    directories: set[pathlib.Path] = set()
+    for raw_path in paths:
+        source = pathlib.Path(raw_path)
+        relative = source.relative_to(root)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source == board_path:
+            contents = data
+        elif source in active:
+            ticket, file = active[source]
+            contents = attachments.read_blob(board_path, ticket, file)
+        else:
+            with source.open("rb") as stream:
+                contents = stream.read(attachments.MAX_BYTES + 1)
+            if len(contents) > attachments.MAX_BYTES:
+                raise ValueError("retained attachment exceeds the upload size limit")
+        destination.write_bytes(contents)
+        if os.name != "nt":
+            destination.chmod(0o755 if source.stat().st_mode & 0o111 else 0o644)
+        relative_paths.append(f":(literal){relative.as_posix()}")
+        directories.update(relative.parents)
+    # Git's per-directory controls must see the same working-tree rules, including
+    # unstaged rules. They are support files, excluded from every staging pathspec.
+    for directory in sorted(directories):
+        for name in (".gitignore", ".gitattributes"):
+            destination = target / directory / name
+            if destination.exists():
+                continue
+            try:
+                control = (root / directory / name).read_bytes()
+            except FileNotFoundError:
+                continue
+            destination.write_bytes(control)
+    return relative_paths
+
+
+def _snapshot_git(
+    arguments: list[str], cwd: pathlib.Path, snapshot: pathlib.Path
+) -> subprocess.CompletedProcess[str]:
+    """Run Git against captured files while retaining the real repository/index."""
+    return _git([f"--work-tree={snapshot}", *arguments], cwd)
+
+
+def _snapshot_hooks_problem(cwd: pathlib.Path) -> str:
+    """Refuse hooks that could interpret a partial worktree as deleted live files."""
+    configured = _git(["config", "--get", "core.hooksPath"], cwd)
+    if configured.returncode not in {0, 1}:
+        return "git hook configuration lookup failed"
+    if configured.returncode == 0 and configured.stdout.strip():
+        return "board snapshot publishing requires an unset core.hooksPath"
+    # Git treats an unvalued key as true, but an explicitly empty value as false.
+    # Typed lookup preserves that distinction and refuses custom executable paths.
+    monitor = _git(["config", "--type=bool", "--get", "core.fsmonitor"], cwd)
+    if monitor.returncode != 1 and (monitor.returncode != 0 or monitor.stdout.strip() != "false"):
+        return "board snapshot publishing requires disabled core.fsmonitor"
+    result = _git(["rev-parse", "--git-path", "hooks"], cwd)
+    if result.returncode != 0:
+        return "git hooks directory lookup failed"
+    directory = pathlib.Path(result.stdout.strip())
+    if not directory.is_absolute():
+        directory = cwd / directory
+    try:
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        return ""
+    # Include index/reference hooks too: even status can refresh the real index.
+    # Samples are inert. Reject other runnable files conservatively so new Git
+    # hook names cannot silently execute against an incomplete working tree.
+    if any(
+        not entry.name.endswith(".sample")
+        and entry.is_file()
+        and (os.name == "nt" or os.access(entry, os.X_OK))
+        for entry in entries
+    ):
+        return "board snapshot publishing requires no active Git hooks"
+    return ""
+
+
 _GIT_STATUS_ARGV_LIMIT = 16_000
 _GIT_STATUS_ARGS = ["status", "--porcelain=v1", "--untracked-files=all", "--"]
 
 
-def _status_path_chunks(paths: list[str]) -> Generator[list[str]]:
+def _status_path_chunks(
+    paths: list[str], snapshot: pathlib.Path | None = None
+) -> Generator[list[str]]:
     """Keep each quoted Windows command below half the process command-line limit."""
     # Include Git, separators, quoting and the terminating NUL in UTF-16 code units.
-    fixed_size = len(subprocess.list2cmdline(["git", *_GIT_STATUS_ARGS])) + 1
+    prefix = [f"--work-tree={snapshot}"] if snapshot is not None else []
+    fixed = subprocess.list2cmdline(["git", *prefix, *_GIT_STATUS_ARGS])
+    fixed_size = len(fixed.encode("utf-16-le", errors="surrogatepass")) // 2 + 1
     size = fixed_size
     chunk: list[str] = []
     for path in paths:
@@ -1002,22 +1111,54 @@ def _status_path_chunks(paths: list[str]) -> Generator[list[str]]:
         yield chunk
 
 
-def _snapshot_changed(paths: list[str], cwd: pathlib.Path) -> tuple[bool, str]:
+def _snapshot_changed(
+    paths: list[str], cwd: pathlib.Path, snapshot: pathlib.Path
+) -> tuple[bool, str]:
     """Check all exact paths before staging, including failures after a dirty batch."""
     changed = False
-    for chunk in _status_path_chunks(paths):
-        status = _git([*_GIT_STATUS_ARGS, *chunk], cwd)
+    for chunk in _status_path_chunks(paths, snapshot):
+        status = _snapshot_git([*_GIT_STATUS_ARGS, *chunk], cwd, snapshot)
         if status.returncode != 0:
             return False, f"git status failed: {status.stderr.strip()[:200]}"
         changed = changed or bool(status.stdout.strip())
     return changed, ""
 
 
-def _commit_board_snapshot(board_path: pathlib.Path) -> tuple[bool, str]:
-    """Commit one consistent snapshot while HTTP writers are paused."""
-    cwd = board_path.parent
-    paths = [f":(literal){path}" for path in _snapshot_paths(board_path)]
-    committed, problem = _snapshot_changed(paths, cwd)
+def _snapshot_filters_problem(paths: list[str], cwd: pathlib.Path, snapshot: pathlib.Path) -> str:
+    """Reject external filters whose working-directory assumptions cannot be preserved."""
+    # check-attr consumes literal filenames, not Git pathspec magic. Its fixed argv
+    # is shorter than status, so the same conservative chunks bound this command.
+    filenames = [path.removeprefix(":(literal)") for path in paths]
+    for chunk in _status_path_chunks(filenames, snapshot):
+        arguments = ["check-attr", "-z", "filter", "--", *chunk]
+        # Check captured rules too: live attributes may have changed since capture.
+        for captured in (False, True):
+            result = _snapshot_git(arguments, cwd, snapshot) if captured else _git(arguments, cwd)
+            if result.returncode != 0:
+                return "git snapshot filter lookup failed"
+            fields = result.stdout.split("\0")
+            if len(fields) != 3 * len(chunk) + 1 or fields[-1] != "":
+                return "git snapshot filter lookup returned an invalid inventory"
+            for index, filename in enumerate(chunk):
+                offset = index * 3
+                if fields[offset : offset + 2] != [filename, "filter"]:
+                    return "git snapshot filter lookup returned an invalid inventory"
+                if fields[offset + 2] not in {"unspecified", "unset"}:
+                    return "board snapshot publishing does not support Git filter attributes"
+    return ""
+
+
+def _commit_board_snapshot(
+    paths: list[str], cwd: pathlib.Path, snapshot: pathlib.Path
+) -> tuple[bool, str]:
+    """Commit captured bytes without holding command admission during Git work."""
+    hook_problem = _snapshot_hooks_problem(cwd)
+    if hook_problem:
+        return False, hook_problem
+    filter_problem = _snapshot_filters_problem(paths, cwd, snapshot)
+    if filter_problem:
+        return False, filter_problem
+    committed, problem = _snapshot_changed(paths, cwd, snapshot)
     if problem:
         return False, problem
     if committed:
@@ -1035,10 +1176,10 @@ def _commit_board_snapshot(board_path: pathlib.Path) -> tuple[bool, str]:
             # write_bytes closes the file before Git opens it, including on Windows.
             pathspec.write_bytes(b"".join(path.encode("utf-8") + b"\0" for path in paths))
             options = [f"--pathspec-from-file={pathspec}", "--pathspec-file-nul"]
-            add = _git(["add", *options], cwd)
+            add = _snapshot_git(["add", *options], cwd, snapshot)
             if add.returncode != 0:
                 return False, f"git add failed: {add.stderr.strip()[:200]}"
-            commit = _git(["commit", "-m", message, *options], cwd)
+            commit = _snapshot_git(["commit", "-m", message, *options], cwd, snapshot)
             if commit.returncode != 0:
                 return False, f"git commit failed: {commit.stderr.strip()[:200]}"
     return committed, ""
@@ -1047,8 +1188,14 @@ def _commit_board_snapshot(board_path: pathlib.Path) -> tuple[bool, str]:
 def _push_board_locked(board_path: pathlib.Path) -> tuple[bool, str]:
     """Keep the board and attachment references consistent without blocking writers on push."""
     cwd = board_path.parent
-    with _command_gate:
-        committed, problem = _commit_board_snapshot(board_path)
+    repository = _git(["rev-parse", "--show-toplevel"], cwd)
+    if repository.returncode != 0:
+        return False, f"git repository lookup failed: {repository.stderr.strip()[:200]}"
+    root = pathlib.Path(repository.stdout.strip()).resolve()
+    with tempfile.TemporaryDirectory(prefix="localswim-snapshot-") as directory:
+        snapshot = pathlib.Path(directory)
+        paths = _capture_board_snapshot(board_path.resolve(), root, snapshot)
+        committed, problem = _commit_board_snapshot(paths, root, snapshot)
     if problem:
         return False, problem
     push = _git(["push"], cwd)
@@ -2764,6 +2911,14 @@ PAGE = """<!doctype html>
   .attachment a { display: block; color: var(--ink); overflow-wrap: anywhere; }
   .attachment-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .attachment-actions button, #p-upload { font: inherit; cursor: pointer; padding: 4px 8px; }
+  #save-recovery { align-self: flex-start; margin: 8px 12px; padding: 6px 10px;
+    font: inherit; cursor: pointer; }
+  #save-recovery-dialog { max-width: min(640px, 85vw); max-height: 80vh; overflow: auto;
+    border: 1px solid var(--line); border-radius: 8px; padding: 20px; color: var(--ink); }
+  #save-recovery-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+  #save-recovery-dialog section { border-top: 1px solid var(--line); padding: 12px 0; }
+  #save-recovery-dialog button { font: inherit; padding: 5px 10px; margin: 4px; cursor: pointer; }
+  #save-recovery-dialog textarea { display: block; width: 100%; min-height: 70px; font: inherit; }
   #attachment-refusal { max-width: min(440px, 85vw); border: 1px solid #CCD1DA;
     border-radius: 8px; color: var(--ink); padding: 20px; }
   #attachment-refusal::backdrop { background: rgb(0 0 0 / 45%); }
@@ -2800,6 +2955,7 @@ edit leaves the current process running and reports the failing check here."></s
     <span id="badge-slot"><span id="badge"
       title="Green means the event stream is open or disconnected less than 10 seconds ago.">LIVE</span></span>
   </div>
+  <button id="save-recovery" type="button" hidden></button>
   <div id="banner">
     <strong id="banner-head"></strong>
     <div class="hint" id="banner-body"></div>
@@ -2938,6 +3094,14 @@ move any card whoever owns it. Click to hand it over."></button>
   </div>
   <div id="toast"></div>
 
+<dialog id="save-recovery-dialog" aria-labelledby="save-recovery-title">
+  <h2 id="save-recovery-title">Review unconfirmed saves</h2>
+  <p>A request may have saved even if its response was lost. Check the card's comments
+    and history before submitting again. Clearing a warning does not retry, cancel,
+    undo or confirm the save.</p>
+  <div id="save-recovery-items"></div>
+  <form method="dialog"><button type="submit">Close</button></form>
+</dialog>
 <dialog id="attachment-refusal" aria-labelledby="attachment-refusal-title">
   <h2 id="attachment-refusal-title">Attachment refused</h2>
   <p id="attachment-refusal-reason"></p>
@@ -2966,7 +3130,7 @@ try {
         && typeof saved.cardId === 'string' && typeof saved.kind === 'string'
         && (!saved.field || typeof saved.body[saved.field] === 'string'
           || saved.kind === 'move' && typeof saved.body.to === 'string')) {
-      saved.phase = 'unknown'; localActions.push(saved);
+      saved.phase = saved.phase === 'dismissed' ? 'dismissed' : 'unknown'; localActions.push(saved);
       if (Number.isInteger(saved.confirmedRevision))
         revisionFloors.set(saved.prefix, Math.max(revisionFloors.get(saved.prefix) || 0, saved.confirmedRevision));
     }
@@ -2995,7 +3159,7 @@ function describeAction(prefix, path, body) {
 }
 function projectActions(snapshot, prefix) {
   const projected = JSON.parse(JSON.stringify(snapshot));
-  for (const action of localActions.filter(action => action.prefix === prefix)) {
+  for (const action of localActions.filter(action => action.prefix === prefix && action.phase !== 'dismissed')) {
     let item = snapshotItem(projected, action.cardId);
     if (action.kind === 'add' && !item) {
       const lane = (projected.lanes || []).find(lane => lane.state === action.body.state);
@@ -3037,6 +3201,90 @@ function confirmAddIntent(prefix, body) {
   mkAttempt.confirmed = true;
   if (mkOpen && sameMakeDraft(makeDraft(), mkAttempt.draft)) closeMake(true);
 }
+// Dismissal is a local acknowledgement, never a retry or a successful-save receipt.
+function savedActionText(action) {
+  if (action.kind === 'comment') return action.body.text || '';
+  if (action.kind === 'subject' || action.kind === 'detail') return action.body[action.kind] || '';
+  if (action.kind === 'add') return JSON.stringify(action.body, null, 2);
+  return '';
+}
+function dismissAction(action) {
+  if (action.phase !== 'unknown') return false;
+  // Keep submitted prose in session storage, including after reload, without projecting
+  // it or blocking a new deliberate action. Never overwrite a newer editor draft.
+  if (savedActionText(action)) { action.phase = 'dismissed'; rememberActions(); }
+  else forgetAction(action);
+  return true;
+}
+function renderSaveRecovery() {
+  const actions = localActions.filter(action => action.prefix === API_PREFIX
+    && ['unknown','dismissed'].includes(action.phase));
+  const button = document.getElementById('save-recovery');
+  button.hidden = !actions.length;
+  const unknown = actions.filter(action => action.phase === 'unknown').length;
+  button.textContent = unknown ? 'Review unconfirmed saves (' + unknown + ')'
+    : 'Saved request drafts (' + actions.length + ')';
+}
+async function reviewUnconfirmedSaves() {
+  const prefix = API_PREFIX, epoch = window.workspaceEpoch;
+  const button = document.getElementById('save-recovery'); button.disabled = true;
+  try {
+    const latest = await apiGet(prefix + '/board');
+    if (prefix !== API_PREFIX || epoch !== window.workspaceEpoch) return;
+    if (!acknowledgeSnapshot(latest,prefix)) throw new Error('Fresh board state unavailable');
+    repaintActions();
+    const box = document.getElementById('save-recovery-items'); box.replaceChildren();
+    for (const action of localActions.filter(action => action.prefix === prefix
+      && ['unknown','dismissed'].includes(action.phase))) {
+      const item = snapshotItem(latest,action.cardId), row = document.createElement('section');
+      const title = document.createElement('strong');
+      title.textContent = (item ? item.ticket : action.cardId) + ' — '
+        + ({approve:'Review approval',comment:'Comment',move:'Move',attachment:'Attachment'}[action.kind] || action.kind);
+      const status = document.createElement('p');
+      status.textContent = action.phase === 'dismissed' ? 'Warning cleared. Saved draft retained below.'
+        : 'Outcome unknown. Latest saved lane: ' + (item ? item.laneLabel || item.state : 'card unavailable') + '.';
+      row.append(title,status);
+      const text = savedActionText(action);
+      if (text) {
+        const draft = document.createElement('textarea'); draft.readOnly = true; draft.value = text;
+        draft.setAttribute('aria-label','Saved request draft'); row.append(draft);
+      }
+      if (item && !item.archived) {
+        const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Open card';
+        open.addEventListener('click',() => {
+          if (prefix !== API_PREFIX || epoch !== window.workspaceEpoch) return;
+          document.getElementById('save-recovery-dialog').close(); openCard(item.id);
+        }); row.append(open);
+      }
+      const acknowledgement = document.createElement('label');
+      const checked = document.createElement('input'); checked.type = 'checkbox';
+      acknowledgement.append(checked,document.createTextNode(action.phase === 'dismissed'
+        ? ' I want to discard this saved draft.'
+        : ' I checked this card. I understand submitting again could duplicate the save.'));
+      row.append(acknowledgement);
+      const clear = document.createElement('button'); clear.type = 'button'; clear.disabled = true;
+      checked.addEventListener('change',() => { clear.disabled = !checked.checked; });
+      clear.textContent = action.phase === 'dismissed' ? 'Discard saved draft' : 'Clear warning';
+      clear.addEventListener('click',() => {
+        if (prefix !== API_PREFIX || epoch !== window.workspaceEpoch || !localActions.includes(action) || !checked.checked) return;
+        if (action.phase === 'dismissed') {
+          forgetAction(action);
+        } else {
+          if (!dismissAction(action)) return;
+        }
+        row.remove(); repaintActions();
+      }); row.append(clear); box.append(row);
+    }
+    if (!box.children.length) {
+      const done = document.createElement('p'); done.textContent = 'No unconfirmed saves remain for this board.'; box.append(done);
+    }
+    document.getElementById('save-recovery-dialog').showModal();
+  } catch (_) {
+    if (prefix === API_PREFIX && epoch === window.workspaceEpoch)
+      toast('Could not read fresh board state. Save warnings and drafts are unchanged.',true);
+  } finally { button.disabled = false; }
+}
+
 function acknowledgeSnapshot(snapshot, prefix) {
   if (prefix !== API_PREFIX || !Number.isInteger(snapshot.revision) || snapshot.error) return false;
   if (snapshot.revision < (revisionFloors.get(prefix) || 0)
@@ -3055,7 +3303,7 @@ function acknowledgeSnapshot(snapshot, prefix) {
       if (action.kind === 'add') confirmAddIntent(prefix, action.body);
       forgetAction(action);
     } else if (action.field && (!item || item.archived || item.cardVersion !== action.cardVersion)) {
-      forgetAction(action);
+      dismissAction(action);
       toast('An unconfirmed edit conflicts with the current card. Your draft is preserved.', true);
     } else {
       // Once a fresh read is available, uncertainty must not hide authoritative fields.
@@ -3071,7 +3319,7 @@ async function apiPost(path, body, pinnedCardVersion) {
     'This restored draft has no original card version. Reopen the editor before saving; your text is preserved.'})};
   if (path === prefix + '/cards' && !body.id) body = {...body,id:'card-' + crypto.randomUUID()};
   const signature = value => JSON.stringify({...value,id:undefined});
-  const duplicate = localActions.find(action => action.prefix === prefix && action.path === path
+  const duplicate = localActions.find(action => action.prefix === prefix && action.phase !== 'dismissed' && action.path === path
     && signature(action.body) === signature(body));
   if (duplicate) return {ok:false,status:409,json:async () => ({intentPending:true,error:
     'This action is still saving or unconfirmed. Its draft is preserved; inspect the board before submitting again.'})};
@@ -3126,7 +3374,11 @@ async function apiPost(path, body, pinnedCardVersion) {
           uncertain = false; result = {response:{ok:false,status:409},out:{error:
             'This card changed or is no longer active. Your attempted edit is preserved; review it before trying again.'}};
         }
-      } catch (_) { uncertain = true; }
+      } catch (_) {
+        // A failed GET cannot make a definitely refused POST uncertain.
+        uncertain = wasUncertain;
+        if (!uncertain) result.out.error = 'The board changed. Refresh before trying again; your draft is preserved.';
+      }
     }
     // A refused retry says nothing definitive about an earlier lost response.
     // One final read may prove the original intent; it never causes a third POST.
@@ -3161,7 +3413,7 @@ async function apiPost(path, body, pinnedCardVersion) {
     return {ok:result.response.ok,status:result.response.status,
       json:async () => ({...result.out,workspaceBoardChanged:epoch !== window.workspaceEpoch})};
   };
-  const earlier = localActions.filter(item => item !== action && item.prefix === prefix && item.cardId === action.cardId).at(-1);
+  const earlier = localActions.filter(item => item !== action && item.phase !== 'dismissed' && item.prefix === prefix && item.cardId === action.cardId).at(-1);
   // Keep a nonserialized predecessor reference; storage contains only stable intent fields.
   if (earlier) Object.defineProperty(action,'predecessor',{value:earlier});
   const running = previous.catch(() => {}).then(execute); mutationQueues.set(prefix,running);
@@ -4013,6 +4265,7 @@ document.addEventListener('keydown', ev => {
   // asks before discarding; `closeCard()` never needs to, because it STASHES the
   // comment draft rather than dropping it.
   if (ev.key !== 'Escape') return;
+  if (document.getElementById('save-recovery-dialog').open) return;
   if (mkOpen) { closeMake(false); return; }
   // **Escape clears the search BEFORE it closes a card**, because a filtered board with
   // an open card is a state where Escape has two plausible meanings, and the narrower
@@ -4058,6 +4311,7 @@ async function postComment() {
 }
 
 document.getElementById('post').addEventListener('click', postComment);
+document.getElementById('save-recovery').addEventListener('click', reviewUnconfirmedSaves);
 
 // **Cards #0081 and #0082.** Click the text to edit it -- the whole line is the target,
 // so no icon competes with the title for the eye.
@@ -4845,6 +5099,7 @@ function renderBoardBanner() {
 }
 
 function paint() {
+  renderSaveRecovery();
   const focusId = focusedCardId();
   const laneScroll = window.WorkspaceUI ? window.WorkspaceUI.scrolls() : null;
   // The project name is board data, not page-build data. Update both title surfaces on

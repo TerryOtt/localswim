@@ -82,6 +82,13 @@ legacy watcher commands and their optional native watching dependency are remove
   Acquire its OS lock without initializing or rewriting bytes first: Windows locks
   beyond an empty file's EOF, and a pre-acquisition write can hit a held byte lock.
   Never unlink that lock path; preserve bounded waiting and descriptor cleanup.
+  Backup capture holds command admission only long enough to read one coherent board
+  snapshot. Verify/copy immutable audited attachment bytes and run Git outside that
+  gate against a private captured worktree. Concurrent edits stay live for the next
+  backup. Preserve exact paths and unrelated staged work; refuse unsupported Git
+  hooks, enabled Git filesystem monitors or external content filters before staging
+  rather than executing them in an
+  incomplete captured worktree. Never disable hooks silently or relax integrity checks.
 - Treat each schema-4 board's embedded policy as executable permission data, not UI
   decoration. Initialization resolves lane and actor display names once into stable
   IDs; runtime authorization uses only those persisted IDs.
@@ -513,7 +520,11 @@ whole-board CAS when the optional card header is absent.
 
 Local edits/moves/adds may render pending before persistence. Stable Add IDs prevent
 duplicates. Unknown outcomes require authoritative readback; never blindly replay
-comments, uploads or compound actions. Keep original editor tokens, unsaved input
+comments, uploads or compound actions. A recovery warning can be cleared only
+through explicit local acknowledgement after fresh readback; clearing never means
+success, cancellation or replay. Retain submitted prose separately from newer editor
+drafts, including conflicted restored edits. Keep definitely refused writes distinct
+from unknown outcomes when readback fails. Keep original editor tokens, unsaved input
 and newer queued intents across navigation/reload; stale responses cannot lower an
 acknowledged revision floor or clear another draft. CLI and gateway POSTs remain
 single-submit. Do not weaken lane, audit, actor or policy validation.

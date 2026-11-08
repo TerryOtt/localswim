@@ -800,10 +800,15 @@ GIF, and WebP are detected from bytes and may preview inline; everything else us
 `application/octet-stream`, attachment disposition, `nosniff`, and sandbox CSP.
 
 Git snapshot paths comprise the board and exact per-card filenames from its audit,
-including removed attachments. HTTP writes pause during snapshot staging/commit so
-the committed metadata and references stay consistent; network push releases this
-pause. The existing repository lock still serializes multiple board services. No
-unrelated or unaudited attachment-directory files may join the commit.
+including removed attachments. Command admission pauses only to capture the board's
+bytes. Parsing, audit checks, attachment integrity reads and every Git operation run
+after releasing that pause. Uploads flush immutable GUID files before saving their
+references, and removal retains their bytes, so the captured board identifies a
+coherent inventory while commands continue. Verified bytes are copied into a private
+temporary worktree; Git never reopens live attachment bytes after verification.
+Concurrent board edits remain on disk for the next publication. The existing
+repository lock still serializes multiple board services. No unrelated or unaudited
+attachment-directory files may join the commit.
 
 Board and gateway publishers lock the persistent `localswim-autopush.lock` in the Git
 common directory, including across linked worktrees. Acquisition never initializes
@@ -815,8 +820,23 @@ The publisher bounds status command arguments and supplies add/commit paths thro
 literal NUL-delimited temporary pathspec files, avoiding Windows command-line overflow
 as the attachment audit grows. Every status batch must succeed before staging starts.
 The pathspec file is closed before Git opens it and is removed after success or failure.
-These transport details preserve the same repository lock, mutation pause, exact audited
-inventory and exclusion of unrelated staged files; they do not change Git filtering rules.
+The temporary worktree retains the real repository/index and copies applicable
+working-tree `.gitignore` and `.gitattributes` controls without staging those controls.
+Exact pathspec commits preserve unrelated staged files and existing Git filtering
+rules. Both temporary worktree and pathspec files are cleaned on success or failure;
+a successful local commit remains durable if its subsequent push fails.
+Partial snapshot worktrees cannot safely run hooks that stage the whole checkout.
+Before any snapshot status/staging command, publication therefore refuses configured
+nonempty `core.hooksPath` values or runnable nonsample files in the default hooks
+directory, including index/reference hooks. It never disables or edits hooks. Such
+repositories require a publishing compatibility decision before autopush can proceed.
+Enabled or custom `core.fsmonitor` configurations are also refused because monitor
+programs and cached change sets belong to the live worktree.
+Applied `filter` attributes are likewise refused after a bounded literal filename
+lookup against both live and captured rules; filter programs can depend on the original working
+directory. Unused global filter registrations do not prevent publication, and ordinary
+text/end-of-line attributes remain supported. These checks precede snapshot status/staging
+and never alter repository configuration.
 
 CLI `card attachment` offers `add`, `list --json`, `remove`, and `cover`/`cover --clear`.
 The drawer offers upload, image previews, download, removal, and cover controls;
@@ -1019,6 +1039,19 @@ changes the premise of the safety check. The Codex test command therefore uses
 `C:\Temp`, as documented in `AGENTS.md`.
 
 ## Browser UI behavior
+
+An **Unconfirmed** marker means the browser lacks a definitive save result. Reload
+retains pending requests in tab session storage. It does not mean the save failed;
+a timed-out admitted command can still commit later.
+
+Use **Review unconfirmed saves** to fetch current board state and inspect the card.
+After checking its comments and history, acknowledge the checkbox and clear the
+warning. Clearing never retries, cancels, undoes or confirms a request. Submitted
+comment, title, description and new-card text remains available under **Saved
+request drafts** until explicitly discarded; newer editor drafts are untouched.
+Conflicting restored title/description requests retain their submitted text there.
+A definitely refused write stays refused even if its follow-up read fails.
+
 
 The individual-board UI is an embedded `PAGE` string in `api_endpoint.py`. Workspace
 mode adds locally served `workspace.js` and `workspace.css`; both modes serve

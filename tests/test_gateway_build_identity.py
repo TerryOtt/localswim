@@ -36,6 +36,7 @@ const history={replaceState(a,b,url){href=new URL(url,href).href}};
 const window={location,localswimWorkspace:!!input.workspace,history,
   WorkspaceUI:input.workspace?{pageStatus:()=>input.status,capture(){}}:null};
 const context=vm.createContext({window,location,URL,Date,document:{getElementById:element},
+  localActions:[],API_PREFIX:'/api/v001',
   sessionStorage:{setItem(k,v){stored[k]=v}},serverBuild:input.boardBuild || null,
   codeStale:!!input.boardStale,restarting:!!input.boardRestarting,restartProblem:input.boardProblem||null,
   streamConnected:true,streamClosedAt:null,streamBoardError:null,pushState:null,lastOk:input.lastOk?Date.now():0,fileMs:0,STREAM_GRACE_MS:10000,
@@ -48,6 +49,8 @@ function section(source,start,end) {
   if(a<0||b<0)throw Error('Production helper boundary not found: '+start);
   return source.slice(a,b);
 }
+vm.runInContext(section(input.page,'function renderSaveRecovery()',
+  'async function reviewUnconfirmedSaves()'),context);
 if(input.mode==='card-focus'){
   const assert=require('assert/strict');let opened=[],cards=[],rendered=[];
   function node(tag){
