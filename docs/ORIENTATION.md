@@ -291,6 +291,13 @@ ghosts and a bounded settlement lifetime. Navigation and later failures invalida
 older settlement completions. Only fresh, settled state restores the normal SSE
 connection indication. Reloading discards this cache, not saved session drafts.
 
+[ADR 0003](decisions/0003-byte-limited-client-board-cache.md) records the accepted
+future cache policy: a configurable byte budget, recency based on human board
+selection, protected working state and bounded background refreshes. Its default
+budget still needs qualification against an approximately 2 GiB browser-client
+memory allowance. The runtime behavior described above remains in place until
+that policy is implemented and validated.
+
 Drawer attachment containers carry board/card identity before pending/focus preservation.
 A deferred operation on one card cannot leave its controls actionable under another
 card's header. The card-title rename trigger is a named native button within the heading;

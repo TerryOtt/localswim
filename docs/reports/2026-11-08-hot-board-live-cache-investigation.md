@@ -2,6 +2,11 @@
 
 Ticket: #0243. Investigation only; production behavior is unchanged.
 
+Subsequent policy decision (2026-11-08):
+[ADR 0003](../decisions/0003-byte-limited-client-board-cache.md) supersedes this
+report's provisional board-count, budget and TTL recommendations. The measurements
+and original recommendations below remain the historical investigation record.
+
 ## Recommendation
 
 **RECOMMENDED: pursue a bounded three-board production implementation, with a
