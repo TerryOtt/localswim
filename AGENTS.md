@@ -498,7 +498,10 @@ external services or a framework.
 While SSE subscribers are present, run one central board health producer every five
 seconds and one catalog producer every ten seconds. Pause producer I/O after the last
 listener closes (one in-flight read may finish); the first returning view wakes the
-producers and resnapshots. A five-second heartbeat performs no JSON I/O and does not
+producers and resnapshots. Only the upstream reader thread closes its buffered HTTP
+response and connection. External cancellation interrupts the actual socket, then
+joins that reader; never race buffered-parser cleanup from another thread. Release
+the connection even when response cleanup fails. A five-second heartbeat performs no JSON I/O and does not
 confirm sync. Preserve bounded latest-only
 process memory without journal, deltas or replay. On shutdown wake streams, close
 upstream connections and join workers before releasing the writer lease. Show the

@@ -197,9 +197,11 @@ class _BoardRelay:
         finally:
             with self._transport_lock:
                 self._connection = self._response = self._socket = None
-            if response is not None:
-                response.close()
-            connection.close()
+            try:
+                if response is not None:
+                    response.close()
+            finally:
+                connection.close()
 
     def _stream(self, endpoint: Endpoint) -> None:
         upgrade = False
@@ -260,18 +262,19 @@ class _BoardRelay:
             self._stop.wait(RECONNECT_INTERVAL)
 
     def close(self) -> None:
-        """Interrupt the actual socket before closing buffered response and joining."""
+        """Interrupt transport, then let its reader own response/connection cleanup."""
         self._stop.set()
         with self._transport_lock:
-            connection, response, upstream_socket = self._connection, self._response, self._socket
+            upstream_socket = self._socket
+            if upstream_socket is None and self._connection is not None:
+                # request() may have connected before publishing the tracked socket.
+                upstream_socket = self._connection.sock
         if upstream_socket is not None:
             with contextlib.suppress(OSError):
                 upstream_socket.shutdown(socket.SHUT_RDWR)
-        if response is not None:
-            with contextlib.suppress(OSError, ValueError):
-                response.close()
-        if connection is not None:
-            connection.close()
+        # HTTPResponse.close() mutates the same buffered state as readline().
+        # Only _upstream's reader-thread finally may close the response/connection;
+        # closing either here races EOF cleanup inside the HTTP parser.
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join()
