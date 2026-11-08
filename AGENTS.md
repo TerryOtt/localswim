@@ -474,6 +474,30 @@ retired dated HTTP-to-file registration API. The frozen contract is
 https://github.com/SixbucksSolutions/localpost/blob/91f19e628c8d5f2318ddacd7a2c0418a3fb038e5/docs/contracts/valkey-webdis.md .
 The Windows `Agent Message Queue` task starts at user sign-in independently of Codex.
 
+### Console-free shared queue startup (2026-11-08)
+
+- Use `C:\Projects\shared-message-queue\queue.ps1 -Action Start`, `Stop`, or
+  `Status`. Start reuses the existing `Agent Message Queue` Windows task; never
+  launch `-Action Run`, WSL, Valkey, Webdis, or a private keeper directly.
+- The task action is `C:\Projects\shared-message-queue\QueueTaskLauncher.exe`.
+  This local GUI executable starts WSL with `UseShellExecute=false` and
+  `CreateNoWindow=true`; `-WindowStyle Hidden` alone still exposed a Windows
+  Terminal window on this host. Preserve the login trigger, user identity and
+  independent OS ownership. No command/Terminal window should remain open.
+- The task-root launcher owns four total attempts with 60-second waits between
+  failures, drains stdout/stderr concurrently to separate per-launch files under
+  `%LOCALAPPDATA%\agent-message-queue\logs`, and propagates the final exit code.
+  Source is beside it in `QueueTaskLauncher.cs`; keep source and installed binary
+  together when maintaining this shared launcher.
+- Explicit Stop cancels the task/retry owner and stops the Linux unit. Verify
+  keeper exit as well as HTTP health; do not assume closing a console is safe.
+  The qualified stop remained down beyond 60 seconds, then restarted healthy
+  without Terminal. The real next sign-in lifecycle remains to be observed.
+- Host maintenance needs Terry's authorization. Coordinate one operator before
+  Start/Stop/recovery so agents cannot fight over the shared service. Other
+  agents pause queue-dependent work and check health; they do not race to restart.
+  Stop loses volatile messages; resume tests with fresh mailboxes.
+
 - Check `C:\Projects\shared-message-queue\queue.ps1 -Action Status` or POST `/`
   with `PING`, expecting `{"PING":[true,"PONG"]}`. Unavailable, wrong-protocol or
   failed health requires immediate Terry attention; pause queue-dependent tests.
