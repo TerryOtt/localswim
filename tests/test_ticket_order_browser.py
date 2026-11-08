@@ -66,14 +66,16 @@ const run=code=>vm.runInContext(code,context),settle=()=>new Promise(resolve=>se
   const stop=input.page.indexOf('  // **Card #0063. Old finished',start);
   assert.ok(start>0&&stop>start);
   vm.runInContext(input.page.slice(start,stop)+'return el;}',context);
-  for(const [enabled,count,archived,expected] of [[false,2,0,false],[true,1,0,true],[true,2,1,true],[true,2,0,false]]){
+  for(const [enabled,count,archived,expected] of [[false,2,0,false],[true,0,0,true],[true,2,2,true],[true,1,0,true],[true,2,1,true],[true,2,0,false]]){
    context.lane={state:'ready',label:'Ready',ownerLabel:'Human',reorderByDependencies:enabled,
     items:Array.from({length:count},(_,i)=>({archived:i<archived}))};
    const header=run('laneEl(lane)').querySelector('h2');
    assert.equal(header.children.length,enabled?1:0);
    if(enabled){const button=header.children[0];assert.equal(button.disabled,expected);
     assert.equal(button.textContent,'');assert.match(button.innerHTML,/<svg/);
-    assert.match(button.title,/dependencies/);assert.match(button.attrs['aria-label'],/Ready/);
+    if(count===archived){assert.equal(button.title,'Disabled; swimlane is empty');
+      assert.equal(button.attrs['aria-label'],button.title);}
+    else {assert.match(button.title,/dependencies/);assert.match(button.attrs['aria-label'],/Ready/);}
     assert.equal(button.type,'button');}
   }
  }else{

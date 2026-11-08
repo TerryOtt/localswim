@@ -1327,7 +1327,22 @@ The simple one-owner path belongs to the live board service, not a new watcher o
 pool. `api_endpoint.py` creates one `notifications.NotificationDispatcher` at service
 setup and closes it at shutdown. After a successful human mutation commit it hands
 off bounded immutable metadata (board identity/label, interval and at most 128 ticket
-numbers, with truncation indicated). Automation-only edits are excluded. Submission
+numbers and their operation labels, with truncation indicated). Each ticket shows
+all applicable labels once, ordered `Created`, `Contents modified`, `Comment added`,
+`Reviewed & approved`, `Archived`, `Restored`, `Moved lanes`, `Ticket numbers reordered`.
+For example: `1234 (Created, Comment added), 2345 (Reviewed & approved)`.
+The exact single-card or bulk approval command supplies committed item IDs; only
+its own derived comment and move events become `Reviewed & approved`. Ordinary
+comments, copied approval prose, and manual moves to Completed do not imply approval.
+Other comments, archive/restoration, lane movement and ticket renumbering use their
+specific labels. Other card fields, attachments and secondary relationship/parent
+tickets use `Contents modified`. Labels accumulate during the burst, including
+later independent edits after approval. Archiving retains the card and is never
+reported as deletion. Legacy internal notices without operation metadata default
+to `Contents modified`. Metadata is bounded to eight unique labels per ticket and
+128 tickets, contains no card prose, and stays within the adapter's 32 KiB message
+cap. Labels are context, not authorization or a replacement for activity inspection.
+Automation-only edits are excluded. Submission
 only merges one pending burst under a short condition lock: no settings load,
 notification I/O or subprocess work runs on the writer path.
 

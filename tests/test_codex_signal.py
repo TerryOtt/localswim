@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from localswim import codex_signal as signal
+from localswim.notifications import OPERATIONS
 from localswim.service_ownership import python_child_command
 
 _THREAD = "00000000-0000-4000-8000-000000000001"
@@ -100,7 +101,7 @@ def test_native_queue_is_single_attempt_and_output_is_discarded(
         "- Board: Synthetic board (`aaaa...aaaa`)\n"
         "- Start: 2026-11-07 10:30:00 UTC\n"
         "- End: 2026-11-07 10:31:00 UTC\n"
-        "- Tickets: 0003, 0012"
+        "- Tickets: 0003 (Contents modified), 0012 (Contents modified)"
     )
     assert len(children) == 1 and children[0].poll() is not None
     assert capsys.readouterr() == ("", "")
@@ -177,7 +178,8 @@ def test_message_formats_sorted_tickets_and_abbreviated_identity() -> None:
     )
     assert "- Board: FGA Dev (`bbdf...1198`)\n" in message
     assert message.endswith(
-        "- Tickets: 0439, 0446, 0447, 0448, 0449, 0450, 10000 (additional tickets omitted)"
+        "- Tickets: 0439 (Contents modified), 0446 (Contents modified), 0447 (Contents modified), 0448 (Contents modified), "
+        "0449 (Contents modified), 0450 (Contents modified), 10000 (Contents modified) (additional tickets omitted)"
     )
 
 
@@ -316,3 +318,53 @@ def test_windows_prefers_native_executable_over_wrapper(
     monkeypatch.setattr(signal.subprocess, "Popen", spawn)
     assert signal.deliver(_THREAD, payload()) == "accepted"
     assert spawn.call_args.args[0][0] == "C:/synthetic/codex.EXE"
+
+
+def test_message_operations_deduplicate_and_preserve_numeric_sort() -> None:
+    message = signal._message(  # noqa: SLF001 -- formatter contract
+        _THREAD,
+        payload(
+            tickets=[3456, 1234, 2345, 1234, 3456],
+            operations=[
+                ["Moved lanes"],
+                ["Created"],
+                ["Archived"],
+                ["Contents modified"],
+                ["Contents modified", "Moved lanes"],
+            ],
+        ),
+    )
+    assert message.endswith(
+        "- Tickets: 1234 (Created, Contents modified), 2345 (Archived), "
+        "3456 (Contents modified, Moved lanes)"
+    )
+
+
+def test_message_maximum_operation_payload_fits_byte_limit() -> None:
+    message = signal._message(  # noqa: SLF001 -- formatter contract
+        _THREAD,
+        payload(
+            tickets=list(range(1, 129)),
+            operations=[list(OPERATIONS)] * 128,
+            truncated=True,
+        ),
+    )
+    assert len(message.encode("utf-8")) <= signal._MAX_MESSAGE_BYTES  # noqa: SLF001
+    assert "0128 (" + ", ".join(OPERATIONS) + ")" in message
+    assert message.endswith("(additional tickets omitted)")
+
+
+@pytest.mark.parametrize(
+    "operations",
+    [
+        None,
+        [],
+        [["Created"]],
+        [["archived"]] * 3,
+        [[True]] * 3,
+        [["Created", "Created"]] * 3,
+        [["Created", "Contents modified", "Archived", "Moved lanes", "extra"]] * 3,
+    ],
+)
+def test_message_rejects_invalid_operation_metadata(operations: object) -> None:
+    assert signal.deliver(_THREAD, payload(operations=operations)) == "invalid"

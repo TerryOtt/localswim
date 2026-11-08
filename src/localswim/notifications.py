@@ -12,12 +12,54 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import cast
+from typing import Literal, cast
 
 from .board_state import JsonObject, JsonValue
 
 MAX_CONFIG_BYTES = 4096
 MAX_TICKETS = 128
+type TicketOperation = Literal[
+    "Created",
+    "Contents modified",
+    "Comment added",
+    "Reviewed & approved",
+    "Archived",
+    "Restored",
+    "Moved lanes",
+    "Ticket numbers reordered",
+]
+OPERATIONS: tuple[TicketOperation, ...] = (
+    "Created",
+    "Contents modified",
+    "Comment added",
+    "Reviewed & approved",
+    "Archived",
+    "Restored",
+    "Moved lanes",
+    "Ticket numbers reordered",
+)
+
+
+def event_operation(kind: JsonValue, *, approved: bool = False) -> TicketOperation:
+    """Classify sanitized audit kinds, with approval supplied by the exact command."""
+    if approved and kind in ("commented", "moved"):
+        return "Reviewed & approved"
+    labels: dict[str, TicketOperation] = {
+        "created": "Created",
+        "commented": "Comment added",
+        "archived": "Archived",
+        "unarchived": "Restored",
+        "moved": "Moved lanes",
+        "ticket_changed": "Ticket numbers reordered",
+    }
+    return labels.get(kind, "Contents modified") if isinstance(kind, str) else "Contents modified"
+
+
+def merge_operations(
+    first: tuple[TicketOperation, ...], second: tuple[TicketOperation, ...]
+) -> tuple[TicketOperation, ...]:
+    """Keep every applicable label once in fixed display order."""
+    return tuple(operation for operation in OPERATIONS if operation in first or operation in second)
 
 
 class NotificationConfigError(ValueError):
@@ -168,6 +210,7 @@ class NotificationEvent:
     until: str
     tickets: tuple[int, ...] = ()
     truncated: bool = False
+    operations: tuple[tuple[TicketOperation, ...], ...] = ()
 
     def __post_init__(self) -> None:
         _identity(self.board_identity)
@@ -180,8 +223,23 @@ class NotificationEvent:
             type(t) is not int or t < 1 for t in self.tickets
         ):
             raise ValueError("invalid notification tickets")
+        if self.operations and (
+            len(self.operations) != len(self.tickets)
+            or any(
+                not labels
+                or len(labels) > len(OPERATIONS)
+                or len(set(labels)) != len(labels)
+                or any(operation not in OPERATIONS for operation in labels)
+                for labels in self.operations
+            )
+        ):
+            raise ValueError("invalid notification operations")
         if type(self.truncated) is not bool:
             raise ValueError("invalid notification truncation flag")
+
+    def resolved_operations(self) -> tuple[tuple[TicketOperation, ...], ...]:
+        default: tuple[TicketOperation, ...] = ("Contents modified",)
+        return self.operations or (default,) * len(self.tickets)
 
     def payload(self) -> JsonObject:
         return {
@@ -191,6 +249,7 @@ class NotificationEvent:
             "until": self.until,
             "tickets": list(self.tickets),
             "truncated": self.truncated,
+            "operations": [list(labels) for labels in self.resolved_operations()],
         }
 
 
@@ -236,12 +295,19 @@ class NotificationDispatcher:
                 return
             previous = self._pending
             if previous is not None:
-                tickets = sorted(set(previous.tickets) | set(event.tickets))
+                operations: dict[int, tuple[TicketOperation, ...]] = {}
+                for notice in (previous, event):
+                    for ticket, operation in zip(
+                        notice.tickets, notice.resolved_operations(), strict=True
+                    ):
+                        operations[ticket] = merge_operations(operations.get(ticket, ()), operation)
+                tickets = sorted(operations)
                 event = replace(
                     event,
                     since=min(previous.since, event.since, key=datetime.fromisoformat),
                     until=max(previous.until, event.until, key=datetime.fromisoformat),
                     tickets=tuple(tickets[:MAX_TICKETS]),
+                    operations=tuple(operations[ticket] for ticket in tickets[:MAX_TICKETS]),
                     truncated=previous.truncated or event.truncated or len(tickets) > MAX_TICKETS,
                 )
             self._pending = event

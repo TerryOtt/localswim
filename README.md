@@ -1150,7 +1150,7 @@ a setting change follows that check with one POST. Configuration does not change
 board revisions, history or existing monitor target, cursor and pending files.
 
 After a committed human edit, the writer submits only bounded metadata: board
-identity/label, activity interval and ticket numbers. Automation-only edits produce
+identity/label, activity interval, ticket numbers and operation hints. Automation-only edits produce
 no owner notice. A background worker combines bursts until 15 seconds of quiet,
 then loads the current enabled state and destination and calls the public
 `codex queue` CLI once. It sends no card titles, descriptions, comments or credentials.
@@ -1167,8 +1167,15 @@ localswim board-change notice
 - Board: Example (`abcd...1234`)
 - Start: 2026-11-08 15:10:27 UTC
 - End: 2026-11-08 15:10:49 UTC
-- Tickets: 0197, 0199, 0255, 0288
+- Tickets: 0197 (Created), 0199 (Comment added), 0255 (Reviewed & approved), 0288 (Moved lanes)
 ```
+
+Hints come from committed writer operations, never from the wording of a comment.
+An ordinary lane move cannot masquerade as review approval. Other hints include
+Contents modified, Archived, Restored and Ticket numbers reordered. A ticket can
+carry several distinct hints when its burst includes several operations. They
+help the owning chat choose focused activity or card reads; they do not replace
+the activity check or authorize work.
 
 Start is rounded down and end rounded up to whole seconds, retaining exact-second
 endpoints. Ticket numbers are sorted numerically. The fingerprint is abbreviated;

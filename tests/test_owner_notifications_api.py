@@ -92,10 +92,19 @@ def test_only_successful_browser_mutations_submit_notifications(api: RunningApi)
     assert len(sink.events) == 1
     event = sink.events[0]
     assert event.tickets == (2,)
+    assert event.operations == (("Created",),)
     assert event.board_identity == service_ownership.board_identity(api.path)
     assert event.label == "API"
     payload = event.payload()
-    assert set(payload) == {"boardIdentity", "label", "since", "until", "tickets", "truncated"}
+    assert set(payload) == {
+        "boardIdentity",
+        "label",
+        "since",
+        "until",
+        "tickets",
+        "truncated",
+        "operations",
+    }
     assert "private prose" not in json.dumps(payload)
     assert board_state.load(api.path).revision == 2
 
@@ -193,12 +202,14 @@ def test_large_committed_edit_bounds_ticket_metadata(tmp_path: pathlib.Path) -> 
     def create_many(board: board_state.Board) -> str:
         for index in range(notifications.MAX_TICKETS + 2):
             board.create(f"card-{index}", "Private subject", "backlog", "terry")
-        return "created"
+        return "Created"
 
     store.execute(0, create_many, notification_actor="terry")
     assert len(sink.events) == 1
     event = sink.events[0]
     assert event.tickets == tuple(range(1, notifications.MAX_TICKETS + 1))
+    assert all(labels == ("Created",) for labels in event.operations)
+    assert len(event.operations) == notifications.MAX_TICKETS
     assert event.truncated is True
     assert "Private subject" not in json.dumps(event.payload())
 
@@ -418,3 +429,115 @@ def test_notification_cli_routes_through_live_configuration(
         {"action": "disable"},
     ]
     assert api.path.read_bytes() == before
+
+
+def test_operations_cover_contents_status_lane_creation_and_related_tickets(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = make_store(tmp_path / "board.json")
+    sink = capture(store)
+
+    def create_and_edit(board: board_state.Board) -> str:
+        board.create("one", "Private subject", "backlog", "terry")
+        board.comment("one", "Private comment", "terry")
+        return board.move("one", "ready_for_work", "terry")
+
+    store.execute(0, create_and_edit, notification_actor="terry")
+    assert sink.events[-1].operations == (("Created", "Comment added", "Moved lanes"),)
+    store.execute(
+        1,
+        lambda board: board.set_archived("one", archived=True, by="terry"),
+        notification_actor="terry",
+    )
+    assert sink.events[-1].operations == (("Archived",),)
+    store.execute(
+        2,
+        lambda board: board.set_archived("one", archived=False, by="terry"),
+        notification_actor="terry",
+    )
+    assert sink.events[-1].operations == (("Restored",),)
+    store.execute(
+        3,
+        lambda board: board.create("two", "Other private", "backlog", "terry"),
+        notification_actor="terry",
+    )
+    store.execute(
+        4, lambda board: board.link("one", "relates_to", "two", "terry"), notification_actor="terry"
+    )
+    assert sink.events[-1].tickets == (1, 2)
+    assert sink.events[-1].operations == (("Contents modified",), ("Contents modified",))
+    assert "Private" not in json.dumps(sink.events[-1].payload())
+    count = len(sink.events)
+    store.execute(
+        5, lambda board: board.comment("one", "Bot private", "bot"), notification_actor="bot"
+    )
+    assert len(sink.events) == count
+
+
+def test_approval_hint_requires_successful_exact_command(tmp_path: pathlib.Path) -> None:
+    from tests.test_lane_approval import ready, tokens
+
+    store = make_store(tmp_path / "board.json")
+    store.execute(0, lambda board: (ready(board), "seed")[1], notification_actor="bot")
+    sink = capture(store)
+    api_endpoint.execute_http_command(store, 1, ["cards", "first", "approve"], {}, "terry")
+    assert sink.events[-1].operations == (("Reviewed & approved",),)
+    count = len(sink.events)
+    with pytest.raises(api_endpoint.RevisionConflict):
+        api_endpoint.execute_http_command(store, 1, ["cards", "second", "approve"], {}, "terry")
+    assert len(sink.events) == count
+    # Copying the standard prose and moving manually must not impersonate the action.
+    store.execute(
+        2,
+        lambda board: board.comment("second", "Reviewed & approved, moving to Completed.", "terry"),
+        notification_actor="terry",
+    )
+    assert sink.events[-1].operations == (("Comment added",),)
+    store.execute(
+        3, lambda board: board.move("second", "completed", "terry"), notification_actor="terry"
+    )
+    assert sink.events[-1].operations == (("Moved lanes",),)
+    # The now-empty eligible lane is a no-op and cannot fabricate an approval.
+    result = store.approve_lane(4, "ready_for_review", "terry", {})
+    assert result["approvedCount"] == 0
+    assert len(sink.events) == count + 2
+    assert tokens(board_state.load(store.path)) == {}
+
+
+def test_bulk_approval_hint_covers_only_approved_cards(tmp_path: pathlib.Path) -> None:
+    from tests.test_lane_approval import ready, tokens
+
+    store = make_store(tmp_path / "board.json")
+    store.execute(0, lambda board: (ready(board), "seed")[1], notification_actor="bot")
+    sink = capture(store)
+    cards = tokens(board_state.load(store.path))
+    response = store.approve_lane(1, "ready_for_review", "terry", cards)
+    assert response["approvedCount"] == 2
+    assert sink.events[-1].tickets == (1, 2)
+    assert sink.events[-1].operations == (("Reviewed & approved",),) * 2
+    store.execute(
+        2, lambda board: board.comment("first", "Later review", "terry"), notification_actor="terry"
+    )
+    assert sink.events[-1].operations == (("Comment added",),)
+
+
+def test_ticket_reordering_reports_committed_ticket_numbers(tmp_path: pathlib.Path) -> None:
+    store = make_store(tmp_path / "board.json")
+
+    def seed(board: board_state.Board) -> str:
+        board.create("leaf", "Private leaf", "backlog", "bot")
+        board.create("root", "Private root", "backlog", "bot")
+        return board.link("root", "blocks", "leaf", "bot")
+
+    store.execute(0, seed, notification_actor="bot")
+    sink = capture(store)
+
+    def reorder(board: board_state.Board) -> str:
+        board.reorder_tickets("backlog", ["leaf", "root"], "terry")
+        return "reordered"
+
+    store.execute(1, reorder, notification_actor="terry")
+    assert len(sink.events) == 1
+    assert sink.events[0].tickets == (1, 2)
+    assert sink.events[0].operations == (("Ticket numbers reordered",),) * 2
+    assert board_state.load(store.path).find("root").ticket == 1

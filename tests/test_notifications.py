@@ -5,6 +5,7 @@ import pathlib
 import threading
 import time
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -15,6 +16,7 @@ from localswim.notifications import (
     NotificationDispatcher,
     NotificationEvent,
     NotificationSettings,
+    TicketOperation,
     load_settings,
     save_target,
     set_enabled,
@@ -102,6 +104,7 @@ def test_debounce_retarget_and_metadata_only() -> None:
             "until": event().until,
             "tickets": [1, 2],
             "truncated": False,
+            "operations": [["Contents modified"], ["Contents modified"]],
         }
         wait_for(lambda: dispatcher.status()["outcome"] == "queued")
     finally:
@@ -190,6 +193,7 @@ def test_ticket_cap_and_shutdown_without_quiet_wait() -> None:
     assert pending is not None
     assert len(pending.tickets) == MAX_TICKETS
     assert pending.truncated
+    assert len(pending.operations) == MAX_TICKETS
     before = time.monotonic()
     dispatcher.close(timeout=0.01)
     assert time.monotonic() - before < 0.2
@@ -229,3 +233,81 @@ def test_event_refuses_unbounded_and_naive_metadata() -> None:
         NotificationEvent(IDENTITY, "Board", "2026-11-07T10:00:00", event().until)
     with pytest.raises(ValueError, match="tickets"):
         NotificationEvent(IDENTITY, "Board", event().since, event().until, tuple(range(1, 130)))
+
+
+def test_burst_operations_merge_and_remain_aligned_after_truncation() -> None:
+    entered, release = threading.Event(), threading.Event()
+
+    def load() -> NotificationSettings:
+        entered.set()
+        assert release.wait(2)
+        return NotificationSettings(IDENTITY, TARGET, True)
+
+    def deliver(_target: str, _payload: JsonObject, _stop: threading.Event) -> str:
+        return "accepted"
+
+    dispatcher = NotificationDispatcher(IDENTITY, deliver, settings_loader=load)
+    created: tuple[TicketOperation, ...] = ("Created",)
+    try:
+        first = event()
+        dispatcher.submit(
+            NotificationEvent(
+                IDENTITY,
+                "Board",
+                first.since,
+                first.until,
+                tuple(range(1, MAX_TICKETS + 1)),
+                operations=(created,) * MAX_TICKETS,
+            )
+        )
+        assert entered.wait(1)
+        dispatcher.submit(
+            NotificationEvent(
+                IDENTITY,
+                "Board",
+                first.since,
+                first.until,
+                (1, 2, 129),
+                operations=(("Contents modified",), ("Archived",), ("Moved lanes",)),
+            )
+        )
+        dispatcher.submit(
+            NotificationEvent(
+                IDENTITY,
+                "Board",
+                first.since,
+                first.until,
+                (2, 3),
+                operations=(("Created",), ("Contents modified",)),
+            )
+        )
+        pending = dispatcher._pending  # noqa: SLF001 -- inspect bounded pending metadata
+        assert pending is not None
+        assert pending.tickets == tuple(range(1, MAX_TICKETS + 1))
+        assert pending.operations == (
+            ("Created", "Contents modified"),
+            ("Created", "Archived"),
+            ("Created", "Contents modified"),
+        ) + (("Created",),) * (MAX_TICKETS - 3)
+        assert pending.truncated
+    finally:
+        dispatcher.close(timeout=0)
+        release.set()
+        dispatcher.close()
+
+
+@pytest.mark.parametrize(
+    "operations",
+    [(("Created",), ("Moved lanes",)), (("archived",),), ((),), (("Created", "Created"),)],
+)
+def test_event_rejects_invalid_operation_metadata(operations: tuple[tuple[str, ...], ...]) -> None:
+    first = event()
+    with pytest.raises(ValueError, match="operations"):
+        NotificationEvent(
+            IDENTITY,
+            "Board",
+            first.since,
+            first.until,
+            (1,),
+            operations=cast("tuple[tuple[TicketOperation, ...], ...]", operations),
+        )

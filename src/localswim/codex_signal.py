@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
+from .notifications import OPERATIONS, TicketOperation, merge_operations
+
 type DeliveryCode = Literal[
     "accepted", "unavailable", "rejected", "invalid", "timeout", "stopped", "protocol_error"
 ]
@@ -37,8 +39,39 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _ticket_operations(
+    tickets: list[object], operations: object
+) -> dict[int, tuple[TicketOperation, ...]]:
+    if not isinstance(operations, list):
+        raise ValueError
+    operation_values = cast("list[object]", operations)
+    if len(operation_values) != len(tickets):
+        raise ValueError
+    for labels in operation_values:
+        if not isinstance(labels, list):
+            raise ValueError
+        values = cast("list[object]", labels)
+        if not 1 <= len(values) <= len(OPERATIONS) or any(
+            label not in OPERATIONS for label in values
+        ):
+            raise ValueError
+        if len(set(cast("list[str]", values))) != len(values):
+            raise ValueError
+    by_ticket: dict[int, tuple[TicketOperation, ...]] = {}
+    for ticket, labels in zip(
+        cast("list[int]", tickets),
+        cast("list[list[TicketOperation]]", operations),
+        strict=True,
+    ):
+        by_ticket[ticket] = merge_operations(by_ticket.get(ticket, ()), tuple(labels))
+    return by_ticket
+
+
 def _message(thread_id: str, payload: Mapping[str, object]) -> str:
-    if str(uuid.UUID(thread_id)) != thread_id or frozenset(payload) != _FIELDS:
+    if str(uuid.UUID(thread_id)) != thread_id or frozenset(payload) not in (
+        _FIELDS,
+        _FIELDS | {"operations"},
+    ):
         raise ValueError
     identity, label = payload["boardIdentity"], payload["label"]
     if not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None:
@@ -60,8 +93,13 @@ def _message(thread_id: str, payload: Mapping[str, object]) -> str:
         type(ticket) is not int or ticket < 1 for ticket in ticket_values
     ):
         raise ValueError
-    ticket_numbers = sorted(set(cast("list[int]", ticket_values)))
-    ticket_text = ", ".join(f"{ticket:04d}" for ticket in ticket_numbers) or "unspecified"
+    by_ticket = _ticket_operations(
+        ticket_values, payload.get("operations", [["Contents modified"] for _ in ticket_values])
+    )
+    ticket_text = (
+        ", ".join(f"{ticket:04d} ({', '.join(by_ticket[ticket])})" for ticket in sorted(by_ticket))
+        or "unspecified"
+    )
     if truncated:
         ticket_text += " (additional tickets omitted)"
     # Round outward so the displayed whole-second interval contains every edit.

@@ -690,6 +690,11 @@ uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD no
   show UTC whole-second bounds rounded outward. Use the configured board path and
   full CLI identity for validation; convert displayed bounds to RFC 3339 for the
   activity query. Do not treat abbreviated fingerprints as full identity proof.
+- Per-ticket operation hints summarize committed actions and can guide focused
+  reads. Reviewed & approved comes only from the actual single/bulk approval
+  command, never a comment mentioning approval or an ordinary move. Multiple
+  operations in one burst retain their distinct hints. Hints do not replace the
+  sanitized activity check or override authorization gates.
 - A notice does not authorize work past ticket gates. Inspect sanitized activity
   metadata first using its interval/tickets, then focused cards as needed. Proven
   complete, nonempty Bot-only activity requires no card inspection or work resumption.

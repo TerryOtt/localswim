@@ -46,7 +46,9 @@ const run=code=>vm.runInContext(code,context),settle=()=>new Promise(resolve=>se
   assert.equal(button.type,'button');assert.equal(button.disabled,false);
   assert.match(button.title,/all 2 cards/);assert.equal(button.title,button.attrs['aria-label']);
   lane.approveAll=false;assert.equal(run('laneApprovalButton(lane)'),null);lane.approveAll=true;
-  lane.items.forEach(item=>item.archived=true);assert.equal(run('laneApprovalButton(lane)').disabled,true);
+  lane.items.forEach(item=>item.archived=true);button=run('laneApprovalButton(lane)');
+  assert.equal(button.disabled,true);assert.equal(button.title,'Disabled; no cards in swimlane');
+  assert.equal(button.attrs['aria-label'],button.title);
   lane.items[0].archived=false;context.localActions.push({prefix:'/one',phase:'unknown'});
   assert.equal(run('laneApprovalButton(lane)').disabled,true);
   context.localActions=[];context.data.browserUser='bot';assert.equal(run('laneApprovalButton(lane)'),null);

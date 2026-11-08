@@ -1495,6 +1495,7 @@ class BoardStore:
         committed: board_state.Board,
         events: list[board_state.JsonObject],
         previous_project: str,
+        approved_items: frozenset[str] = frozenset(),
     ) -> None:
         """Hand off only small committed values; no settings or delivery I/O here."""
         dispatcher = self._notifications
@@ -1511,13 +1512,34 @@ class BoardStore:
                 for key in ("ticket", "otherTicket", "parentFromTicket", "parentToTicket")
                 if type(value := event.get(key)) is int and value > 0
             }
+            operations: dict[int, tuple[notifications.TicketOperation, ...]] = {}
+            for event in events:
+                ticket = event.get("ticket")
+                if type(ticket) is int and ticket > 0:
+                    operation = notifications.event_operation(
+                        event.get("kind"),
+                        approved=str(event.get("id")) in approved_items,
+                    )
+                    operations[ticket] = notifications.merge_operations(
+                        operations.get(ticket, ()), (operation,)
+                    )
+                for key in ("otherTicket", "parentFromTicket", "parentToTicket"):
+                    related = event.get(key)
+                    if type(related) is int and related > 0:
+                        operations[related] = notifications.merge_operations(
+                            operations.get(related, ()), ("Contents modified",)
+                        )
+            selected = tuple(sorted(tickets)[: notifications.MAX_TICKETS])
             dispatcher.submit(
                 notifications.NotificationEvent(
                     board_identity=self._notification_identity,
                     label=" ".join(committed.project.split())[:160] or "localswim",
                     since=min(instants).astimezone(dt.UTC).isoformat(),
                     until=max(instants).astimezone(dt.UTC).isoformat(),
-                    tickets=tuple(sorted(tickets)[: notifications.MAX_TICKETS]),
+                    tickets=selected,
+                    operations=tuple(
+                        operations.get(ticket, ("Contents modified",)) for ticket in selected
+                    ),
                     truncated=len(tickets) > notifications.MAX_TICKETS,
                 )
             )
@@ -1665,6 +1687,7 @@ class BoardStore:
         card_precondition: tuple[str, str] | None = None,
         card_response: tuple[str, dict[str, str]] | None = None,
         notification_actor: str | None = None,
+        notification_approved: set[str] | None = None,
     ) -> tuple[str, int]:
         """Apply one command under the file lock and commit one new revision."""
         if outcome is not None:
@@ -1733,7 +1756,9 @@ class BoardStore:
                     for user in committed.users
                 )
             ):
-                self._submit_notification(committed, events, previous_project)
+                self._submit_notification(
+                    committed, events, previous_project, frozenset(notification_approved or ())
+                )
             return result, committed.revision
 
     def configure_ticket_order(
@@ -1787,14 +1812,18 @@ class BoardStore:
                     "approvedCount": 0,
                 }
             count = 0
+            approved_items: set[str] = set()
 
             def mutate(board: board_state.Board) -> str:
                 nonlocal count
-                self._check_lane_approval(board, lane, actor, cards)
+                items = self._check_lane_approval(board, lane, actor, cards)
                 count = board.approve_lane(lane, actor)
+                approved_items.update(item.id for item in items)
                 return f"Approved {count} review card(s), moving to Completed."
 
-            result, revision = self.execute(expected, mutate, notification_actor=actor)
+            result, revision = self.execute(
+                expected, mutate, notification_actor=actor, notification_approved=approved_items
+            )
             return {"result": result, "revision": revision, "approvedCount": count}
 
     def _ticket_order_snapshot(self) -> board_state.Board:
@@ -4520,7 +4549,8 @@ function laneApprovalButton(lane) {
   button.type = 'button'; button.className = 'reorder-deps lane-approve';
   button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
     + '<path d="M1 21h4V9H1v12zM23 10c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>';
-  button.title = 'Approve all ' + count + ' cards in ' + lane.label + ' and move to Completed';
+  button.title = count === 0 ? 'Disabled; no cards in swimlane'
+    : 'Approve all ' + count + ' cards in ' + lane.label + ' and move to Completed';
   button.setAttribute('aria-label',button.title);
   button.disabled = count === 0 || laneApprovalBusy(prefix) || pendingLaneApprovals.has(key) || unconfirmedLaneApprovals.get(key) === data;
   button.addEventListener('click',() => approveLane(lane,prefix,epoch,revision,count,button));
@@ -5110,11 +5140,13 @@ function laneEl(lane) {
   }
   if (lane.reorderByDependencies) {
     const reorder = document.createElement('button'); reorder.type = 'button';
-    reorder.className = 'reorder-deps'; reorder.title = 'Reorder ticket numbers by dependencies';
-    reorder.setAttribute('aria-label','Reorder ' + lane.label + ' ticket numbers by dependencies');
+    const count = lane.items.filter(item => !item.archived).length;
+    reorder.className = 'reorder-deps';
+    reorder.title = count === 0 ? 'Disabled; swimlane is empty' : 'Reorder ticket numbers by dependencies';
+    reorder.setAttribute('aria-label',count === 0 ? reorder.title : 'Reorder ' + lane.label + ' ticket numbers by dependencies');
     reorder.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
       + '<path d="M3 5h4M3 11h7M3 17h10M18 4v16m-4-4 4 4 4-4"/></svg>';
-    reorder.disabled = lane.items.filter(item => !item.archived).length < 2;
+    reorder.disabled = count < 2;
     reorder.addEventListener('click', ev => { ev.stopPropagation(); openTicketOrder(lane.state); });
     el.querySelector('h2').appendChild(reorder);
   }
@@ -6580,13 +6612,16 @@ def execute_http_command(
         )
         return result, revision, None, uploaded
     effective_priority: str | None = None
+    approved_items: set[str] = set()
 
     def mutate(board: board_state.Board) -> str:
         nonlocal effective_priority
         if is_card and parts[2] == "approve":
             if body:
                 raise board_state.BoardError("review approval requires an empty request body")
-            return board.approve_review(parts[1], actor)
+            result = board.approve_review(parts[1], actor)
+            approved_items.add(board.find(parts[1]).id)
+            return result
         result = (
             apply_attachment_command(board, parts[1], parts[2], body, actor)
             if is_card and parts[2] in {"attachment", "cover"}
@@ -6602,6 +6637,7 @@ def execute_http_command(
         card_precondition=precondition,
         card_response=capture,
         notification_actor=actor,
+        notification_approved=approved_items,
     )
     return result, revision, effective_priority, None
 
