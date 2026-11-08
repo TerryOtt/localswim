@@ -3075,7 +3075,7 @@ PAGE = """<!doctype html>
   .reorder-deps { flex: none; width: 44px; height: 44px; padding: 8px; margin-left: 4px;
     font-size: inherit; display: inline-flex; align-items: center; justify-content: center;
     border: 0; border-radius: 4px; background: #444; color: #FFF; cursor: pointer;
-    transition: background-color .2s ease-in, color .2s ease-in; }
+    transition: background-color .1s ease-in, color .1s ease-in; }
   .reorder-deps:hover:enabled { background: #FFF; color: #444; }
   .reorder-deps:focus-visible { outline: 3px solid #172B4D; outline-offset: 2px; }
   /* Match the visible plus ink, which is smaller than its 24px font box. */
