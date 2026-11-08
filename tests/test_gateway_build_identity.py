@@ -101,7 +101,7 @@ if(input.mode==='card-focus'){
   vm.runInContext('paint()',context);assert.equal(context.document.activeElement,get('find'));
   get('say').focus();vm.runInContext('paint()',context);
   assert.equal(context.document.activeElement,get('say'));
-  context.openId='b';vm.runInContext(section(input.page,'function closeCard()',
+  context.openId='b';vm.runInContext(section(input.page,'let cardUploadToken =','async function uploadCardFiles(')+section(input.page,'function closeCard()',
     "document.getElementById('close').addEventListener"),context);
   vm.runInContext('closeCard()',context);assert.equal(context.document.activeElement,get('find'));
   context.data.lanes[0].items=[item('a')];vm.runInContext('paint()',context);

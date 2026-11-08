@@ -131,7 +131,7 @@ function acknowledgeRow(row) {
   await new Promise(resolve=>setImmediate(resolve));
   if(input.mode==='close-pending'){
    const start=input.page.indexOf('function closeCard()'),end=input.page.indexOf("\ndocument.getElementById('close')",start);
-   vm.runInContext(input.page.slice(start,end),r.context);
+   vm.runInContext(input.page.slice(input.page.indexOf('let cardUploadToken ='),input.page.indexOf('async function uploadCardFiles('))+input.page.slice(start,end),r.context);
    r.el('say').value='Unsent drawer text';r.run('closeCard()');
    assert.equal(r.context.openId,null);assert.equal(r.context.drafts.one,'Unsent drawer text');
    assert.equal(calls[0].signal.aborted,false);release();

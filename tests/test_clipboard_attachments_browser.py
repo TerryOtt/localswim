@@ -13,14 +13,14 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const page=JSON.parse(fs.readFileSync(0,'utf8')).page,nodes=new Map(),calls=[],refusals=[];
 function node(){return {disabled:false,children:[],replaceChildren(){this.children=[]},append(...items){this.children.push(...items)},addEventListener(t,f){this[t]=f}}}
 function el(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)}
-let writable=true,read=async()=>'',outcome=true,navigate=false;
+let writable=true,read=async()=>'',outcome=true,navigate=false,commandGate=null;
 const card={id:'original',cardVersion:'v1'};
 const ctx=vm.createContext({crypto:require('crypto').webcrypto,File:require('buffer').File,
  document:{getElementById:el,createElement:node},window:{workspaceEpoch:1},API_PREFIX:'/board',openId:'original',mkOpen:null,
  data:{attachmentMaxBytes:10},localActions:[],workspaceCanMutate:()=>writable,
  itemById:id=>id==='original'?card:null,toast(){},attachmentRefusal:reason=>refusals.push(reason),
  fileBase64:file=>read(file),attachmentCommand:async(id,action,body,version)=>{
-   calls.push({id,action,body,version});if(navigate)ctx.window.workspaceEpoch++;
+   calls.push({id,action,body,version});if(commandGate) await commandGate();if(navigate)ctx.window.workspaceEpoch++;
    return outcome;
  },apiGet:async()=>({cardVersion:'v2'}),acknowledgeSnapshot:()=>true,snapshotItem:s=>s});
 const start=page.indexOf('function clipboardImages('),end=page.indexOf('// ---- the detail panel',start);
@@ -42,7 +42,29 @@ ctx.files=[{name:'first.png',size:1},{name:'second.png',size:1}];
 (async()=>{
  await run('uploadCardFiles(files)');assert.equal(calls.length,2);
  assert.deepEqual(calls.map(c=>c.version),['v1','v2']);assert.ok(calls.every(c=>c.id==='original'));
- calls.length=0;writable=false;await run('uploadCardFiles(files)');assert.equal(calls.length,0);writable=true;
+ calls.length=0;
+ // Delayed reads and writes show immediate stages without locking text input.
+ let releaseRead,releaseUpload;
+ read=()=>new Promise(resolve=>{releaseRead=resolve});
+ commandGate=()=>new Promise(resolve=>{releaseUpload=resolve});
+ ctx.files=[{name:'first.png',size:1}];const delayed=run('uploadCardFiles(files)');
+ assert.match(el('p-upload-status').textContent,/Preparing attachment 1 of 1/);
+ assert.equal(el('p-upload').disabled,true);assert.equal(el('say').disabled,false);
+ releaseRead('encoded');while(!releaseUpload) await new Promise(resolve=>setImmediate(resolve));
+ assert.match(el('p-upload-status').textContent,/Uploading attachment 1 of 1/);
+ releaseUpload();await delayed;
+ assert.equal(el('p-upload-status').textContent,'');assert.equal(el('p-upload').disabled,false);
+ commandGate=null;
+ // Closing and reopening the same card invalidates the older read, including its cleanup.
+ let oldRead;read=()=>new Promise(resolve=>{oldRead=resolve});
+ const old=run('uploadCardFiles(files)');run('resetCardUploadFeedback()');
+ let newRead;read=()=>new Promise(resolve=>{newRead=resolve});
+ const newer=run('uploadCardFiles(files)');oldRead('old');await old;
+ assert.match(el('p-upload-status').textContent,/Preparing/);assert.equal(el('p-upload').disabled,true);
+ assert.equal(calls.length,1);newRead('new');await newer;
+ assert.equal(calls.length,2);assert.equal(el('p-upload-status').textContent,'');
+ ctx.files=[{name:'first.png',size:1},{name:'second.png',size:1}];
+ calls.length=0;read=async()=>'';writable=false;await run('uploadCardFiles(files)');assert.equal(calls.length,0);writable=true;
  ctx.localActions.push({prefix:'/board',cardId:'original',phase:'unknown'});
  await run('uploadCardFiles(files)');assert.equal(calls.length,0);ctx.localActions.length=0;
  el('p-upload').disabled=true;await run('uploadCardFiles(files)');assert.equal(calls.length,0);el('p-upload').disabled=false;

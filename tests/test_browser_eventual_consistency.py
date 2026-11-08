@@ -313,11 +313,11 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const input=JSON.parse(fs.readFileSync(0,'utf8'));let resolveResponse,closed=0;
 const fields={'mk-subject':{value:'Subject'},'mk-detail':{value:'Detail'},'mk-priority':{value:'P3'},'mk-owner':{value:'bot'},'mk-go':{disabled:false},'mk-files':{disabled:false}};
 let links=[];
-const context=vm.createContext({crypto:require('crypto').webcrypto,mkFiles:[],mkBusy:false,mkAttempt:null,mkOpen:'backlog',window:{workspaceEpoch:1},API_PREFIX:'/board',
+const context=vm.createContext({crypto:require('crypto').webcrypto,mkFiles:[],mkBusy:false,mkAttempt:null,mkOpen:'backlog',mkFilePhase:'',mkPhaseToken:null,renderMakeFiles(){},window:{workspaceEpoch:1},API_PREFIX:'/board',
  document:{getElementById:id=>fields[id]},relationshipSpecs:()=>links,toast(){},acceptRevision(){},
  closeMake(){closed++},apiPost:async()=>await new Promise(resolve=>resolveResponse=resolve)});
 const start=input.page.indexOf('function makeDraft()'),end=input.page.indexOf("document.getElementById('mk-go').addEventListener",start);
-vm.runInContext(input.page.slice(start,end),context);
+vm.runInContext(input.page.slice(input.page.indexOf('function resetMakeFilePhase()'),input.page.indexOf('function renderMakeFiles()'))+input.page.slice(start,end),context);
 (async()=>{
  const pending=vm.runInContext('submitMake()',context);
  if(input.mode==='owner')fields['mk-owner'].value='human';
@@ -353,7 +353,7 @@ const input=JSON.parse(fs.readFileSync(0,'utf8'));let calls=0,closed=0,posted;
 const fields={'mk-subject':{value:'Subject'},'mk-detail':{value:'Detail'},'mk-priority':{value:'P3'},'mk-owner':{value:'bot'},'mk-go':{disabled:false},'mk-files':{disabled:false}};
 const initial={revision:1,lanes:[{state:'backlog',items:[]}]};
 const context=vm.createContext({AbortSignal,crypto:require('crypto').webcrypto,
- mkFiles:[],mkBusy:false,mkOpen:'backlog',mkAttempt:null,window:{workspaceEpoch:1},API_PREFIX:'/board',API_TOKEN:'synthetic',
+ mkFiles:[],mkBusy:false,mkOpen:'backlog',mkAttempt:null,mkFilePhase:'',mkPhaseToken:null,window:{workspaceEpoch:1},API_PREFIX:'/board',API_TOKEN:'synthetic',
  data:initial,authoritativeData:initial,HAY:{clear(){}},paint(){},tick(){},toast(){},renderMakeFiles(){},
  sessionStorage:{getItem(){return null},setItem(){}},
  document:{getElementById:id=>fields[id]},relationshipSpecs:()=>[],
@@ -364,7 +364,7 @@ const context=vm.createContext({AbortSignal,crypto:require('crypto').webcrypto,
 });
 const helpers=input.page.slice(input.page.indexOf('// Pending browser intent'),input.page.indexOf('// **The repaint counter'));
 const make=input.page.slice(input.page.indexOf('function restoreMakeAttempt('),input.page.indexOf("document.getElementById('mk-go').addEventListener"));
-vm.runInContext(helpers+make,context);
+vm.runInContext(helpers+input.page.slice(input.page.indexOf('function resetMakeFilePhase()'),input.page.indexOf('function renderMakeFiles()'))+make,context);
 (async()=>{
  await vm.runInContext('submitMake()',context);
  assert.equal(closed,0);assert.equal(calls,1);assert.equal(context.mkOpen,'backlog');

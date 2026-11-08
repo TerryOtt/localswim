@@ -16,6 +16,7 @@ function node(){return {value:'',children:[],disabled:false,classList:{remove(){
  addEventListener(type,fn){this[type]=fn},focus(){}}}
 function el(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)}
 el('mk-subject').value='New';el('mk-detail').value='Draft';el('mk-priority').value='P3';el('mk-owner').value='bot';
+let releaseRead,releaseUpload;
 let board={revision:1,browserUser:'human',lanes:[{state:'backlog',items:[]}]},fail=true,closed=0;
 const ctx=vm.createContext({crypto:require('crypto').webcrypto,Uint8Array,
  document:{getElementById:el,createElement:node},window:{workspaceEpoch:1},API_PREFIX:'/one',
@@ -32,6 +33,7 @@ const ctx=vm.createContext({crypto:require('crypto').webcrypto,Uint8Array,
   return {ok:true,status:200,json:async()=>({revision:board.revision})};
  }
  ctx.localActions.push({id:'intent-'+calls.length,prefix:'/one',cardId:body.id||board.lanes[0].items[0].id,kind:'attachment',body});
+ if(input.mode==='delayed' && version) await new Promise(resolve=>{releaseUpload=resolve});
  await Promise.resolve();
  assert.ok(run('mkFiles.find(entry => entry.status === \"uploading\").actionId'),'intent correlated before awaiting response');
  const card=board.lanes[0].items[0];
@@ -53,26 +55,40 @@ const run=code=>vm.runInContext(code,ctx);
 // Keep real cancellation elsewhere; count only successful close in this harness.
 ctx.closed=()=>closed++;run('closeMake = () => closed()');
 run("mkOpen='backlog'");
-function file(name,size=1){return {name,size,type:input.clipboard?'image/png':'text/plain',lastModified:1,arrayBuffer:async()=>Uint8Array.from([1]).buffer}}
+function file(name,size=1){return {name,size,type:input.clipboard?'image/png':'text/plain',lastModified:1,arrayBuffer:async()=>{if(input.mode==='delayed'&&!releaseRead) await new Promise(resolve=>{releaseRead=resolve});return Uint8Array.from([1]).buffer}}}
 function select(files){
  if(input.clipboard)el('mk').paste({clipboardData:{getData:()=>'',items:files.map(f=>({kind:'file',type:f.type,getAsFile:()=>f}))},preventDefault(){}});
  else el('mk-files').change({target:{files,value:''}});
 }
 const selected=[file('first.txt'),file('second.txt')];if(input.mode==='oversize')selected[1].size=10485761;
 select(selected);
+assert.ok(notices.some(text=>/added to draft/.test(text)));
+assert.match(el('mk-file-status').children[0].textContent,/Added to draft; not yet uploaded/);
 if(input.clipboard){assert.match(run('mkFiles[0].name'),/^screen-clip-.*\.png$/);assert.notEqual(run('mkFiles[0].name'),run('mkFiles[1].name'))}
 (async()=>{
- await run('submitMake()');
+ const submitting=run('submitMake()');
+ if(input.mode!=='oversize') assert.match(el('mk-file-status').children[0].textContent,/Creating card; attachments are waiting to upload/);
+ if(input.mode==='delayed'){
+  while(!releaseRead) await new Promise(resolve=>setImmediate(resolve));
+  assert.match(el('mk-file-status').children[0].textContent,/Preparing attachment 1 of 2/);
+  assert.equal(el('mk-detail').disabled,false);releaseRead();
+  while(!releaseUpload) await new Promise(resolve=>setImmediate(resolve));
+  assert.match(el('mk-file-status').children[0].textContent,/Uploading attachment 1 of 2/);
+  input.mode='success';releaseUpload();
+ }
+ await submitting;
+ assert.ok(!el('mk-file-status').children.some(row=>/Preparing attachment|Uploading attachment .* of |Creating card;/.test(row.textContent)));
  if(input.mode==='oversize'){assert.equal(calls.length,0);assert.equal(run('mkFiles.length'),2);return}
  assert.equal(calls.filter(c=>c.path.endsWith('/cards')).length,1);
  if(input.mode==='success'){assert.equal(closed,1);assert.equal(calls.length,3);return}
- if(input.mode==='navigation'){assert.equal(calls.length,2);assert.equal(closed,0);return}
+ if(input.mode==='navigation'){assert.equal(calls.length,2);assert.equal(closed,0);assert.equal(run('mkFilePhase'),'');return}
  assert.equal(closed,0);assert.equal(run('mkFiles[0].status'),'saved');
  assert.equal(run('mkFiles[1].status'),['refusal','wrongfile'].includes(input.mode)?'refused':'unknown');
  if(input.mode==='reload-controls'){
   ctx.restoredFiles=JSON.parse(run('JSON.stringify(mkFiles)'));
   ctx.restoredAttempt=JSON.parse(run('JSON.stringify(mkAttempt)'));
-  run('mkAttempt=null;mkFiles=[];restoreMakeFiles(restoredFiles);restoreMakeAttempt(restoredAttempt)');
+  run("mkFilePhase='Old board';mkAttempt=null;mkFiles=[];restoreMakeFiles(restoredFiles);restoreMakeAttempt(restoredAttempt)");
+  assert.equal(run('mkFilePhase'),'');
   assert.equal(el('mk-go').textContent,'Continue uploads');
   assert.ok(el('mk-file-status').children.every(row=>row.children.length===0));
   assert.equal(run('mkAttempt.confirmed'),true);
@@ -94,7 +110,7 @@ if(input.clipboard){assert.match(run('mkFiles[0].name'),/^screen-clip-.*\.png$/)
  // Reload serialization keeps outcomes/metadata without claiming browser File persistence.
  const saved=JSON.parse(run('JSON.stringify(mkFiles)'));assert.equal(saved[1].file,undefined);
  ctx.saved=saved;const originalAttempt=run('mkAttempt');
- const restore=vm.createContext({saved,renderMakeFiles(){}});
+ const restore=vm.createContext({saved,renderMakeFiles(){},resetMakeFilePhase(){}});
  const restoreStart=input.page.indexOf('function restoreMakeFiles(');
  vm.runInContext('let mkFiles=[];'+input.page.slice(restoreStart,input.page.indexOf("document.getElementById('mk-files')",restoreStart)),restore);
  vm.runInContext('restoreMakeFiles(saved)',restore);
@@ -115,6 +131,7 @@ if(input.clipboard){assert.match(run('mkFiles[0].name'),/^screen-clip-.*\.png$/)
     "mode",
     [
         "success",
+        "delayed",
         "refusal",
         "wrongfile",
         "unknown",

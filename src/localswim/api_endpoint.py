@@ -3011,7 +3011,7 @@ PAGE = """<!doctype html>
   #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
            background: var(--ink); color: #FFFFFF; padding: 9px 15px;
            border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity .18s;
-           pointer-events: none; z-index: 40; max-width: 70vw; }
+           pointer-events: none; z-index: 42; max-width: 70vw; }
   #toast.show { opacity: 1; }
   #toast.bad { background: var(--p0); }
 
@@ -3080,8 +3080,7 @@ PAGE = """<!doctype html>
     transition: background-color .1s ease-in, color .1s ease-in; }
   .reorder-deps:hover:enabled { background: #FFF; color: #444; }
   .reorder-deps:focus-visible { outline: 3px solid #172B4D; outline-offset: 2px; }
-  /* Match the visible plus ink, which is smaller than its 24px font box. */
-  .reorder-deps svg { width: 1em; height: 1em; fill: none; stroke: currentColor;
+  .reorder-deps svg { width: 24px; height: 24px; fill: none; stroke: currentColor;
     stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .lane-approve { background: #14663F; color: #FFF; }
   .lane-approve:hover:enabled { background: #FFF; color: #14663F; }
@@ -3208,6 +3207,7 @@ move any card whoever owns it. Click to hand it over."></button>
       <h3>Attachments</h3>
       <button id="p-upload" type="button">Upload attachment</button>
       <input id="p-upload-file" type="file" hidden aria-label="Attachment file">
+      <div id="p-upload-status" role="status" aria-live="polite"></div>
       <div class="keyhint">Upload a file or paste a screen clip (Ctrl+V) anywhere in this card. Maximum 10 MiB per file.</div>
       <div id="p-attachments"></div>
       <h3 id="p-rel-h">Relationships
@@ -4247,21 +4247,33 @@ function attachmentInputReady(source) {
   return workspaceCanMutate() && !!itemById(source) && !document.getElementById('p-upload').disabled
     && !localActions.some(action => action.prefix === API_PREFIX && action.cardId === source && action.phase !== 'dismissed');
 }
+let cardUploadToken = null;
+function resetCardUploadFeedback() {
+  cardUploadToken = null;
+  document.getElementById('p-upload').disabled = false;
+  document.getElementById('p-upload-status').textContent = '';
+}
 async function uploadCardFiles(files) {
   const source = openId, prefix = API_PREFIX, epoch = window.workspaceEpoch;
   if (!attachmentInputReady(source)) { toast('Wait for the board and pending saves before attaching files.',true); return; }
   const upload = document.getElementById('p-upload');
-  const current = () => epoch === window.workspaceEpoch && prefix === API_PREFIX && openId === source;
+  const token = {}; cardUploadToken = token;
+  const current = () => cardUploadToken === token && epoch === window.workspaceEpoch && prefix === API_PREFIX && openId === source;
   let version = itemById(source).cardVersion;
+  const status = document.getElementById('p-upload-status');
   upload.disabled = true;
+  status.textContent = 'Preparing attachment 1 of ' + files.length + '…';
+  toast('Preparing ' + files.length + (files.length === 1 ? ' attachment…' : ' attachments…'));
   try {
     for (const [index,file] of files.entries()) {
       if (!current() || !workspaceCanMutate()) return;
       if (file.size > (data.attachmentMaxBytes || 10485760)) {
         attachmentRefusal(file.name + ' is too large. The maximum is 10 MiB per file for Git storage.'); return;
       }
+      status.textContent = 'Preparing attachment ' + (index + 1) + ' of ' + files.length + '…';
       const bytes = await fileBase64(file);
       if (!current() || !workspaceCanMutate()) return;
+      status.textContent = 'Uploading attachment ' + (index + 1) + ' of ' + files.length + '…';
       if (!await attachmentCommand(source, 'attachment', {name:file.name,data:bytes}, version)) return;
       if (!current() || index === files.length - 1) return;
       const latest = await apiGet(prefix + '/board');
@@ -4270,7 +4282,7 @@ async function uploadCardFiles(files) {
       if (!version) return;
     }
   } catch (err) { if (current()) attachmentRefusal(String(err)); }
-  finally { upload.disabled = false; }
+  finally { if (cardUploadToken === token) resetCardUploadFeedback(); }
 }
 document.getElementById('p-upload').addEventListener('click', () => {
   if (attachmentInputReady(openId)) document.getElementById('p-upload-file').click();
@@ -4347,6 +4359,7 @@ function openCard(id) {
   // a refresh and a genuinely new card inherits the previous card's text.
   const opening = openId !== id;
   if (opening) {
+    resetCardUploadFeedback();
     const box = document.getElementById('say');
     if (openId) drafts[openId] = box.value;
     box.value = drafts[id] || '';
@@ -4496,6 +4509,7 @@ function closeCard() {
   // same defect as dropping it on repaint, just slower to notice.
   if (openId) drafts[openId] = document.getElementById('say').value;
   const source = openId;
+  resetCardUploadFeedback();
   closeEditors(false);
   relationshipDraft = null;
   openId = null;
@@ -4927,16 +4941,20 @@ document.getElementById('say').addEventListener('keydown', ev => {
 //
 // **`mkOpen` is still kept**, because the lane a card is being written for has to
 // outlive the repaint too.
-let mkOpen = null, mkAttempt = null, mkFiles = [], mkBusy = false;
+let mkOpen = null, mkAttempt = null, mkFiles = [], mkBusy = false, mkFilePhase = '', mkPhaseToken = null;
+function resetMakeFilePhase() { mkPhaseToken = null; mkFilePhase = ''; }
 
 function renderMakeFiles() {
   const box = document.getElementById('mk-file-status'); box.replaceChildren();
+  if (mkFilePhase) {
+    const phase = document.createElement('div'); phase.textContent = mkFilePhase; box.append(phase);
+  }
   for (const entry of mkFiles) {
     const row = document.createElement('div');
     row.textContent = entry.name + ' — ' + (entry.status === 'saved' ? 'Uploaded'
       : entry.status === 'uploading' ? 'Uploading'
       : entry.status === 'unknown' ? 'Outcome unconfirmed; inspect saved attachments before any new upload'
-      : !entry.file ? entry.source === 'clipboard' ? 'Paste the original screen clip again to continue' : 'Reselect this file to continue' : entry.status === 'refused' ? 'Not uploaded; retry available' : 'Pending');
+      : !entry.file ? entry.source === 'clipboard' ? 'Paste the original screen clip again to continue' : 'Reselect this file to continue' : entry.status === 'refused' ? 'Not uploaded; retry available' : 'Added to draft; not yet uploaded');
     if (!mkAttempt) {
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
       remove.addEventListener('click',() => {
@@ -4950,26 +4968,29 @@ function renderMakeFiles() {
 }
 function captureMakeFiles() { window.WorkspaceUI?.capture(); }
 function restoreMakeFiles(entries) {
+  resetMakeFilePhase();
   mkFiles = Array.isArray(entries) ? entries : [];
   for (const entry of mkFiles) if (entry.status === 'uploading') entry.status = 'unknown';
   renderMakeFiles();
 }
 function selectMakeFiles(files, source) {
   if (mkBusy || !workspaceCanMutate()) return;
+  let accepted = 0;
   for (const file of files) {
     const candidates = mkFiles.filter(entry => !entry.file && !['saved','unknown'].includes(entry.status)
       && (source === 'clipboard' ? entry.source === source && entry.size === file.size && entry.type === file.type
         : entry.name === file.name && entry.size === file.size && entry.modified === file.lastModified));
     const missing = candidates.length === 1 ? candidates[0] : null;
-    if (missing) Object.defineProperty(missing,'file',{value:file,writable:true,configurable:true});
+    if (missing) { Object.defineProperty(missing,'file',{value:file,writable:true,configurable:true}); accepted++; }
     else if (!mkAttempt && !candidates.length) {
       const entry = {name:source === 'clipboard' ? clipboardName(file) : file.name,
         size:file.size,modified:file.lastModified,status:'pending',source,type:file.type};
-      Object.defineProperty(entry,'file',{value:file,writable:true,configurable:true}); mkFiles.push(entry);
+      Object.defineProperty(entry,'file',{value:file,writable:true,configurable:true}); mkFiles.push(entry); accepted++;
     } else toast(source === 'clipboard' ? 'Paste one original pending screen clip with matching size and type. Unconfirmed uploads cannot be repeated.'
       : 'Reselect a pending file with its original name, size and modification date.',true);
   }
   renderMakeFiles(); captureMakeFiles();
+  if (accepted) toast(accepted + (accepted === 1 ? ' attachment added to draft.' : ' attachments added to draft.'));
 }
 document.getElementById('mk-files').addEventListener('change', ev => {
   selectMakeFiles(ev.target.files, 'file'); ev.target.value = '';
@@ -4981,11 +5002,12 @@ document.getElementById('mk').addEventListener('paste', event => {
   event.preventDefault(); selectMakeFiles(images,'clipboard');
 });
 
-async function uploadMakeFiles(attempt, prefix, epoch) {
-  const current = () => mkAttempt === attempt && prefix === API_PREFIX && epoch === window.workspaceEpoch;
-  for (const entry of mkFiles) {
+async function uploadMakeFiles(attempt, prefix, epoch, phaseToken) {
+  const current = () => mkPhaseToken === phaseToken && mkAttempt === attempt && prefix === API_PREFIX && epoch === window.workspaceEpoch;
+  for (const [index,entry] of mkFiles.entries()) {
     if (!current()) return false;
     if (entry.status === 'saved') continue;
+    mkFilePhase = 'Preparing attachment ' + (index + 1) + ' of ' + mkFiles.length + '…'; renderMakeFiles();
     const latest = await apiGet(prefix + '/board');
     if (!current() || !acknowledgeSnapshot(latest,prefix)) return false;
     const card = snapshotItem(latest,attempt.id);
@@ -5014,7 +5036,7 @@ async function uploadMakeFiles(attempt, prefix, epoch) {
     const encoded = await fileBase64(entry.file);
     if (!current()) return false;
     entry.before = (card.attachments || []).map(file => file.id);
-    entry.status = 'uploading'; renderMakeFiles(); captureMakeFiles();
+    entry.status = 'uploading'; mkFilePhase = 'Uploading attachment ' + (index + 1) + ' of ' + mkFiles.length + '…'; renderMakeFiles(); captureMakeFiles();
     let response, out;
     try {
       const sending = apiPost(prefix + '/cards/' + encodeURIComponent(attempt.id) + '/attachment',
@@ -5048,6 +5070,7 @@ function mkDirty() {
 }
 
 function openMake(lane) {
+  resetMakeFilePhase();
   mkAttempt = null; mkFiles = []; renderMakeFiles();
   mkOpen = lane.state;
   document.getElementById('mk-where').textContent =
@@ -5093,6 +5116,7 @@ function closeMake(force) {
         : 'Discard this card? What you typed will be lost.')) {
     return;
   }
+  resetMakeFilePhase();
   mkOpen = null; mkAttempt = null; mkFiles = [];
   document.getElementById('mk-files').value = ''; renderMakeFiles();
   document.getElementById('mk-subject').value = '';
@@ -5161,9 +5185,10 @@ async function submitMake() {
     return;
   }
   if (!mkAttempt) mkAttempt = {id:'card-' + crypto.randomUUID(), draft:submitted, confirmed:false};
-  const attempt = mkAttempt, prefix = API_PREFIX;
+  const attempt = mkAttempt, prefix = API_PREFIX, phaseToken = {}; mkPhaseToken = phaseToken;
   const filesSelected = mkFiles.length > 0;
   mkBusy = true; go.disabled = true; document.getElementById('mk-files').disabled = true;
+  if (filesSelected) { mkFilePhase = attempt.confirmed ? 'Preparing attachments…' : 'Creating card; attachments are waiting to upload…'; renderMakeFiles(); }
   try {
     const res = attempt.confirmed ? {ok:true,json:async () => ({result:'Card already created'})}
       : await apiPost(prefix + '/cards', {...submitted, id:attempt.id});
@@ -5176,7 +5201,7 @@ async function submitMake() {
     }
     if (filesSelected) {
       attempt.confirmed = true; renderMakeFiles(); captureMakeFiles();
-      if (!await uploadMakeFiles(attempt,prefix,epoch)) return;
+      if (!await uploadMakeFiles(attempt,prefix,epoch,phaseToken)) return;
     }
     // **Only cleared once the server has it.** Clearing on click would throw the
     // text away on a refusal, which is the same defect as the repaint wipe
@@ -5189,6 +5214,7 @@ async function submitMake() {
     toast('Could not reach the board: ' + err, true);
   } finally {
     mkBusy = false; go.disabled = false; document.getElementById('mk-files').disabled = false;
+    if (mkPhaseToken === phaseToken) { resetMakeFilePhase(); renderMakeFiles(); }
   }
 }
 

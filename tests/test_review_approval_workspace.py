@@ -106,6 +106,7 @@ document.activeElement = document.body;
 for (const id of ['p-subject', 'p-subject-edit', 'p-detail', 'p-detail-editor', 'find']) {
   elements[id] = {hidden: false, focus() {document.activeElement = this;}};
 }
+elements['p-upload'] = {disabled:false}; elements['p-upload-status'] = {textContent:''};
 for (const id of ['scrim', 'panel']) {
   elements[id] = {classList: {remove(name) {events.push([id, name]);}}};
 }
@@ -136,7 +137,8 @@ function fetch(path, options) {
 }
 ` + section('// Pending browser intent', '// **The repaint counter') +
 section('const pendingApprovals =', 'function openCard('), ctx);
-vm.runInContext(section('let editing = null;', 'function startSubjectEdit()') +
+vm.runInContext(section('let cardUploadToken =', 'async function uploadCardFiles(') +
+  section('let editing = null;', 'function startSubjectEdit()') +
   section('function closeCard()',
   "document.getElementById('close').addEventListener"), ctx);
 vm.runInContext(`this.run = async () => {
