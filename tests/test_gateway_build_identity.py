@@ -286,7 +286,7 @@ if(input.mode==='card-focus'){
   context.data={actors:input.actors};
   vm.runInContext(section(input.page,'function userLabel(',
     '// **The owner control CYCLES'),context);
-  vm.runInContext(section(input.page,'const HAY =','function paint()'),context);
+  vm.runInContext(section(input.page,'const HAY =','function paint('),context);
   context.items=input.items;
   const haystacks=vm.runInContext('items.map(hay)',context);
   const cached=vm.runInContext(`items[0].subject='replacement';hay(items[0])`,context);

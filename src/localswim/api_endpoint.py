@@ -2552,7 +2552,7 @@ PAGE = """<!doctype html>
   #badge-slot { flex: 0 0 10em; min-width: 0; display: flex; justify-content: flex-end; }
   #badge { font-size: 11px; font-weight: 700; letter-spacing: .06em;
            color: #FFFFFF; background: var(--live); border-radius: 4px;
-           padding: 3px 8px; flex: 0 1 auto; white-space: nowrap;
+           padding: 3px 8px; flex: 0 1 auto; width: 100%; box-sizing: border-box; text-align: center; white-space: nowrap;
            overflow: hidden; text-overflow: ellipsis; transition: background .2s; }
   #badge.warn { background: var(--p1); }
   #badge.dead { background: var(--p0); }
@@ -3043,12 +3043,20 @@ PAGE = """<!doctype html>
   .attachment a { display: block; color: var(--ink); overflow-wrap: anywhere; }
   .attachment-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .attachment-actions button, #p-upload { font: inherit; cursor: pointer; padding: 4px 8px; }
-  .reorder-deps { width: 25px; height: 25px; padding: 3px; margin-left: 4px;
-    border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
-  .reorder-deps:hover { background: #DCE1EB; }
+  .reorder-deps { width: 30px; height: 30px; padding: 3px; margin-left: 4px;
+    font-size: inherit; display: inline-flex; align-items: center; justify-content: center;
+    border: 0; border-radius: 4px; background: #444; color: #FFF; cursor: pointer; }
+  .reorder-deps:hover { background: #333; }
+  .reorder-deps:focus-visible { outline: 3px solid #172B4D; outline-offset: 2px; }
   .reorder-deps:disabled { opacity: .35; cursor: default; }
-  .reorder-deps svg { width: 19px; height: 19px; fill: none; stroke: currentColor;
+  /* Match the visible plus ink, which is smaller than its 24px font box. */
+  .reorder-deps svg { width: 1em; height: 1em; fill: none; stroke: currentColor;
     stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .lane-approve { width: 44px; height: 44px; padding: 8px; background: #14663F;
+    color: #FFF; }
+  .lane-approve:hover { background: #104F31; }
+  .lane-approve:focus-visible { outline: 3px solid #172B4D; outline-offset: 2px; }
+  .lane-approve svg { fill: currentColor; stroke: none; }
   #ticket-order-dialog { width: min(740px, 88vw); max-height: 85vh; overflow: auto;
     border: 1px solid var(--line); border-radius: 8px; padding: 20px; color: var(--ink); }
   #ticket-order-dialog::backdrop { background: rgb(0 0 0 / 45%); }
@@ -3450,6 +3458,7 @@ function acknowledgeSnapshot(snapshot, prefix) {
   if (snapshot.revision < (revisionFloors.get(prefix) || 0)
       || authoritativeData && snapshot.revision < authoritativeData.revision) return false;
   authoritativeData = snapshot;
+  window.WorkspaceUI?.rememberSnapshot?.(prefix,snapshot);
   for (const action of [...localActions]) {
     if (action.prefix !== prefix) continue;
     if (Number.isInteger(action.confirmedRevision) && snapshot.revision >= action.confirmedRevision) {
@@ -3473,8 +3482,16 @@ function acknowledgeSnapshot(snapshot, prefix) {
   return true;
 }
 
+function cachedWriteRefusal() {
+  return {ok:false,status:409,json:async () => ({error:
+    'This board is refreshing. Your draft is preserved; wait for the fresh board before saving.'})};
+}
+function workspaceCanMutate() {
+  return !window.WorkspaceUI || window.WorkspaceUI.canMutate();
+}
 async function apiPost(path, body, pinnedCardVersion) {
   const epoch = window.workspaceEpoch, prefix = API_PREFIX, token = API_TOKEN;
+  if (!workspaceCanMutate()) return cachedWriteRefusal();
   if (pinnedCardVersion === null) return {ok:false,status:409,json:async () => ({error:
     'This restored draft has no original card version. Reopen the editor before saving; your text is preserved.'})};
   if (path === prefix + '/cards' && !body.id) body = {...body,id:'card-' + crypto.randomUUID()};
@@ -3489,6 +3506,10 @@ async function apiPost(path, body, pinnedCardVersion) {
   localActions.push(action); rememberActions(); repaintActions();
   const previous = mutationQueues.get(prefix) || Promise.resolve();
   const execute = async () => {
+    if (prefix === API_PREFIX && epoch === window.workspaceEpoch && !workspaceCanMutate()) {
+      forgetAction(action); repaintActions();
+      return cachedWriteRefusal();
+    }
     let revision = baseline.revision, uncertain = false, wasUncertain = false, result;
     // Our own earlier serialized actions may advance this card; external changes must not.
     if (action.predecessor && action.predecessor.confirmedVersion) action.cardVersion = action.predecessor.confirmedVersion;
@@ -3509,12 +3530,14 @@ async function apiPost(path, body, pinnedCardVersion) {
           || latest.revision < Math.max(revision || 0, revisionFloors.get(prefix) || 0))
         throw new Error('Board readback has not reached the acknowledged revision');
       if (epoch === window.workspaceEpoch) acknowledgeSnapshot(latest,prefix);
+      else window.WorkspaceUI?.rememberSnapshot(prefix,latest);
       revision = latest.revision; return snapshotItem(latest,action.cardId);
     };
     const satisfied = item => action.kind === 'add' ? !!item : !!item && !!action.field
       && item[action.field === 'detail' ? 'detailRaw' : action.field] === actionTarget(action);
     // Never send a queued stale edit merely because another local command advanced revision.
-    const current = prefix === API_PREFIX && authoritativeData && snapshotItem(authoritativeData,action.cardId);
+    const current = epoch === window.workspaceEpoch && prefix === API_PREFIX
+      && authoritativeData && snapshotItem(authoritativeData,action.cardId);
     if (action.field && current && current.cardVersion !== action.cardVersion) {
       result = {response:{ok:false,status:409},out:{error:'This card changed before your edit was saved. Your draft is preserved.'}};
     } else { try { result = await send(); } catch (_) { uncertain = true; wasUncertain = true; } }
@@ -4495,7 +4518,8 @@ function laneApprovalButton(lane) {
   const count = lane.items.filter(item => !item.archived).length;
   const key = laneApprovalKey(prefix,lane.state);
   button.type = 'button'; button.className = 'reorder-deps lane-approve';
-  button.textContent = '👍';
+  button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+    + '<path d="M1 21h4V9H1v12zM23 10c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>';
   button.title = 'Approve all ' + count + ' cards in ' + lane.label + ' and move to Completed';
   button.setAttribute('aria-label',button.title);
   button.disabled = count === 0 || laneApprovalBusy(prefix) || pendingLaneApprovals.has(key) || unconfirmedLaneApprovals.get(key) === data;
@@ -4506,6 +4530,7 @@ async function approveLane(lane,prefix,epoch,revision,count,button) {
   const key = laneApprovalKey(prefix,lane.state), snapshot = data;
   const current = () => prefix === API_PREFIX && epoch === window.workspaceEpoch;
   const cards = Object.fromEntries(lane.items.filter(item => !item.archived).map(item => [item.id,item.cardVersion]));
+  if (!workspaceCanMutate()) { toast('Wait for the fresh board before approving cards.',true); return; }
   if (!current() || laneApprovalBusy(prefix) || !canApproveLane(lane) || !count || pendingLaneApprovals.has(key)
       || unconfirmedLaneApprovals.get(key) === data) return;
   pendingLaneApprovals.add(key); button.disabled = true;
@@ -4622,6 +4647,7 @@ async function openTicketOrder(lane) {
   }
 }
 async function applyTicketOrder() {
+  if (!workspaceCanMutate()) { toast('Wait for the fresh board before reordering cards.',true); return; }
   const state = ticketOrderPreview;
   if (!currentTicketOrder(state) || state.applying || state.invalid || !state.plan.changedCount) return;
   const key = JSON.stringify([state.prefix,state.lane]);
@@ -5256,6 +5282,84 @@ function playFlip(before) {
   }
 }
 
+// Cached cards remain visible while a fresh snapshot is read. Animate only this
+// reconciliation; ordinary live updates keep their existing FLIP behavior.
+let activeCacheTransition = null;
+function cancelCacheTransition() {
+  if (activeCacheTransition) activeCacheTransition();
+}
+function captureCacheCards() {
+  return new Map([...document.querySelectorAll('#board .card[data-id]')].map(el => {
+    const rect = el.getBoundingClientRect(), clip = el.closest('.cards').getBoundingClientRect();
+    const visible = {left:Math.max(rect.left,clip.left,0),top:Math.max(rect.top,clip.top,0),
+      right:Math.min(rect.right,clip.right,window.innerWidth),
+      bottom:Math.min(rect.bottom,clip.bottom,window.innerHeight)};
+    return [el.dataset.id,{rect,visible,clone:el.cloneNode(true)}];
+  }));
+}
+async function settleCacheCards(before) {
+  cancelCacheTransition();
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const animations = [], hidden = [];
+  const current = new Set();
+  const overlay = document.createElement('div');
+  overlay.className = 'cache-transition-overlay'; overlay.inert = true;
+  overlay.setAttribute('aria-hidden','true');
+  overlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:20;overflow:hidden;';
+  const boardRect = document.getElementById('board').getBoundingClientRect();
+  const scrollers = [...document.querySelectorAll('#board .cards')].map(el => el.getBoundingClientRect());
+  const top = Math.max(0,boardRect.top,Math.min(...scrollers.map(rect => rect.top)));
+  overlay.style.clipPath = `inset(${top}px ${Math.max(0,window.innerWidth-boardRect.right)}px ${Math.max(0,window.innerHeight-boardRect.bottom)}px ${Math.max(0,boardRect.left)}px)`;
+  document.body.append(overlay);
+  const clip = (rect,visible) => `inset(${Math.max(0,visible.top-rect.top)}px ${Math.max(0,rect.right-visible.right)}px ${Math.max(0,rect.bottom-visible.bottom)}px ${Math.max(0,visible.left-rect.left)}px)`;
+  const ghostOf = old => {
+    const ghost = old.clone;
+    ghost.removeAttribute('data-id'); ghost.removeAttribute('id');
+    ghost.style.cssText = `position:absolute;pointer-events:none;margin:0;box-sizing:border-box;animation:none;transition:none;left:${old.rect.left}px;top:${old.rect.top}px;width:${old.rect.width}px;height:${old.rect.height}px;`;
+    ghost.style.clipPath = clip(old.rect,old.visible);
+    overlay.append(ghost); return ghost;
+  };
+  const finish = () => {
+    for (const animation of animations) animation.cancel();
+    for (const [el,value] of hidden) el.style.visibility = value;
+    overlay.remove();
+    if (activeCacheTransition === finish) activeCacheTransition = null;
+  };
+  activeCacheTransition = finish;
+  try {
+    for (const el of document.querySelectorAll('#board .card[data-id]')) {
+      current.add(el.dataset.id);
+      const old = before.get(el.dataset.id), now = el.getBoundingClientRect();
+      if (!old) animations.push(el.animate([{opacity:0},{opacity:1}],{duration:250}));
+      else {
+        const dx = old.rect.left - now.left, dy = old.rect.top - now.top;
+        if ((Math.abs(dx) >= 2 || Math.abs(dy) >= 2)
+            && old.visible.right > old.visible.left && old.visible.bottom > old.visible.top) {
+          const lane = el.closest('.cards').getBoundingClientRect();
+          const visible = {left:Math.max(now.left,lane.left,0),top:Math.max(now.top,lane.top,0),
+            right:Math.min(now.right,lane.right,window.innerWidth),bottom:Math.min(now.bottom,lane.bottom,window.innerHeight)};
+          const ghost = ghostOf(old);
+          if (visible.right > visible.left && visible.bottom > visible.top) {
+            hidden.push([el,el.style.visibility]); el.style.visibility = 'hidden';
+            animations.push(ghost.animate([{transform:'translate(0,0)',clipPath:clip(old.rect,old.visible)},
+              {transform:`translate(${-dx}px,${-dy}px)`,width:now.width+'px',height:now.height+'px',clipPath:clip(now,visible)}],
+            {duration:550,easing:'cubic-bezier(.22,1,.36,1)',fill:'forwards'}));
+          } else animations.push(ghost.animate([{opacity:1},{opacity:0}],{duration:250,fill:'forwards'}));
+        }
+      }
+    }
+    for (const [id,old] of before) {
+      if (current.has(id) || old.visible.right <= old.visible.left || old.visible.bottom <= old.visible.top) continue;
+      const ghost = ghostOf(old);
+      animations.push(ghost.animate([{opacity:1},{opacity:0}],{duration:250,fill:'forwards'}));
+    }
+    let timer;
+    await Promise.race([Promise.allSettled(animations.map(animation => animation.finished)),
+      new Promise(resolve => { timer = setTimeout(resolve,750); })]);
+    clearTimeout(timer);
+  } finally { finish(); }
+}
+
 // **A card can ask for Terry and he can be in another window.** His words: "with no
 // email those could get missed." Three escalating tells, none of which needs a mail
 // server:
@@ -5471,12 +5575,18 @@ function renderBoardBanner() {
   const error = streamBoardError || data.error;
   document.getElementById('banner').classList.toggle('show', !!error);
   if (error) {
-    document.getElementById('banner-head').textContent = 'The board did not load.';
-    document.getElementById('banner-body').textContent = error;
+    const cached = !!window.WorkspaceUI?.cachePending?.(API_PREFIX);
+    document.getElementById('banner-head').textContent = cached ? 'Showing a saved view. Refresh failed.' : 'The board did not load.';
+    const body = document.getElementById('banner-body'); body.textContent = error;
+    if (cached) {
+      const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry';
+      retry.addEventListener('click',() => window.WorkspaceUI.resume());
+      body.append(' ',retry);
+    }
   }
 }
 
-function paint() {
+function paint(animate = true) {
   renderSaveRecovery();
   const focusId = focusedCardId();
   const laneScroll = window.WorkspaceUI ? window.WorkspaceUI.scrolls() : null;
@@ -5500,7 +5610,7 @@ function paint() {
   for (const lane of data.lanes) board.appendChild(laneEl(lane));
   alignCardStarts();
   if (laneScroll) window.WorkspaceUI.restoreScroll(laneScroll);
-  playFlip(before);
+  if (animate) playFlip(before);
   // **REAPPLIED AFTER EVERY REPAINT, and forgetting this is the obvious bug.** `paint()`
   // rebuilds every card, so a filtered board would silently un-filter itself the next
   // time Terry moved a card or Claude wrote a comment -- at the next refresh, with his query
@@ -5794,9 +5904,10 @@ function renderLive() {
   el.title = [buildText, cardAge && 'Last card update: ' + cardAge, clockHour + clockRest]
     .filter(Boolean).join('  ·  ');
 
-  const live = streamConnected || (streamClosedAt !== null && nowMs - streamClosedAt < STREAM_GRACE_MS);
-  badge.className = live ? '' : 'dead';
-  badge.textContent = live ? 'CONNECTED' : 'RECONNECTING';
+  const phase = window.WorkspaceUI?.cachePhase?.();
+  const live = !phase && (streamConnected || (streamClosedAt !== null && nowMs - streamClosedAt < STREAM_GRACE_MS));
+  badge.className = phase ? 'warn' : live ? '' : 'dead';
+  badge.textContent = phase === 'failed' ? 'REFRESH FAILED' : phase ? 'REFRESHING' : live ? 'CONNECTED' : 'RECONNECTING';
   dot.classList.toggle('stale', !live);
   dot.classList.toggle('alive', live);
 }
@@ -5839,13 +5950,25 @@ async function tick(force = false, meta = null) {
     if (force || !meta || marker !== seen) {
       const snapshot = await apiGet(prefix + '/board', signal);
       if (epoch !== window.workspaceEpoch) return;
-      if (snapshot.error && !(snapshot.lanes || []).length) throw new Error(snapshot.error);
-      if (!acknowledgeSnapshot(snapshot, prefix)) return;
+      if (snapshot.error) throw new Error(snapshot.error);
+      if (!acknowledgeSnapshot(snapshot, prefix)) {
+        if (window.WorkspaceUI?.cachePending(prefix))
+          throw new Error('Fresh board state has not reached the last confirmed revision. Retry.');
+        return;
+      }
+      const before = window.WorkspaceUI?.cachePending(prefix) ? captureCacheCards() : null;
       data = projectActions(authoritativeData || snapshot, prefix);
-      HAY.clear(); paint(); restoreStaleReloadState();
+      HAY.clear(); paint(!before); restoreStaleReloadState();
       if (window.WorkspaceUI) window.WorkspaceUI.loaded();
       // Failed, superseded or CAS-obsolete responses never advance sync confirmation.
       seen = marker; lastOk = Date.now();
+      if (before) {
+        const settlement = window.WorkspaceUI.settling(prefix,epoch);
+        renderLive();
+        await settleCacheCards(before);
+        window.WorkspaceUI.refreshed(prefix,epoch,settlement);
+        renderBoardBanner();
+      }
     }
   } catch (e) {
     if (epoch === window.workspaceEpoch && window.WorkspaceUI) {

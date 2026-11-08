@@ -270,6 +270,23 @@ session storage scoped to the window; one window's selection does not force anot
 window to change. Sidebar collapse is remembered per window. Source upgrades retain
 the separate guarded reload mechanism; ordinary board selection must never use it.
 
+Recent confirmed snapshots are held separately in per-tab memory: at most eight
+boards and 96 MiB of serialized UTF-8 data, with 30-minute view-recency expiry.
+Returning to one paints its cached snapshot immediately and forces a fresh read
+of only that selected board. It does not poll pinned or cached boards in the
+background. The cache never stores projected pending actions or acknowledges
+them as saved. Revision floors still reject older snapshots.
+
+While that read or its card transition is pending, both connection indicators
+stay non-green and the badge says REFRESHING. New writes are refused while drafts
+remain editable. Already-admitted requests retain original card tokens and board
+revision checks across navigation. Failed refreshes keep the view read-only with
+an explicit Retry; subsequent healthy selected-board notifications can recover it.
+Moves, arrivals and removals animate with reduced-motion support, clipped removal
+ghosts and a bounded settlement lifetime. Navigation and later failures invalidate
+older settlement completions. Only fresh, settled state restores the normal SSE
+connection indication. Reloading discards this cache, not saved session drafts.
+
 Drawer attachment containers carry board/card identity before pending/focus preservation.
 A deferred operation on one card cannot leave its controls actionable under another
 card's header. The card-title rename trigger is a named native button within the heading;

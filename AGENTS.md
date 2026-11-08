@@ -516,6 +516,15 @@ one board stream. Serve `browser_stream.js` locally. Keep this separate from the
 Human-only owner chat notifier; do not add SharedWorker, cross-tab coordination,
 external services or a framework.
 
+Keep recent confirmed board snapshots only in bounded per-tab memory (30-minute
+view recency, eight boards, 96 MiB serialized UTF-8 budget). Returning to a cached
+board renders it immediately, then forces a fresh selected-board read. Show
+non-green REFRESHING and refuse new mutations until the read and reconciliation
+finish. A failed refresh retains the read-only view with Retry. Cache rendering
+must never acknowledge pending actions or advance a revision floor. Preserve
+already-admitted writes, original edit tokens, drafts and navigation fences.
+Do not add background full-board polling for pins or cached boards.
+
 While SSE subscribers are present, run one central board health producer every five
 seconds and one catalog producer every ten seconds. Pause producer I/O after the last
 listener closes (one in-flight read may finish); the first returning view wakes the
@@ -690,6 +699,21 @@ uv run --project C:\Projects\localswim --frozen --offline localswim-cli BOARD no
 - Shared service source belongs to this maintainer. Other projects keep runtime,
   test outputs, caches and worktrees outside `C:\Projects\localswim`; their launchers
   and CLI commands must delegate to the shared implementation.
+
+## Ready for Work authorization and parallel work
+
+Terry confirmed on 2026-11-08 that cards placed in **Ready for Work** on this
+project's board are pre-authorized for Bot to work through **Ready for Review**.
+A board-change notice is enough to discover and start eligible work; do not ask
+for another start permission. Inspect the card and its dependencies, respect any
+explicit prerequisite or owner-only gate, and move it **In Progress before work**.
+Keep Terry's control of Completed.
+
+Use parallel workers when work can proceed safely with clear file ownership and
+independent scopes. Do not force parallel edits to shared code or bypass dependency
+gates merely to fill worker slots. Use fresh independent review before handoff,
+and ask focused questions when a necessary requirement is genuinely unclear while
+continuing useful work that does not depend on the answer.
 
 ## Local inception-board coordination
 

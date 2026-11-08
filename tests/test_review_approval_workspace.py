@@ -124,6 +124,7 @@ let permit = true, calls = [], toasts = [], reconciled = [], drafts = {review:'u
 let relationshipDraft = {pending:true};
 let resolveFetch, rejectFetch;
 const window = {workspaceEpoch: 1, WorkspaceUI: {
+  canMutate: () => true, rememberSnapshot() {},
   reconcile: (...args) => reconciled.push(args)}};
 function allowed() { return permit; }
 function itemById(id) { return card && card.id === id ? card : null; }

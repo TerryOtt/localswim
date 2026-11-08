@@ -1,5 +1,67 @@
 /* Workspace navigation shares the board page's existing controls and writer boundary. */
 (() => {
+  // Raw confirmed snapshots only; UI drafts and optimistic projections live elsewhere.
+  function createRecentBoardCache({ttl = 30 * 60 * 1000, limit = 8,
+    budget = 96 * 1024 * 1024, now = () => Date.now()} = {}) {
+    const entries = new Map();
+    let bytes = 0;
+    function remove(key) {
+      const entry = entries.get(key);
+      if (entry) { bytes -= entry.bytes; entries.delete(key); }
+    }
+    function prune() {
+      for (const [key, entry] of entries) if (now() - entry.used >= ttl) remove(key);
+    }
+    function touch(key) {
+      const entry = entries.get(key);
+      if (entry) { entry.used = now(); entries.delete(key); entries.set(key, entry); }
+    }
+    function remember(key, snapshot) {
+      try {
+        prune();
+        if (!key || !snapshot || snapshot.error || !Number.isSafeInteger(snapshot.revision)
+            || snapshot.revision < 0 || snapshot.revision < (entries.get(key)?.revision ?? 0)) return false;
+        const serialized = JSON.stringify(snapshot);
+        let size = 0;
+        for (const char of serialized) {
+          const code = char.codePointAt(0);
+          size += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+        }
+        if (size > budget) return false;
+        const detached = JSON.parse(serialized);
+        remove(key);
+        entries.set(key, {snapshot: detached, revision: detached.revision, bytes: size, used: now()});
+        bytes += size;
+        while (entries.size > limit || bytes > budget) remove(entries.keys().next().value);
+        return entries.has(key);
+      } catch (_) { return false; }
+    }
+    function get(key, floor = 0) {
+      try {
+        prune();
+        const entry = entries.get(key);
+        if (!entry || entry.revision < floor) return null;
+        const snapshot = JSON.parse(JSON.stringify(entry.snapshot));
+        touch(key);
+        return snapshot;
+      } catch (_) { return null; }
+    }
+    return {remember, get, touch};
+  }
+  const recentBoards = createRecentBoardCache();
+  let cachedView = null, cacheGeneration = 0;
+  function cachePending(prefix) { return !!cachedView && cachedView.prefix === prefix; }
+  function settling(prefix, epoch) {
+    if (!cachePending(prefix) || epoch !== window.workspaceEpoch) return null;
+    cachedView.phase = 'settling';
+    cachedView.token = ++cacheGeneration;
+    return cachedView.token;
+  }
+  function refreshed(prefix, epoch, token) {
+    if (!cachePending(prefix) || epoch !== window.workspaceEpoch
+        || cachedView.phase !== 'settling' || cachedView.token !== token) return;
+    cachedView = null; streamBoardError = null;
+  }
   const categories = [['blocked', 'Blocked'], ['needsHuman', 'Needs Terry'], ['review', 'Ready for Review']];
   let catalog = [], current = null, storageKey = '', state = {records: {}, collapsed: false, pins: []};
   let pending = null, initialized = false, refreshing = false, recoverOnCatalog = false, retryRequested = false;
@@ -128,6 +190,7 @@
   }
   function persist() {
     capture();
+    if (current && typeof API_PREFIX === 'string') recentBoards.touch(API_PREFIX);
     try { if (storageKey) sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
   function scrolls() {
@@ -176,6 +239,12 @@
   function error(message, recover = false) {
     recoverOnCatalog = recover;
     persist();
+    if (typeof cachedView !== 'undefined' && cachedView && window.workspaceReady) {
+      cachedView.phase = 'failed'; cachedView.token = null; streamBoardError = message;
+      if (typeof renderBoardBanner === 'function') renderBoardBanner();
+      renderLive();
+      return;
+    }
     if (pending === null) pending = state.records[current] || {};
     window.workspaceEpoch++; lastOk = 0;
     closeCard(); closeMake(true); closeEditors();
@@ -191,6 +260,10 @@
     document.title = 'Board unavailable · localswim';
   }
   function resume() {
+    if (typeof cachedView !== 'undefined' && cachedView?.phase === 'failed') {
+      cachedView.phase = 'refreshing'; cachedView.token = null;
+      renderLive(); tick(true); return true;
+    }
     if (recoverOnCatalog && !window.workspaceReady && current
         && catalog.some(entry => entry.key === current && !entry.error)) {
       select(current, 'none'); return true;
@@ -198,9 +271,11 @@
     return false;
   }
   function select(key, history = 'push') {
+    if (typeof cancelCacheTransition === 'function') cancelCacheTransition();
     if (!key) { error('No supported boards were found. Add a board to the workspace folder, then retry.'); return; }
-    if (key === current && window.workspaceReady) return;
+    if (key === current && window.workspaceReady) { resume(); return; }
     persist(); window.workspaceEpoch++; window.workspaceReady = false;
+    cachedView = null;
     closeCard(); closeMake(true); closeEditors();
     if (typeof closeTicketOrder === 'function') closeTicketOrder();
     current = key; state.lastBoard = key;
@@ -224,8 +299,16 @@
     document.getElementById('title').textContent = entry.project;
     boardTitle = entry.project; document.title = entry.project + ' · Loading';
     recoverOnCatalog = false;
-    board.textContent = 'Loading ' + entry.project + '…';
+    const floor = typeof revisionFloors === 'undefined' ? 0 : revisionFloors.get(API_PREFIX) || 0;
+    const snapshot = typeof recentBoards === 'undefined' ? null : recentBoards.get(API_PREFIX, floor);
+    if (snapshot) {
+      cachedView = {prefix: API_PREFIX, phase: 'refreshing'};
+      authoritativeData = snapshot;
+      data = projectActions(snapshot, API_PREFIX); HAY.clear();
+      paint(); loaded();
+    } else board.textContent = 'Loading ' + entry.project + '…';
     window.workspaceReady = true;
+    if (snapshot) renderLive();
     window.BoardStream.select(key); tick(true); persist();
   }
   const boardNames = new Intl.Collator('en', {sensitivity: 'accent'});
@@ -545,6 +628,10 @@
     try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
   window.WorkspaceUI = {capture: persist, loaded, scrolls, restoreScroll, error, reconcile,
+    rememberSnapshot: (prefix, snapshot) => recentBoards.remember(prefix, snapshot),
+    cachePhase: () => cachedView?.phase || null,
+    canMutate: () => !!window.workspaceReady && cachedView === null,
+    cachePending, settling, refreshed,
     pageStatus: () => gatewayStatus, selected: () => current,
     catalog: value => refresh(false, value), resume, heartbeat: flushPinCommands};
   document.getElementById('ws-toggle').onclick = () => { finishSidebarResize(); const saved = scrolls(); state.collapsed = !state.collapsed; persist(); renderRows(); alignCardStarts(); restoreScroll(saved); };

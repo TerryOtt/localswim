@@ -22,7 +22,7 @@ const version='a'.repeat(64),lane={state:'ready_for_review',label:'Ready for Rev
 const context=vm.createContext({AbortSignal,window:{workspaceEpoch:1},API_PREFIX:'/one',API_TOKEN:'synthetic',
  data:{revision:10,actors:[{id:'human',class:'human'}],browserUser:'human',lanes:[lane,{state:'completed'}]},
  localActions:[],revisionFloors:new Map(),seen:'old',lane,document:{createElement(){return new Element()}},
- allowed(){return true},toast(...args){toasts.push(args)},acceptRevision(out){accepts.push(out)},
+ allowed(){return true},workspaceCanMutate(){return true},toast(...args){toasts.push(args)},acceptRevision(out){accepts.push(out)},
  async tick(force){ticks.push(force)},
  async fetch(path,options){
   calls.push({path,method:options.method,headers:options.headers,body:JSON.parse(options.body)});
@@ -41,7 +41,8 @@ assert.ok(start>0&&end>start);vm.runInContext(input.page.slice(start,end),contex
 const run=code=>vm.runInContext(code,context),settle=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  if(input.mode==='header'){
-  let button=run('laneApprovalButton(lane)');assert.equal(button.textContent,'👍');
+  let button=run('laneApprovalButton(lane)');assert.match(button.innerHTML,/<svg\b/);
+  assert.match(button.innerHTML,/aria-hidden="true"/);
   assert.equal(button.type,'button');assert.equal(button.disabled,false);
   assert.match(button.title,/all 2 cards/);assert.equal(button.title,button.attrs['aria-label']);
   lane.approveAll=false;assert.equal(run('laneApprovalButton(lane)'),null);lane.approveAll=true;

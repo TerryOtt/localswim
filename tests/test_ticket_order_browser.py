@@ -34,7 +34,7 @@ const response=(status,body,bad=false)=>({status,ok:status===200,json:async()=>{
  if(bad)throw Error('unreadable');return body;
 }});
 const context=vm.createContext({AbortSignal,window:{workspaceEpoch:1},API_PREFIX:'/one',
- API_TOKEN:'synthetic',revisionFloors:new Map(),seen:'old',
+ API_TOKEN:'synthetic',revisionFloors:new Map(),seen:'old',workspaceCanMutate:()=>true,
  document:{getElementById:el,createElement:tag=>new Element(tag)},
  toast(...args){toasts.push(args)},acceptRevision(out){accepted.push(out)},
  async tick(force){ticks.push(force)},

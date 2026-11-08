@@ -161,7 +161,7 @@ const context=vm.createContext({AbortController,AbortSignal,queueMicrotask,Date,
  projectActions(value){return {...value,optimistic:true}},
  apiGet(path,signal){calls.push({path,signal});return new Promise(resolve=>waiters.push(resolve));}
 });
-const bannerStart=input.page.indexOf('function renderBoardBanner()'),bannerEnd=input.page.indexOf('function paint()',bannerStart);
+const bannerStart=input.page.indexOf('function renderBoardBanner()'),bannerEnd=input.page.indexOf('function paint(',bannerStart);
 vm.runInContext(input.page.slice(bannerStart,bannerEnd),context);
 const start=input.page.indexOf('async function tick('),end=input.page.indexOf('\ntick();',start);
 vm.runInContext(input.page.slice(start,end),context);

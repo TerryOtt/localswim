@@ -135,6 +135,13 @@ Board links are bookmarkable. A snapshot at `state-store/localswim/localswim.jso
 workspace URL such as **http://127.0.0.1:8810/board/localswim/localswim**. The key is its
 relative path without `.json`, so changing the displayed project name preserves the
 bookmark. Switching boards updates the URL and contents without reloading the page.
+Returning to a recently viewed board shows its last confirmed snapshot immediately
+with a non-green **REFRESHING** indicator. A fresh read of that selected board
+reconciles moved, added and removed cards before saving becomes available again.
+Failed refreshes keep the old view visible with **Retry**. This per-tab memory
+cache holds up to eight boards and 96 MiB of serialized snapshots, expires boards
+after 30 minutes without viewing, and disappears when the page reloads. It adds
+no background full-board polling for pinned or previously viewed boards.
 Direct bookmarks, browser Back/Forward, and opening a link in another window work too.
 Each window keeps its own per-board search, selected card, lane scrolling, and unsent
 comment, editor, and new-card drafts in session storage.
