@@ -270,13 +270,19 @@ session storage scoped to the window; one window's selection does not force anot
 window to change. Sidebar collapse is remembered per window. Source upgrades retain
 the separate guarded reload mechanism; ordinary board selection must never use it.
 
-Recent confirmed snapshots are held separately in per-tab memory: at most eight
-boards and 96 MiB of serialized UTF-8 data, with 30-minute view-recency expiry.
-Returning to one paints its cached snapshot immediately and forces a fresh read
-of only that selected board. It does not poll pinned or cached boards in the
-background. The cache never stores projected pending actions or acknowledges
-them as saved. Revision floors still reject older snapshots.
+Recent confirmed snapshots are held separately in per-tab memory using a byte-limited
+LRU. The charge is the serialized UTF-8 JSON size, re-accounted on replacement, not
+JavaScript heap usage. The default is 256 MiB, selected for the [qualified cases](reports/2026-11-08-byte-lru-cache-qualification.md);
+the sidebar Cache settings input configures the budget in MiB and persists it per window.
+There is no board-count cap or age expiry. Human selection determines recency;
+background reads and updates do not. The active board is protected, even when it
+exceeds the target, and drafts and pending operations remain separate working state.
+Eviction does not acknowledge pending actions; revision floors still reject older snapshots.
 
+Combined SSE metadata watches the active and retained boards. A matching current
+snapshot can be shown without another GET; otherwise the selected board recovers
+with REFRESHING feedback. Background reads are limited to one at a time and yield
+to foreground work. Watch batches rotate when protocol limits are exceeded.
 While that read or its card transition is pending, the badge says REFRESHING in
 pale green. The breather continues to show SSE health, including its existing
 ten-second disconnect grace; board loading does not turn it red. A fresh page also
@@ -292,11 +298,8 @@ older settlement completions. Only fresh, settled state restores the normal SSE
 connection indication. Reloading discards this cache, not saved session drafts.
 
 [ADR 0003](decisions/0003-byte-limited-client-board-cache.md) records the accepted
-future cache policy: a configurable byte budget, recency based on human board
-selection, protected working state and bounded background refreshes. Its default
-budget still needs qualification against an approximately 2 GiB browser-client
-memory allowance. The runtime behavior described above remains in place until
-that policy is implemented and validated.
+cache policy implemented by #0247. The qualification report describes the tested
+cases and measurement limits against the approximately 2 GiB browser-client intent.
 
 Drawer attachment containers carry board/card identity before pending/focus preservation.
 A deferred operation on one card cannot leave its controls actionable under another

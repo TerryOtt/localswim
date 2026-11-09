@@ -1,7 +1,7 @@
 # ADR 0003: Bound the client board cache by bytes and human recency
 
 - Date: 2026-11-08
-- Status: Accepted policy; runtime implementation pending
+- Status: Accepted; implemented by #0247 (Ready for Review, pending Terry review)
 - Decision owner: Terry Ott
 - Tracking: V1 #0246, `client-board-cache-policy-adr`
 
@@ -137,13 +137,12 @@ an exact process-wide cap.
 
 ## Engineering choices and qualification still required
 
-The owner policies are settled. Implementation choices remain with engineering:
-
-- Representation, byte-accounting mechanics, default budget and configuration UI.
-- Refresh concurrency, queuing, cancellation and metadata transport details.
-- Efficient selection bookkeeping and eviction/admission algorithms.
-- Instrumentation and qualification methods that expose foreground stalls,
-  memory pressure, temporary copies and unnecessary reads.
+The owner policies are settled. The implemented candidate charges serialized UTF-8
+JSON bytes, uses human-selection LRU, and exposes a per-window MiB budget input.
+Its default is 256 MiB, selected for the [qualified cases](../reports/2026-11-08-byte-lru-cache-qualification.md). Combined SSE metadata tracks retained boards;
+one background snapshot read runs at a time and yields to foreground work. These
+measurements include foreground stalls, sampled heap and unnecessary reads; the
+serialized charge is not a process memory cap.
 
 Qualification must cover growing and shrinking replacements, multiple evictions,
 self-eviction of an old background board, oversized candidates, and active-only
@@ -167,8 +166,8 @@ separately from aggregate throughput.
   foreground-prioritized work control different resources and are both needed.
 - The active-only fallback and protected recovery state make this a soft overall
   memory target, with a strict admission budget for optional retained snapshots.
-- Writing this ADR changes no runtime behavior. Implementation, validation and
-  rollout require separate work; Completed investigation #0243 stays closed.
+- The implementation and its qualification are tracked by #0247; Completed
+  investigation #0243 stays closed.
 
 ## Alternatives not adopted
 

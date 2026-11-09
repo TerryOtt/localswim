@@ -1,55 +1,197 @@
 /* Workspace navigation shares the board page's existing controls and writer boundary. */
 (() => {
-  // Raw confirmed snapshots only; UI drafts and optimistic projections live elsewhere.
-  function createRecentBoardCache({ttl = 30 * 60 * 1000, limit = 8,
-    budget = 96 * 1024 * 1024, now = () => Date.now()} = {}) {
-    const entries = new Map();
-    let bytes = 0;
+  // One owned, immutable-by-convention raw snapshot per retained board. Charges are
+  // UTF-8 JSON bytes, not JavaScript heap measurements. Drafts live separately.
+  function createRecentBoardCache({budget = 256 * 1024 * 1024} = {}) {
+    const entries = new Map(), selections = new Map();
+    let bytes = 0, active = null, sequence = 0, generation = 0;
     function remove(key) {
       const entry = entries.get(key);
-      if (entry) { bytes -= entry.bytes; entries.delete(key); }
+      if (entry) { bytes -= entry.bytes; entries.delete(key); generation++; }
     }
-    function prune() {
-      for (const [key, entry] of entries) if (now() - entry.used >= ttl) remove(key);
+    function victims() {
+      return [...entries.keys()].filter(key => key !== active)
+        .sort((a, b) => (selections.get(a) || 0) - (selections.get(b) || 0));
     }
-    function touch(key) {
-      const entry = entries.get(key);
-      if (entry) { entry.used = now(); entries.delete(key); entries.set(key, entry); }
+    function trim() {
+      for (const key of victims()) { if (bytes <= budget) break; remove(key); }
     }
+    function select(key, human = true) { active = key; if (human) selections.set(key, ++sequence); trim(); }
     function remember(key, snapshot) {
       try {
-        prune();
         if (!key || !snapshot || snapshot.error || !Number.isSafeInteger(snapshot.revision)
-            || snapshot.revision < 0 || snapshot.revision < (entries.get(key)?.revision ?? 0)) return false;
-        const serialized = JSON.stringify(snapshot);
-        let size = 0;
-        for (const char of serialized) {
-          const code = char.codePointAt(0);
-          size += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
-        }
-        if (size > budget) return false;
-        const detached = JSON.parse(serialized);
-        remove(key);
-        entries.set(key, {snapshot: detached, revision: detached.revision, bytes: size, used: now()});
-        bytes += size;
-        while (entries.size > limit || bytes > budget) remove(entries.keys().next().value);
+            || snapshot.revision < 0 || snapshot.revision < (entries.get(key)?.snapshot.revision ?? 0)) return false;
+        const size = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+        if (key !== active && size > budget) { remove(key); return false; }
+        // Include the candidate in victim selection, preserving human recency.
+        const old = entries.get(key);
+        if (old) bytes -= old.bytes;
+        entries.set(key, {snapshot, bytes:size, generation:++generation}); bytes += size;
+        trim();
         return entries.has(key);
       } catch (_) { return false; }
     }
     function get(key, floor = 0) {
-      try {
-        prune();
-        const entry = entries.get(key);
-        if (!entry || entry.revision < floor) return null;
-        const snapshot = JSON.parse(JSON.stringify(entry.snapshot));
-        touch(key);
-        return snapshot;
-      } catch (_) { return null; }
+      const entry = entries.get(key);
+      return entry && entry.snapshot.revision >= floor ? entry.snapshot : null;
     }
-    return {remember, get, touch};
+    function configure(value) {
+      if (!Number.isSafeInteger(value) || value < 1) return false;
+      budget = value; trim(); return true;
+    }
+    return {remember, get, select, remove, configure,
+      keys: () => [...entries.keys()], version:key => entries.get(key)?.generation,
+      stats: () => ({bytes, budget, count:entries.size, active})};
   }
   const recentBoards = createRecentBoardCache();
-  let cachedView = null, cacheGeneration = 0;
+  const liveMetadata = new Map();
+  let transportConnected = false, transportGeneration = 0, transportAfter = Infinity;
+  let background = null, backgroundQueued = false, watchQueued = false, backgroundCursor = null;
+  const prefixFor = key => '/api/v001/workspace/boards/' + encodeURIComponent(key);
+  const keyFor = prefix => decodeURIComponent(prefix.split('/').pop());
+  function matches(snapshot, meta) {
+    return typeof snapshot?.sync?.boardIdentity === 'string' && !!snapshot.sync.boardIdentity
+      && typeof snapshot.sync.contentVersion === 'string' && !!snapshot.sync.contentVersion && meta?.ok === true && snapshot.revision === meta.revision
+      && snapshot.sync.boardIdentity === meta.boardIdentity
+      && snapshot.sync.contentVersion === meta.contentVersion;
+  }
+  function currentSnapshot(prefix) {
+    const meta = liveMetadata.get(prefix);
+    return (recentBoards.get(prefix)?.revision ?? -1) >= (revisionFloors.get(prefix) || 0)
+      && transportConnected && meta?.generation === transportGeneration
+      && meta.status.sampledAt >= transportAfter
+      && matches(recentBoards.get(prefix), meta.status);
+  }
+  function knownStale(prefix) {
+    const meta = liveMetadata.get(prefix), snapshot = recentBoards.get(prefix);
+    if (!snapshot || !meta || !transportConnected || meta.generation !== transportGeneration
+        || meta.status.sampledAt < transportAfter || meta.status.ok !== true) return false;
+    return snapshot.sync?.boardIdentity !== meta.status.boardIdentity
+      || (meta.status.revision >= snapshot.revision && !matches(snapshot, meta.status));
+  }
+  function watchBatch(keys, active, {maxKeys = 1024, maxBytes = 48 * 1024, offset = 0} = {}) {
+    const others = [...new Set(keys)].filter(key => key !== active);
+    const watched = active ? [active] : [];
+    let bytes = active ? ('board=' + encodeURIComponent(active) + '&').length : 0, visited = 0;
+    while (visited < others.length) {
+      const key = others[(offset + visited) % others.length];
+      const charge = ('board=' + encodeURIComponent(key) + '&').length;
+      if (watched.length >= maxKeys || bytes + charge > maxBytes) break;
+      watched.push(key); bytes += charge; visited++;
+    }
+    return {watched, overflow:visited < others.length,
+      next:others.length ? (offset + visited) % others.length : 0};
+  }
+  let watchOffset = 0, watchTimer = null;
+  function updateWatches() {
+    if (watchQueued) return;
+    watchQueued = true;
+    queueMicrotask(() => {
+      watchQueued = false;
+      const retained = recentBoards.keys();
+      for (const key of liveMetadata.keys()) if (!retained.includes(key) && key !== API_PREFIX) liveMetadata.delete(key);
+      // Rotate overflow batches; protocol resource bounds never exclude a retained board forever.
+      const batch = watchBatch(retained.map(keyFor), API_PREFIX ? keyFor(API_PREFIX) : null, {offset:watchOffset});
+      window.BoardStream.watch(batch.watched);
+      if (batch.overflow && watchTimer === null) {
+        watchTimer = setTimeout(() => {
+          watchTimer = null; watchOffset = batch.next; updateWatches();
+        }, 15000);
+      } else if (!batch.overflow) { clearTimeout(watchTimer); watchTimer = null; watchOffset = 0; }
+    });
+  }
+  function rememberSnapshot(prefix, snapshot) {
+    if (prefix !== API_PREFIX && !recentBoards.get(prefix)) return false;
+    const accepted = recentBoards.remember(prefix, snapshot);
+    if (accepted && prefix === API_PREFIX && knownStale(prefix)) {
+      cachedView = {prefix, phase:'refreshing'}; awaitFreshness();
+    }
+    updateWatches(); scheduleBackground(); return accepted;
+  }
+  function scheduleBackground() {
+    if (backgroundQueued) return;
+    backgroundQueued = true;
+    queueMicrotask(() => { backgroundQueued = false; refreshBackground(); });
+  }
+  async function refreshBackground() {
+    if (background || !transportConnected || pollingEpoch !== null || (cachedView && cachedView.phase !== 'failed')) return;
+    const keys = recentBoards.keys(), start = keys.indexOf(backgroundCursor) + 1;
+    const ordered = [...keys.slice(start), ...keys.slice(0, start)];
+    const prefix = ordered.find(key => {
+      const meta = liveMetadata.get(key);
+      return key !== API_PREFIX && meta?.generation === transportGeneration
+        && meta.status.sampledAt >= transportAfter && meta.status.ok === true
+        && !matches(recentBoards.get(key), meta.status) && !meta.failed && !meta.attempted;
+    });
+    if (!prefix) return;
+    backgroundCursor = prefix;
+    liveMetadata.get(prefix).attempted = true;
+    const version = recentBoards.version(prefix), controller = new AbortController();
+    const request = {prefix, controller}; background = request;
+    try {
+      const snapshot = await apiGet(prefix + '/board', AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]));
+      if (background !== request || controller.signal.aborted || prefix === API_PREFIX
+          || recentBoards.version(prefix) !== version) return;
+      if (!snapshot.error && snapshot.revision >= (revisionFloors.get(prefix) || 0)) rememberSnapshot(prefix, snapshot);
+    } catch (_) {
+      const meta = liveMetadata.get(prefix); if (meta) meta.failed = true;
+    } finally {
+      if (background === request) background = null;
+      scheduleBackground();
+    }
+  }
+  function foreground() {
+    if (background) { const meta = liveMetadata.get(background.prefix); if (meta) meta.attempted = false;
+      background.controller.abort(); background = null; }
+  }
+  function metadata(message) {
+    if (message.type === 'connection') {
+      transportConnected = message.connected;
+      transportGeneration = message.generation; transportAfter = Infinity;
+      if (!message.connected) {
+        foreground();
+        if (window.workspaceReady && recentBoards.get(API_PREFIX)) {
+          cachedView = {prefix:API_PREFIX, phase:'refreshing'}; awaitFreshness();
+        }
+      }
+      return;
+    }
+    if (message.type === 'watch') {
+      transportGeneration = message.generation;
+      transportAfter = Number.isFinite(message.value.after) ? message.value.after : Infinity;
+      return;
+    }
+    if (message.type !== 'board') return;
+    const prefix = prefixFor(message.value.board), status = message.value.status;
+    const previous = liveMetadata.get(prefix);
+    const same = previous?.generation === message.generation && previous.status.contentVersion === status.contentVersion
+      && previous.status.boardIdentity === status.boardIdentity && previous.status.revision === status.revision
+      && previous.status.sampledAt === status.sampledAt;
+    liveMetadata.set(prefix, {status, generation:message.generation,
+      attempted:same && previous.attempted, failed:same && previous.failed});
+    if (prefix === API_PREFIX && window.workspaceReady) {
+      if (currentSnapshot(prefix)) {
+        // Matching metadata acknowledges freshness only, never pending mutation intent.
+        if (cachedView?.phase !== 'settling') cachedView = null;
+        clearTimeout(recoveryTimer);
+        applyBoardStatus(status);
+        seen = status.contentVersion; lastOk = Date.now(); streamBoardError = null;
+        renderLive(); scheduleBackground();
+      } else if ((status.ok === false || status.sampledAt >= transportAfter) && transportConnected) {
+        if (recentBoards.get(prefix)) cachedView = {prefix, phase:'refreshing'};
+        foreground(); tick(false, status);
+      }
+    } else scheduleBackground();
+  }
+  let cachedView = null, cacheGeneration = 0, recoveryTimer = null;
+  function awaitFreshness() {
+    clearTimeout(recoveryTimer);
+    const epoch = window.workspaceEpoch, prefix = API_PREFIX;
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = null;
+      if (epoch === window.workspaceEpoch && prefix === API_PREFIX && cachedView && !currentSnapshot(prefix)) tick(true);
+    }, 7000);
+  }
   function cachePending(prefix) { return !!cachedView && cachedView.prefix === prefix; }
   function settling(prefix, epoch) {
     if (!cachePending(prefix) || epoch !== window.workspaceEpoch) return null;
@@ -60,6 +202,7 @@
   function refreshed(prefix, epoch, token) {
     if (!cachePending(prefix) || epoch !== window.workspaceEpoch
         || cachedView.phase !== 'settling' || cachedView.token !== token) return;
+    if (knownStale(prefix)) { cachedView = {prefix, phase:'refreshing'}; awaitFreshness(); return; }
     cachedView = null; streamBoardError = null;
   }
   const categories = [['blocked', 'Blocked'], ['needsHuman', 'Needs Terry'], ['review', 'Ready for Review']];
@@ -80,6 +223,20 @@
     '<div class="ws-expanded"><input id="ws-find" type="search" placeholder="Find a board" aria-label="Find a board">' +
     '<div class="ws-count-grid ws-labels"><span class="blocked" title="Blocked">Blocked</span><span class="needsHuman" title="Needs Terry">Terry</span><span class="review" title="Ready for Review">Review</span></div>' +
     '<div id="ws-list"></div><p id="ws-announcement" class="ws-sr-only" aria-live="polite" aria-atomic="true"></p><p id="ws-status" role="status"></p><a id="ws-window" target="_blank" rel="noopener">Open board in new window ↗</a></div>';
+  const budgetLabel = document.createElement('label'); budgetLabel.className = 'ws-cache-budget';
+  budgetLabel.textContent = 'Board cache (MiB) ';
+  const budgetInput = document.createElement('input'); budgetInput.type = 'number'; budgetInput.min = '1';
+  budgetInput.step = '1'; budgetInput.value = '256'; budgetInput.setAttribute('aria-label', 'Board cache budget in MiB');
+  budgetInput.title = 'Accounts for serialized snapshot bytes, not total browser memory. The active board and drafts are protected.';
+  const cacheSettings = document.createElement('details'); cacheSettings.className = 'ws-cache-settings';
+  const cacheSummary = document.createElement('summary'); cacheSummary.textContent = 'Cache settings';
+  budgetLabel.append(budgetInput); cacheSettings.append(cacheSummary, budgetLabel);
+  nav.querySelector('.ws-expanded').append(cacheSettings);
+  budgetInput.addEventListener('change', () => {
+    const value = Number(budgetInput.value) * 1024 * 1024;
+    if (!recentBoards.configure(value)) { budgetInput.value = String(recentBoards.stats().budget / 1024 / 1024); return; }
+    state.cacheBudget = value; persist(); updateWatches();
+  });
   content.append(nav, board);
   new ResizeObserver(alignCardStarts).observe(board);
   document.getElementById('mk').setAttribute('aria-modal', 'false');
@@ -190,7 +347,6 @@
   }
   function persist() {
     capture();
-    if (current && typeof API_PREFIX === 'string') recentBoards.touch(API_PREFIX);
     try { if (storageKey) sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
   function scrolls() {
@@ -267,14 +423,17 @@
     }
     if (recoverOnCatalog && !window.workspaceReady && current
         && catalog.some(entry => entry.key === current && !entry.error)) {
-      select(current, 'none'); return true;
+      select(current, 'none', false); return true;
     }
     return false;
   }
-  function select(key, history = 'push') {
+  function select(key, history = 'push', human = true) {
     if (typeof cancelCacheTransition === 'function') cancelCacheTransition();
     if (!key) { error('No supported boards were found. Add a board to the workspace folder, then retry.'); return; }
-    if (key === current && window.workspaceReady) { resume(); return; }
+    if (key === current && window.workspaceReady) { recentBoards.select(prefixFor(key), human); resume(); return; }
+    foreground();
+    if (current && current !== key && typeof beginCardAgeTransition === 'function')
+      beginCardAgeTransition();
     persist(); window.workspaceEpoch++; window.workspaceReady = false;
     cachedView = null;
     closeCard(); closeMake(true); closeEditors();
@@ -285,7 +444,7 @@
     const entry = catalog.find(entry => entry.key === key);
     pending = state.records[key] || {};
     drafts = {...(pending.drafts || {})}; query = pending.query || ''; unhideOld = !!pending.unhideOld;
-    staleReloadState = null; HAY.clear(); seen = null; lastOk = 0;
+    staleReloadState = null; HAY.clear(); seen = null; lastOk = 0; fileMs = 0;
     streamBoardError = false;
     data = {lanes: [], edges: [], counts: {}, actors: [], revision: 0};
     authoritativeData = null;
@@ -300,17 +459,26 @@
     document.getElementById('title').textContent = entry.project;
     boardTitle = entry.project; document.title = entry.project + ' · Loading';
     recoverOnCatalog = false;
+    recentBoards.select(API_PREFIX, human);
+    updateWatches();
     const floor = typeof revisionFloors === 'undefined' ? 0 : revisionFloors.get(API_PREFIX) || 0;
     const snapshot = typeof recentBoards === 'undefined' ? null : recentBoards.get(API_PREFIX, floor);
     if (snapshot) {
-      cachedView = {prefix: API_PREFIX, phase: 'refreshing'};
+      cachedView = currentSnapshot(API_PREFIX) ? null : {prefix: API_PREFIX, phase: 'refreshing'};
       authoritativeData = snapshot;
       data = projectActions(snapshot, API_PREFIX); HAY.clear();
       paint(); loaded();
     } else board.textContent = 'Loading ' + entry.project + '…';
     window.workspaceReady = true;
-    if (snapshot) renderLive();
-    window.BoardStream.select(key); tick(true); persist();
+    if (snapshot) { renderLive(); if (cachedView) awaitFreshness(); }
+    window.BoardStream.select(key);
+    if (!snapshot) tick(true);
+    else if (currentSnapshot(API_PREFIX)) {
+      applyBoardStatus(liveMetadata.get(API_PREFIX).status);
+      seen = snapshot.sync.contentVersion; lastOk = Date.now(); renderLive();
+    }
+    else { const meta = liveMetadata.get(API_PREFIX); if (transportConnected && meta?.status.sampledAt >= transportAfter) tick(false, meta.status); }
+    persist();
   }
   const boardNames = new Intl.Collator('en', {sensitivity: 'accent'});
   function minutesSinceEdit(entry, now) {
@@ -583,6 +751,7 @@
       if (!initialized) {
         storageKey = 'localswim.workspace.' + value.identity;
         try { const saved = JSON.parse(sessionStorage.getItem(storageKey)); if (saved && saved.records) { state = saved; } } catch (_) {}
+        if (recentBoards.configure(state.cacheBudget)) budgetInput.value = String(state.cacheBudget / 1024 / 1024);
         normalizePins();
         const legacyPins = [...state.pins];
         acceptPreferences(value.preferences); initialized = true;
@@ -593,7 +762,7 @@
         else error('No supported boards were found. Add a board to the workspace folder, then retry.');
       } else {
         acceptPreferences(value.preferences);
-        if (retryNow || (recoverOnCatalog && !window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none');
+        if (retryNow || (recoverOnCatalog && !window.workspaceReady && current && catalog.some(entry => entry.key === current && !entry.error))) select(current || (catalog[0] && catalog[0].key), 'none', false);
       }
       if (current && !catalog.some(entry => entry.key === current && !entry.error) && window.workspaceReady) { persist(); window.workspaceEpoch++; error('This board is missing or cannot be read. Choose another board or retry.', true); }
       renderRows(); showWorkspaceStatus(); flushPinCommands(); renderLive();
@@ -629,7 +798,8 @@
     try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_) {}
   }
   window.WorkspaceUI = {capture: persist, loaded, scrolls, restoreScroll, error, reconcile,
-    rememberSnapshot: (prefix, snapshot) => recentBoards.remember(prefix, snapshot),
+    rememberSnapshot, metadata, scheduleBackground, foreground,
+    currentSnapshot, cacheStats: () => recentBoards.stats(),
     cachePhase: () => cachedView?.phase || null,
     canMutate: () => !!window.workspaceReady && cachedView === null,
     cachePending, settling, refreshed,
@@ -644,6 +814,14 @@
   refresh();
   window.BoardStream.start('workspace', message => {
     if (message.type === 'connection' && message.connected) refresh();
-    streamMessage(message);
+    metadata(message);
+    if (!['watch','board','connection'].includes(message.type)) streamMessage(message);
+    else {
+      if (message.type === 'connection') {
+        if (!message.connected && streamConnected) streamClosedAt = Date.now();
+        streamConnected = message.connected; if (message.connected) streamClosedAt = null;
+      }
+      renderLive();
+    }
   });
 })();

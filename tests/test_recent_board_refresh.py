@@ -23,7 +23,7 @@ const el=id=>{if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},cl
 const context=vm.createContext({console,AbortController,AbortSignal,queueMicrotask,Date,
  crypto:require('crypto').webcrypto,setTimeout,clearTimeout,
  window:{workspaceEpoch:3,workspaceReady:true,localswimWorkspace:true,WorkspaceUI:{
-  canMutate:()=>phase===null,cachePhase:()=>phase,cachePending:()=>phase!==null,
+  foreground(){},scheduleBackground(){},canMutate:()=>phase===null,cachePhase:()=>phase,cachePending:()=>phase!==null,
   pageStatus:()=>({}),rememberSnapshot(...args){events.push(['remember',...args])},
   loaded(){events.push(['loaded'])},settling(){phase='settling';return 7},
   refreshed(prefix,epoch,token){events.push(['refreshed',prefix,epoch,token]);phase=null},
@@ -105,6 +105,46 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
   assert.equal(el('badge').textContent,'REFRESHING');
   context.streamConnected=true;context.streamClosedAt=null;run('renderLive()');
   assert.equal(el('dot').classList.contains('alive'),true);
+ }else if(input.mode==='matching-metadata'){
+  context.TextEncoder=TextEncoder;
+  section('// Pending browser intent','\nfunction acceptRevision(');
+  section('  function createRecentBoardCache(', '  const categories', input.workspace);
+  section('function renderLive()', '// Push-driven snapshots');
+  section('let pollingEpoch =', '\nfunction streamMessage(');
+  phase=null;context.API_PREFIX='/api/v001/workspace/boards/one';
+  let reads=0;context.apiGet=async()=>{reads++;return copy(snapshot)};
+  run("recentBoards.select(API_PREFIX);recentBoards.remember(API_PREFIX,{revision:12,sync:{boardIdentity:'one-id',contentVersion:'one-v'}})");
+  run("metadata({type:'connection',connected:true,generation:1});metadata({type:'watch',generation:2,value:{after:10}})");
+  assert.equal(context.fileMs,0);
+  run("metadata({type:'board',generation:2,value:{board:'one',status:{ok:true,revision:12,boardIdentity:'one-id',contentVersion:'one-v',sampledAt:11,mtime:123,build:'first-build'}}})");
+  assert.equal(reads,0);assert.equal(context.fileMs,123000);assert.ok(context.lastOk>0);
+  assert.equal(el('live-card-age').hidden,false);assert.match(el('live').title,/Last card update/);
+  run("metadata({type:'board',generation:2,value:{board:'one',status:{ok:true,revision:12,boardIdentity:'one-id',contentVersion:'one-v',sampledAt:12,mtime:456,build:'latest-build',codeStale:true,restarting:true,restartProblem:'Synthetic status',push:{state:'failed',detail:'Synthetic backup'}}}})");
+  assert.equal(reads,0);assert.equal(context.fileMs,456000);assert.equal(context.serverBuild,'latest-build');
+  assert.equal(context.codeStale,true);assert.equal(context.restarting,true);
+  assert.equal(context.restartProblem,'Synthetic status');assert.equal(context.pushState.state,'failed');
+  assert.equal(el('restart').classList.contains('show'),true);assert.equal(el('push').classList.contains('show'),true);
+  run("metadata({type:'board',generation:2,value:{board:'other',status:{ok:true,revision:12,sampledAt:13,mtime:789,build:'inactive-build',push:{state:'ok'}}}})");
+  assert.equal(reads,0);assert.equal(context.fileMs,456000);assert.equal(context.serverBuild,'latest-build');
+ }else if(input.mode.startsWith('cold-')){
+  section('// Pending browser intent','\nfunction acceptRevision(');
+  section('let pollingEpoch =', '\nfunction streamMessage(');
+  phase=null;context.renderLive=()=>{};
+  const changed=input.mode==='cold-changed',reads=[];
+  const first={...copy(snapshot),sync:{boardIdentity:'same-board',contentVersion:'v1'}};
+  const latest={...copy(snapshot),sync:{boardIdentity:'same-board',contentVersion:changed?'v2':'v1'}};
+  context.apiGet=path=>{
+   reads.push(path);
+   return reads.length===1?new Promise(resolve=>release=resolve):Promise.resolve(latest);
+  };
+  const pending=run('tick(true)');
+  context.queuedStatus={ok:true,revision:12,contentVersion:changed?'v2':'v1'};
+  await run('tick(false,queuedStatus)');
+  release(first);await pending;await flush();
+  assert.equal(reads.length,changed?2:1);
+  assert.ok(reads.every(path=>path==='/one/board'));
+  assert.equal(context.seen,changed?'v2':'v1');
+  assert.equal(events.filter(event=>event[0]==='error').length,0);
  }else if(input.mode.startsWith('tick')){
   section('// Pending browser intent','\nfunction acceptRevision(');
   section('function renderLive()', '// Push-driven snapshots');
@@ -130,6 +170,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
    assert.equal(phase,'failed');
   }
  }else if(input.mode==='settlement-race'){
+ context.knownStale=()=>false;
   section('  let cachedView =','  const categories =',input.workspace);
   run("cachedView={prefix:'/one',phase:'refreshing'};globalThis.old=settling('/one',3)");
   context.window.workspaceEpoch=4;
@@ -198,6 +239,9 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
         "direct-writes",
         "status",
         "startup-status",
+        "matching-metadata",
+        "cold-equal",
+        "cold-changed",
         "tick-fresh",
         "tick-error",
         "tick-obsolete",

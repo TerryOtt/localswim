@@ -17,7 +17,7 @@ MAX_EVENT_BYTES = 64 * 1024
 MAX_PENDING_EVENTS = 18
 SSE_WRITE_TIMEOUT_S = 1.0
 HEARTBEAT_FRAME = b"event: heartbeat\ndata: {}\n\n"
-_EVENT_NAMES = frozenset({"status", "catalog", "board", "error"})
+_EVENT_NAMES = frozenset({"status", "catalog", "board", "error", "watch"})
 type _EventKey = tuple[str, str | None]
 
 

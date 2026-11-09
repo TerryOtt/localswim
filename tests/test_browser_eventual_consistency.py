@@ -163,7 +163,7 @@ const context=vm.createContext({AbortController,AbortSignal,queueMicrotask,Date,
 });
 const bannerStart=input.page.indexOf('function renderBoardBanner()'),bannerEnd=input.page.indexOf('function paint(',bannerStart);
 vm.runInContext(input.page.slice(bannerStart,bannerEnd),context);
-const start=input.page.indexOf('async function tick('),end=input.page.indexOf('\ntick();',start);
+const start=input.page.indexOf('function applyBoardStatus('),end=input.page.indexOf('\ntick();',start);
 vm.runInContext(input.page.slice(start,end),context);
 const run=code=>vm.runInContext(code,context), settle=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
@@ -175,7 +175,9 @@ const run=code=>vm.runInContext(code,context), settle=()=>new Promise(resolve=>s
   waiters.shift()({revision:2,lanes:[]});await pending;
   assert.equal(context.seen,'new');assert.ok(context.lastOk>0);assert.equal(context.data.optimistic,true);
  }else if(input.mode==='board-error'){
-  await run("tick(false,{ok:false,error:'read failed'})");
+  context.fileMs=777;
+  await run("tick(false,{ok:false,mtime:0,error:'read failed'})");
+  assert.equal(context.fileMs,777);
   assert.equal(el('banner').classList.shown,true);assert.equal(el('banner-body').textContent,'read failed');
   run('paint()');assert.equal(el('banner').classList.shown,true);
   assert.equal(el('banner-body').textContent,'read failed');
@@ -415,7 +417,7 @@ function tab(){
  const context=vm.createContext({window,EventSource,JSON,encodeURIComponent});
  vm.runInContext(input.source,context);
  window.BoardStream.start('workspace',message=>messages.push(message));
- window.BoardStream.select('one/board');
+ window.BoardStream.watch(['one/board']);
  return {window,sources,messages,handlers};
 }
 const tabs=[tab(),tab(),tab()];
@@ -427,7 +429,13 @@ for(const t of tabs){
  assert.equal(t.messages.length,beforeMalformed);
  old.onerror();assert.equal(t.messages.at(-1).connected,false);
  old.onopen();assert.equal(t.messages.at(-1).connected,true);
- t.window.BoardStream.select('two');assert.equal(old.closed,true);
+ old.listeners.watch({data:JSON.stringify({after:20,session:'new'})});
+ const session=t.messages.at(-1).generation;
+ old.onerror();old.onopen();old.listeners.watch({data:JSON.stringify({after:30,session:'newer'})});
+ assert.ok(t.messages.at(-1).generation>session);
+ const beforeWatch=t.sources.length;t.window.BoardStream.watch(['one/board']);assert.equal(t.sources.length,beforeWatch);
+ t.window.BoardStream.select('two');assert.equal(old.closed,false);
+ t.window.BoardStream.watch(['two']);assert.equal(old.closed,true);
  assert.equal(t.messages.at(-1).connected,false);
  const count=t.messages.length;
  old.listeners.board({data:JSON.stringify({board:'one/board',status:{ok:true}})});
@@ -606,7 +614,7 @@ assert(![...elements.keys()].some(id=>id.startsWith('live-read')));
 assert(!input.page.includes('Last confirmed sync'));assert(input.page.includes('id="live-clock"'));
 vm.runInContext(input.source,context);
 context.window.BoardStream.start('workspace',m=>context.streamMessage(m));
-sources.at(-1).onopen();context.window.BoardStream.select('next');
+sources.at(-1).onopen();context.window.BoardStream.watch(['next']);
 now+=9999;render();assert.equal(el('badge').textContent,'CONNECTED');
 now++;render();assert.equal(el('badge').textContent,'RECONNECTING');
 sources.at(-1).onopen();assert.equal(el('badge').textContent,'CONNECTED');

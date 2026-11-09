@@ -70,3 +70,9 @@ body:has(#workspace-nav) #counts {display:none;}
 #ws-resize:hover::after, #ws-resize:focus-visible::after, body.ws-resizing #ws-resize::after {top:0; bottom:0; background:#244d88;}
 #ws-resize:focus-visible {outline:2px solid #244d88; outline-offset:-2px;}
 body.ws-resizing, body.ws-resizing * {cursor:col-resize !important; user-select:none !important;}
+
+.ws-cache-budget { display: flex; align-items: center; gap: 6px; margin: 10px 0; font-size: 12px; }
+.ws-cache-budget input { width: 78px; color: inherit; background: var(--surface, #fff); border: 1px solid #888; border-radius: 4px; padding: 3px; }
+
+.ws-cache-settings {font-size:11px; margin-top:8px;}
+.ws-cache-settings summary {cursor:pointer;}

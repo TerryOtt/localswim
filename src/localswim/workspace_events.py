@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 import urllib.parse
+import uuid
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
@@ -85,30 +86,48 @@ class _PollingResponse(http.client.HTTPResponse):
         )
 
 
+MAX_WATCH_QUERY_BYTES = 48 * 1024
+MAX_WATCH_BOARDS = 1024
+
+
+def selected_boards(query: str) -> tuple[str, ...]:
+    """Validate bounded, explicit watch membership; never infer it from catalog."""
+    if len(query.encode("utf-8")) > MAX_WATCH_QUERY_BYTES:
+        raise ValueError("workspace events selection exceeds limit")
+    parameters = urllib.parse.parse_qsl(
+        query, keep_blank_values=True, max_num_fields=MAX_WATCH_BOARDS
+    )
+    keys: list[str] = []
+    for name, key in parameters:
+        if name != "board":
+            raise ValueError("unknown workspace events parameter")
+        parts = key.split("/")
+        if (
+            not key
+            or len(key) > 1024
+            or len(key.encode("utf-8")) > 4096
+            or key in keys
+            or any(
+                not part
+                or part.startswith(".")
+                or (part == "attachments" and index < len(parts) - 1)
+                or "\\" in part
+                or ":" in part
+                for index, part in enumerate(parts)
+            )
+        ):
+            raise ValueError("unknown workspace board")
+        keys.append(key)
+    return tuple(keys)
+
+
 def selected_board(query: str) -> str | None:
-    """Accept the tab's optional one canonical board key, without credentials."""
-    parameters = urllib.parse.parse_qsl(query, keep_blank_values=True, max_num_fields=1)
-    if not parameters:
-        return None
-    name, key = parameters[0]
-    if name != "board":
-        raise ValueError("unknown workspace events parameter")
-    parts = key.split("/")
-    if (
-        not key
-        or len(key) > 1024
-        or len(key.encode("utf-8")) > 4096
-        or any(
-            not part
-            or part.startswith(".")
-            or (part == "attachments" and index < len(parts) - 1)
-            or "\\" in part
-            or ":" in part
-            for index, part in enumerate(parts)
-        )
-    ):
-        raise ValueError("unknown workspace board")
-    return key
+    """Compatibility parser for callers requiring exactly one selected key."""
+    urllib.parse.parse_qsl(query, keep_blank_values=True, max_num_fields=1)
+    keys = selected_boards(query)
+    if len(keys) > 1:
+        raise ValueError("multiple selected workspace boards")
+    return keys[0] if keys else None
 
 
 def upstream_events(response: http.client.HTTPResponse) -> Iterator[board_state.JsonObject]:
@@ -144,7 +163,7 @@ def upstream_events(response: http.client.HTTPResponse) -> Iterator[board_state.
 
 
 class _BoardRelay:
-    """One upstream stream for a selected key, independent of its client count."""
+    """One shared upstream stream for an explicitly watched board key."""
 
     def __init__(self, workspace: Workspace, key: str) -> None:
         self.workspace = workspace
@@ -282,7 +301,12 @@ class _BoardRelay:
 
 
 class WorkspaceEvents:
-    """Combine the cached catalog with the tab's selected board stream."""
+    """Combine the separate catalog channel with explicit retained-board watches.
+
+    Each board has one upstream relay across browser subscribers. Membership
+    replacement may reconnect a browser, but the status content markers remain
+    authoritative: subscribing does not request or invalidate a full snapshot.
+    """
 
     def __init__(self, workspace: Workspace, catalog: Callable[[], object]) -> None:
         self.workspace = workspace
@@ -292,36 +316,73 @@ class WorkspaceEvents:
             self.catalog_hub, catalog, event="catalog", interval=CATALOG_INTERVAL
         )
         self._lock = threading.Lock()
-        self._sessions: dict[browser_events.BrowserEventMailbox, _BoardRelay | None] = {}
+        self._sessions: dict[browser_events.BrowserEventMailbox, tuple[str, ...]] = {}
+        self._relays: dict[str, _BoardRelay] = {}
 
-    def subscribe(self, key: str | None) -> browser_events.BrowserEventMailbox:
-        mailbox = browser_events.BrowserEventMailbox()
-        relay = _BoardRelay(self.workspace, key) if key is not None else None
+    def subscribe(self, keys: tuple[str, ...] | str | None) -> browser_events.BrowserEventMailbox:
+        if keys is None:
+            keys = ()
+        elif isinstance(keys, str):
+            keys = (keys,)
+        # Direct callers receive the same bounds and canonical-key checks as HTTP.
+        query = urllib.parse.urlencode([("board", key) for key in keys])
+        keys = selected_boards(query)
+        # One slot per watched board plus catalog and handshake: updates coalesce only
+        # within a board, never silently displace another board's currentness.
+        mailbox = browser_events.BrowserEventMailbox(max_pending=len(keys) + 2)
+        handshake = json.dumps({"after": time.monotonic(), "session": uuid.uuid4().hex})
+        mailbox.offer(("watch", None), b"event: watch\ndata: " + handshake.encode() + b"\n\n")
+        created: list[_BoardRelay] = []
         try:
-            if relay is not None:
-                relay.prepare()
             with self._lock:
                 if self.stop_event.is_set():
                     raise OSError("workspace events are closed")
+                selected: dict[str, _BoardRelay] = {}
+                for key in keys:
+                    relay = self._relays.get(key)
+                    if relay is None:
+                        relay = _BoardRelay(self.workspace, key)
+                        relay.prepare()
+                        created.append(relay)
+                    selected[key] = relay
                 self.catalog_hub.subscribe(mailbox)
-                if relay is not None:
+                for relay in selected.values():
                     relay.hub.subscribe(mailbox)
-                self._sessions[mailbox] = relay
                 self.catalog_producer.start()
-                if relay is not None:
+                for relay in created:
                     relay.start()
+                # Publish only fully started relays. A failed request's staged
+                # relays must never become another subscriber's inert source.
+                self._relays.update(selected)
+                self._sessions[mailbox] = keys
             return mailbox
         except BaseException:
             self.unsubscribe(mailbox)
-            if relay is not None:
+            with self._lock:
+                unused = [
+                    relay
+                    for relay in created
+                    if self._relays.get(relay.key) is not relay
+                    or not any(relay.key in watched for watched in self._sessions.values())
+                ]
+                for relay in unused:
+                    if self._relays.get(relay.key) is relay:
+                        del self._relays[relay.key]
+            for relay in unused:
                 relay.close()
             raise
 
     def unsubscribe(self, mailbox: browser_events.BrowserEventMailbox) -> None:
         with self._lock:
-            relay = self._sessions.pop(mailbox, None)
+            keys = self._sessions.pop(mailbox, ())
+            unused = [
+                self._relays.pop(key)
+                for key in keys
+                if key in self._relays
+                and not any(key in watched for watched in self._sessions.values())
+            ]
         mailbox.close()
-        if relay is not None:
+        for relay in unused:
             relay.close()
 
     def wake_catalog(self) -> None:
@@ -330,7 +391,8 @@ class WorkspaceEvents:
     def close(self) -> None:
         with self._lock:
             self.stop_event.set()
-            relays = tuple(relay for relay in self._sessions.values() if relay is not None)
+            relays = tuple(self._relays.values())
+            self._relays.clear()
             self._sessions.clear()
         # Wake HTTP consumers before a server can join its non-daemon workers.
         self.catalog_hub.close()

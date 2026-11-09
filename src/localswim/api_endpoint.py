@@ -1628,11 +1628,17 @@ class BoardStore:
 
         Retained accepted memory never counts as a successful disk health read.
         """
+        return self.snapshot_with_version()[0]
+
+    def snapshot_with_version(self) -> tuple[board_state.Board, str]:
+        """Bind the returned model and content marker to one locked admission."""
         with self._mutex:
             board = self._admit(self.policy if self._external_policy else None)
             self._board = board
             self.policy = board.policy
-            return copy.deepcopy(board)
+            if self._content_version is None:
+                raise board_state.BoardError("admitted snapshot has no content marker")
+            return copy.deepcopy(board), self._content_version
 
     def credential_actor(self, *, browser: bool) -> str:
         """Resolve service credentials from this store's accepted cast."""
@@ -2443,6 +2449,9 @@ PAGE = """<!doctype html>
                white-space: nowrap; }
   #live > span { overflow: hidden; text-overflow: ellipsis; }
   #live .age-slot { display: inline-grid; }
+  #live-card-reading { opacity: 1; transition: opacity .1s ease-in; }
+  #live-card-reading.fading { opacity: 0; transition: opacity .15s ease-out; }
+  @media (prefers-reduced-motion: reduce) { #live-card-reading { transition: none; } }
   #live .age-value { justify-items: end; }
   #live .age-slot > span, #live .age-slot::after { grid-area: 1 / 1; }
   #live .age-slot::after { content: attr(data-reserve); visibility: hidden; }
@@ -3115,10 +3124,10 @@ PAGE = """<!doctype html>
     <span id="findn"></span>
     <span id="live">
       <span id="live-build">connecting...</span>
-      <span id="live-card-update"><span id="live-card-age" hidden>· Last card update: <span
+      <span id="live-card-update"><span id="live-card-age" hidden>· Last card update: <span id="live-card-reading"><span
         class="age-slot age-value" data-reserve="00"><span id="live-card-value"></span></span> <span
         id="live-card-unit" class="age-slot"><span
-        id="live-card-unit-label"></span></span> ago</span></span>
+        id="live-card-unit-label"></span></span></span> ago</span></span>
       <span id="live-clock">· <span class="age-slot age-value" data-reserve="00"><span
         id="live-clock-hour"></span></span><span id="live-clock-rest"></span></span>
     </span>
@@ -5922,6 +5931,25 @@ function clearStaleReloadMarker() {
 
 // The wall clock ticks independently of network activity. The breather tracks
 // SSE health; the badge also reports the selected board's snapshot readiness.
+// A board switch changes the reading, not its surrounding label. Wait for both
+// the fade and the new board's confirmed timestamp before revealing the value.
+function beginCardAgeTransition() {
+  const age = document.getElementById('live-card-age');
+  if (age.hidden) return;
+  const reading = document.getElementById('live-card-reading');
+  const previous = window.cardAgeTransition;
+  if (previous) clearTimeout(previous.timer);
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const transition = {ready: reduced, timer: null};
+  window.cardAgeTransition = transition;
+  if (reduced) { reading.classList.remove('fading'); return; }
+  reading.classList.add('fading');
+  transition.timer = setTimeout(() => {
+    if (window.cardAgeTransition !== transition) return;
+    transition.ready = true;
+    renderLive();
+  }, 150);
+}
 function renderLive() {
   const el = document.getElementById('live');
   const badge = document.getElementById('badge');
@@ -6002,6 +6030,8 @@ function renderLive() {
   document.getElementById('live-clock-rest').textContent = clockRest;
   function showAge(kind, stamp) {
     const prefix = 'live-' + kind;
+    const transition = kind === 'card' && window.cardAgeTransition;
+    if (transition && (!transition.ready || !stamp)) return '';
     document.getElementById(prefix + '-age').hidden = !stamp;
     if (!stamp) return '';
     const [value, unit] = agoOf(stamp);
@@ -6010,6 +6040,10 @@ function renderLive() {
     document.getElementById(prefix + '-value').textContent = value;
     document.getElementById(prefix + '-unit').dataset.reserve = plural;
     document.getElementById(prefix + '-unit-label').textContent = label;
+    if (transition) {
+      window.cardAgeTransition = null;
+      document.getElementById('live-card-reading').classList.remove('fading');
+    }
     return value + ' ' + label + ' ago';
   }
   const cardAge = showAge('card', lastOk && fileMs);
@@ -6029,9 +6063,16 @@ function renderLive() {
 // Push-driven snapshots: navigation aborts superseded reads; bursts coalesce.
 let pollingEpoch = null, pollingController = null, pollingQueued = false;
 let queuedMeta = null, queuedForce = false;
+function applyBoardStatus(meta) {
+  if (meta.build) serverBuild = meta.build;
+  codeStale = !!meta.codeStale; restarting = !!meta.restarting;
+  restartProblem = meta.restartProblem || null; pushState = meta.push || null;
+  if (meta.ok !== false && Number.isFinite(meta.mtime)) fileMs = meta.mtime * 1000;
+}
 async function tick(force = false, meta = null) {
   if (window.localswimWorkspace && !window.workspaceReady) return;
   const epoch = window.workspaceEpoch;
+  window.WorkspaceUI?.foreground();
   if (pollingEpoch === epoch) {
     pollingQueued = true; queuedForce = queuedForce || force;
     if (meta) queuedMeta = meta;
@@ -6046,9 +6087,7 @@ async function tick(force = false, meta = null) {
   try {
     const marker = meta ? (typeof meta.contentVersion === 'string' ? meta.contentVersion : meta.mtime) : null;
     if (meta) {
-      if (meta.build) serverBuild = meta.build;
-      codeStale = !!meta.codeStale; restarting = !!meta.restarting;
-      restartProblem = meta.restartProblem || null; pushState = meta.push || null;
+      applyBoardStatus(meta);
       if (meta.ok === false) {
         if (window.WorkspaceUI) throw new Error(meta.error || 'The board service could not read this board.');
         streamBoardError = meta.error || 'The board service could not read this board.';
@@ -6059,7 +6098,6 @@ async function tick(force = false, meta = null) {
         streamBoardError = null;
         renderBoardBanner();
       }
-      if (Number.isFinite(meta.mtime)) fileMs = meta.mtime * 1000;
     }
     if (force || !meta || marker !== seen) {
       const snapshot = await apiGet(prefix + '/board', signal);
@@ -6075,7 +6113,9 @@ async function tick(force = false, meta = null) {
       HAY.clear(); paint(!before); restoreStaleReloadState();
       if (window.WorkspaceUI) window.WorkspaceUI.loaded();
       // Failed, superseded or CAS-obsolete responses never advance sync confirmation.
-      seen = marker; lastOk = Date.now();
+      // Bind queued metadata to the accepted payload, including reads started without metadata.
+      seen = typeof snapshot.sync?.contentVersion === 'string' ? snapshot.sync.contentVersion : marker;
+      lastOk = Date.now();
       if (before) {
         const settlement = window.WorkspaceUI.settling(prefix,epoch);
         renderLive();
@@ -6096,6 +6136,7 @@ async function tick(force = false, meta = null) {
   } finally {
     if (pollingEpoch === epoch) {
       pollingEpoch = null; pollingController = null;
+      window.WorkspaceUI?.scheduleBackground();
       if (pollingQueued) {
         const nextMeta = queuedMeta, nextForce = queuedForce;
         pollingQueued = false; queuedMeta = null; queuedForce = false;
@@ -6172,7 +6213,9 @@ def payload() -> bytes:
     because a blank tab and a broken parser look identical and one of them is a lie.
     """
     try:
-        board = live_snapshot()
+        if STORE is None:
+            raise board_state.BoardError("board store is not initialized")
+        board, content_version = STORE.snapshot_with_version()
     except (board_state.BoardError, OSError, json.JSONDecodeError) as exc:
         return json.dumps({"lanes": [], "edges": [], "counts": {}, "error": str(exc)}).encode(
             "utf-8"
@@ -6338,6 +6381,10 @@ def payload() -> bytes:
     return json.dumps(
         {
             "revision": board.revision,
+            "sync": {
+                "boardIdentity": service_ownership.board_identity(STORE.path),
+                "contentVersion": content_version,
+            },
             "attachmentMaxBytes": attachments.MAX_BYTES,
             "project": board.project,
             "order": list(board_state.LANE_ORDER_FIELDS),
@@ -7011,8 +7058,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # the browser's last accepted and rendered snapshot. A heartbeat proves
         # only that the connection responds; it never fabricates a disk read.
         code_meta = source_status(server)
+        board_identity = service_ownership.board_identity(BOARD_PATH)
 
         try:
+            sampled_at = time.monotonic()
             if STORE is not None:
                 reloaded, mtime, stamp, read_at, content_version, revision = STORE.disk_status()
             else:
@@ -7036,6 +7085,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "mtime": 0,
                 "stamp": "unreadable",
                 "readAt": STORE.read_at if STORE is not None else None,
+                "boardIdentity": board_identity,
                 **code_meta,
                 "push": push_status(),
                 "error": str(exc),
@@ -7050,6 +7100,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "readAt": read_at,
             "contentVersion": content_version,
             "revision": revision,
+            "boardIdentity": board_identity,
+            "sampledAt": sampled_at,
             **code_meta,
             "push": push_status(),
         }

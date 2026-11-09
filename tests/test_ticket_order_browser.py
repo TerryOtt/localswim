@@ -118,7 +118,16 @@ const run=code=>vm.runInContext(code,context),settle=()=>new Promise(resolve=>se
      Object.assign(context,{current:'one',pending:null,state:{records:{}},catalog:[{key:'two',project:'Two'}],
       persist(){},closeCard(){},closeMake(){},closeEditors(){},route:key=>'/'+key,renderRows(){},
       board:new Element(),HAY:{clear(){}},recoverOnCatalog:false});
-     context.window.workspaceReady=true;context.window.BoardStream={select(){}};
+     Object.assign(context,{TextEncoder,AbortController,queueMicrotask,setTimeout,clearTimeout});
+     context.window.workspaceReady=true;context.window.BoardStream={select(){},watch(){}};
+     const cacheStart=input.workspace.indexOf('  function createRecentBoardCache(');
+     const cacheEnd=input.workspace.indexOf('  const categories',cacheStart);
+     assert.ok(cacheStart>=0&&cacheEnd>cacheStart);
+     const statusStart=input.page.indexOf('function applyBoardStatus(');
+     const statusEnd=input.page.indexOf('async function tick(',statusStart);
+     assert.ok(statusStart>=0&&statusEnd>statusStart);
+     vm.runInContext(input.page.slice(statusStart,statusEnd),context);
+     vm.runInContext(input.workspace.slice(cacheStart,cacheEnd),context);
      const errorStart=input.workspace.indexOf('  function error(message, recover = false)');
      const errorEnd=input.workspace.indexOf('  function resume()',errorStart);
      const selectStart=input.workspace.indexOf('  function select(key, history =');

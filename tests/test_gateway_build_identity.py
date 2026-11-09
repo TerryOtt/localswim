@@ -273,7 +273,7 @@ if(input.mode==='card-focus'){
     projectActions(value){return value},
     paint(){},restoreStaleReloadState(){},renderLive(){}});
   context.window.workspaceEpoch=1;
-  vm.runInContext(section(input.page,'async function tick(', '\ntick();'),context);
+  vm.runInContext(section(input.page,'function applyBoardStatus(', '\ntick();'),context);
   await vm.runInContext('tick()',context);
   const refreshed=vm.runInContext('hay(items[0])',context);
   context.comments=input.comments;
@@ -297,6 +297,34 @@ if(input.mode==='card-focus'){
 }else if(input.mode==='route'){
   vm.runInContext(section(input.workspaceSource,'  function route(', '\n  function '),context);
   process.stdout.write(JSON.stringify(vm.runInContext('route("beta/board")',context)));
+}else if(input.mode==='age-transition'){
+  const assert=require('assert/strict');let timers=[],reduced=false;
+  Object.assign(context,{setTimeout:(fn,ms)=>{const t={fn,ms};timers.push(t);return t},
+    clearTimeout:t=>{timers=timers.filter(x=>x!==t)},agoOf:stamp=>[stamp,'second']});
+  window.matchMedia=()=>({matches:reduced});
+  const helpers=section(input.page,'function saveStaleReloadState()', 'function renderLive()');
+  const live=section(input.page,'function renderLive()', '// Push-driven snapshots:');
+  vm.runInContext(helpers+live,context);
+  context.lastOk=1;context.fileMs=1;vm.runInContext('renderLive()',context);
+  const age=element('live-card-age'),reading=element('live-card-reading');
+  assert.equal(age.hidden,false);assert.equal(element('live-card-value').textContent,1);
+  vm.runInContext('beginCardAgeTransition()',context);
+  assert.equal(timers[0].ms,150);assert.ok(reading.classList.values.has('fading'));
+  // The board body can arrive before its timestamp-bearing status response.
+  context.lastOk=1;context.fileMs=0;vm.runInContext('renderLive()',context);
+  assert.equal(age.hidden,false);assert.equal(element('live-card-value').textContent,1);
+  timers.shift().fn();assert.ok(reading.classList.values.has('fading'));
+  context.fileMs=2;vm.runInContext('renderLive()',context);
+  assert.equal(element('live-card-value').textContent,2);
+  assert.ok(!reading.classList.values.has('fading'));
+  vm.runInContext('renderLive()',context);assert.equal(timers.length,0);
+  vm.runInContext('beginCardAgeTransition();beginCardAgeTransition()',context);
+  assert.equal(timers.length,1);context.fileMs=3;timers.shift().fn();
+  assert.equal(element('live-card-value').textContent,3);
+  reduced=true;vm.runInContext('beginCardAgeTransition()',context);
+  context.fileMs=4;vm.runInContext('renderLive()',context);
+  assert.equal(element('live-card-value').textContent,4);assert.equal(timers.length,0);
+  process.stdout.write(JSON.stringify({verified:true}));
 }else if(input.mode==='roundtrip'){
   // A Node VM checks shipped state plumbing; these DOM seams are not a browser.
   const helpers=section(input.page,'function saveStaleReloadState()',
@@ -372,6 +400,13 @@ def browser_helpers(**values: Any) -> Any:  # noqa: ANN401 - JSON browser test b
         check=True,
     )
     return json.loads(result.stdout)
+
+
+def test_card_age_transition_waits_for_new_board_and_respects_reduced_motion() -> None:
+    assert browser_helpers(mode="age-transition")["verified"] is True
+    assert "transition: opacity .15s ease-out" in api_endpoint.PAGE
+    assert "transition: opacity .1s ease-in" in api_endpoint.PAGE
+    assert "prefers-reduced-motion: reduce" in api_endpoint.PAGE
 
 
 def test_card_native_action_keyed_repaint_close_and_drag_handlers() -> None:

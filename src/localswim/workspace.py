@@ -1100,13 +1100,13 @@ class WorkspaceHandler(http.server.BaseHTTPRequestHandler):
     def _events_get(self) -> None:
         """Stream one shared catalog plus the explicitly selected board statuses."""
         try:
-            key = workspace_events.selected_board(urllib.parse.urlsplit(self.path).query)
+            keys = workspace_events.selected_boards(urllib.parse.urlsplit(self.path).query)
         except ValueError:
             self._json({"error": "invalid workspace events selection"}, 400)
             return
         events = cast("WorkspaceServer", self.server).events
         try:
-            mailbox = events.subscribe(key)
+            mailbox = events.subscribe(keys)
         except ValueError:
             self._json({"error": "unknown workspace board"}, 404)
             return

@@ -139,13 +139,18 @@ Board links are bookmarkable. A snapshot at `state-store/localswim/localswim.jso
 workspace URL such as **http://127.0.0.1:8810/board/localswim/localswim**. The key is its
 relative path without `.json`, so changing the displayed project name preserves the
 bookmark. Switching boards updates the URL and contents without reloading the page.
-Returning to a recently viewed board shows its last confirmed snapshot immediately
-with a pale-green **REFRESHING** indicator. A fresh read of that selected board
-reconciles moved, added and removed cards before saving becomes available again.
-Failed refreshes keep the old view visible with **Retry**. This per-tab memory
-cache holds up to eight boards and 96 MiB of serialized snapshots, expires boards
-after 30 minutes without viewing, and disappears when the page reloads. It adds
-no background full-board polling for pinned or previously viewed boards.
+Returning to a recently viewed board shows its last confirmed snapshot immediately.
+Combined server-sent events track retained boards; when currentness is established,
+the cached view can be used without another snapshot read. Otherwise **REFRESHING**
+appears while the selected board recovers, and failed refreshes offer **Retry**.
+Background refreshes are bounded and yield to the selected board.
+
+The per-tab cache uses a configurable byte budget, charged by serialized UTF-8 snapshot
+size. The default is 256 MiB, selected for the [qualified cases](docs/reports/2026-11-08-byte-lru-cache-qualification.md). Use **Cache
+settings** in the sidebar to change the budget in MiB for this window. Human board
+selection determines eviction priority; background updates do not. There is no fixed
+board count or age expiry. The active board and drafts remain protected even under
+pressure. The cache disappears on reload and is not a limit on total browser memory.
 Direct bookmarks, browser Back/Forward, and opening a link in another window work too.
 Each window keeps its own per-board search, selected card, lane scrolling, and unsent
 comment, editor, and new-card drafts in session storage.

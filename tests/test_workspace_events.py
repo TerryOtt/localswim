@@ -7,6 +7,7 @@ import io
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -393,6 +394,9 @@ def test_gateway_public_catalog_events_and_auth_boundaries(tmp_path: pathlib.Pat
         response = stream.getresponse()
         assert response.status == 200
         assert response.getheader("Content-Type") == "text/event-stream; charset=utf-8"
+        assert response.readline() == b"event: watch\n"
+        assert "after" in json.loads(response.readline().removeprefix(b"data: "))
+        assert response.readline() == b"\n"
         assert response.readline() == b"event: catalog\n"
         data = json.loads(response.readline().removeprefix(b"data: "))
         assert data["identity"] == instance.identity
@@ -460,3 +464,201 @@ def test_unknown_selection_does_not_launch_a_hidden_or_escaped_board(
         assert not events._sessions  # noqa: SLF001
     finally:
         events.close()
+
+
+def test_retained_watch_query_accepts_many_keys_with_explicit_bounds() -> None:
+    keys = tuple(f"project/board-{index}" for index in range(24))
+    query = "&".join(f"board=project%2Fboard-{index}" for index in range(24))
+    assert workspace_events.selected_boards(query) == keys
+    assert workspace_events.selected_boards("") == ()
+    with pytest.raises(ValueError, match="unknown workspace board"):
+        workspace_events.selected_boards("board=a&board=a")
+    with pytest.raises(ValueError, match="unknown workspace events parameter"):
+        workspace_events.selected_boards("board=a&token=secret")
+    with pytest.raises(ValueError, match="exceeds limit"):
+        workspace_events.selected_boards("board=" + "x" * workspace_events.MAX_WATCH_QUERY_BYTES)
+    with pytest.raises(ValueError, match="fields"):
+        workspace_events.selected_boards("&".join(f"board=b{i}" for i in range(1025)))
+
+
+def test_retained_boards_share_relays_and_preserve_each_pending_key(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: dict[str, object] = {}
+    closed: list[str] = []
+    started: list[str] = []
+
+    class Relay:
+        def __init__(self, _workspace: workspace.Workspace, key: str) -> None:
+            self.key = key
+            self.hub = browser_events.BrowserEventHub()
+            created[key] = self
+
+        def prepare(self) -> None:
+            self.hub.publish("board", {"board": self.key, "status": STATUS}, key=self.key)
+
+        def start(self) -> None:
+            started.append(self.key)
+
+        def close(self) -> None:
+            closed.append(self.key)
+            self.hub.close()
+
+    monkeypatch.setattr(workspace_events, "_BoardRelay", Relay)
+    events = workspace_events.WorkspaceEvents(workspace.Workspace(tmp_path), lambda: {})
+    keys = tuple(f"board-{index}" for index in range(24))
+    first = events.subscribe(keys)
+    second = events.subscribe((keys[0], keys[-1]))
+    try:
+        assert len(created) == len(started) == 24
+        received = {take(first, "board")["board"] for _ in keys}
+        assert received == set(keys)
+        assert {take(second, "board")["board"] for _ in range(2)} == {keys[0], keys[-1]}
+        events.unsubscribe(first)
+        assert set(closed) == set(keys[1:-1])
+        assert not second.closed
+        assert set(events._relays) == {keys[0], keys[-1]}  # noqa: SLF001
+        events.unsubscribe(second)
+        assert set(closed) == set(keys)
+        assert len(closed) == len(keys)
+    finally:
+        events.close()
+
+
+def test_retained_real_relay_shared_until_last_browser_disconnects(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = workspace.Workspace(tmp_path)
+    with upstream() as source:
+        resolutions: list[str] = []
+
+        def resolve(key: str) -> tuple[pathlib.Path, workspace.Endpoint]:
+            resolutions.append(key)
+            return tmp_path / "board.json", workspace.Endpoint(source.server.server_port, "", "")
+
+        monkeypatch.setattr(instance, "resolve_endpoint", resolve)
+        events = workspace_events.WorkspaceEvents(instance, lambda: {})
+        first = events.subscribe(("board-a", "board-b"))
+        second = events.subscribe(("board-b",))
+        try:
+            assert {take(first, "board")["board"] for _ in range(2)} == {"board-a", "board-b"}
+            assert take(second, "board")["board"] == "board-b"
+            assert resolutions == ["board-a", "board-b"]
+            assert len(source.requests) == 2
+            events.unsubscribe(first)
+            source.hub.publish("status", {**STATUS, "revision": 2})
+            assert take(second, "board")["status"] == {**STATUS, "revision": 2}
+            assert len(source.requests) == 2
+        finally:
+            events.unsubscribe(second)
+            events.close()
+        assert not events._relays  # noqa: SLF001
+
+
+def test_failed_watch_setup_releases_prepared_relays(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = workspace.Workspace(tmp_path)
+    with upstream() as source:
+
+        def resolve(key: str) -> tuple[pathlib.Path, workspace.Endpoint]:
+            if key == "missing":
+                raise ValueError("unknown workspace board")
+            return tmp_path / "board.json", workspace.Endpoint(source.server.server_port, "", "")
+
+        monkeypatch.setattr(instance, "resolve_endpoint", resolve)
+        events = workspace_events.WorkspaceEvents(instance, lambda: {})
+        try:
+            with pytest.raises(ValueError, match="unknown workspace board"):
+                events.subscribe(("board", "missing"))
+            assert not events._relays  # noqa: SLF001
+            assert not events._sessions  # noqa: SLF001
+            assert not source.requests
+        finally:
+            events.close()
+
+
+def test_watch_handshake_precedes_cached_seed_and_changes_per_connection(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = workspace.Workspace(tmp_path)
+    with upstream() as source:
+        stale = {**STATUS, "sampledAt": 0}
+        source.hub.publish("status", stale)
+
+        def resolve(_key: str) -> tuple[pathlib.Path, workspace.Endpoint]:
+            return tmp_path / "board.json", workspace.Endpoint(source.server.server_port, "", "")
+
+        monkeypatch.setattr(instance, "resolve_endpoint", resolve)
+        events = workspace_events.WorkspaceEvents(instance, lambda: {})
+        first = events.subscribe("board")
+        try:
+            before = take(first, "watch")
+            assert take(first, "board")["status"] == stale
+            second = events.subscribe("board")
+            try:
+                frame = second.get(timeout=1)
+                assert frame is not None and frame.startswith(b"event: watch\n")
+                after = json.loads(frame.split(b"data: ", 1)[1])
+                assert after["session"] != before["session"]
+                assert after["after"] >= before["after"]
+                assert take(second, "board")["status"] == stale
+                assert stale["sampledAt"] < after["after"]
+                fresh = {**STATUS, "sampledAt": time.monotonic()}
+                source.hub.publish("status", fresh)
+                assert take(second, "board")["status"] == fresh
+                assert fresh["sampledAt"] >= after["after"]
+            finally:
+                events.unsubscribe(second)
+        finally:
+            events.unsubscribe(first)
+            events.close()
+
+
+def test_failed_watch_cleanup_cannot_publish_unstarted_relay_to_another_subscriber(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = workspace.Workspace(tmp_path)
+    cleanup_started, release_cleanup = threading.Event(), threading.Event()
+    with upstream() as source:
+        resolutions: list[str] = []
+
+        def resolve(key: str) -> tuple[pathlib.Path, workspace.Endpoint]:
+            resolutions.append(key)
+            if key == "missing":
+                raise ValueError("unknown workspace board")
+            return tmp_path / "board.json", workspace.Endpoint(source.server.server_port, "", "")
+
+        monkeypatch.setattr(instance, "resolve_endpoint", resolve)
+        events = workspace_events.WorkspaceEvents(instance, lambda: {})
+        original_unsubscribe = events.unsubscribe
+
+        def pause_failed_cleanup(mailbox: browser_events.BrowserEventMailbox) -> None:
+            if not cleanup_started.is_set():
+                cleanup_started.set()
+                assert release_cleanup.wait(3)
+            original_unsubscribe(mailbox)
+
+        monkeypatch.setattr(events, "unsubscribe", pause_failed_cleanup)
+        survivor: browser_events.BrowserEventMailbox | None = None
+        try:
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                failed = workers.submit(events.subscribe, ("board", "missing"))
+                try:
+                    assert cleanup_started.wait(3)
+                    survivor = events.subscribe("board")
+                    assert take(survivor, "board")["status"] == STATUS
+                finally:
+                    release_cleanup.set()
+                with pytest.raises(ValueError, match="unknown workspace board"):
+                    failed.result(3)
+            assert resolutions == ["board", "missing", "board"]
+            assert len(source.requests) == 1
+            assert not survivor.closed
+            source.hub.publish("status", {**STATUS, "revision": 2})
+            assert take(survivor, "board")["status"] == {**STATUS, "revision": 2}
+        finally:
+            release_cleanup.set()
+            if survivor is not None:
+                events.unsubscribe(survivor)
+            events.close()

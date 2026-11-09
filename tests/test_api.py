@@ -2467,3 +2467,56 @@ def test_json_decoder_valid_and_ordinary_duplicate_key_controls(
     assert saved.verify() == []
     if not permissions:
         assert saved.find("second-title").subject == "Second title"
+
+
+def test_snapshot_sync_marker_survives_same_revision_replacement(api: RunningApi) -> None:
+    first = request_json(api.base + API + "/board")[1]
+    assert first["sync"]["boardIdentity"] == api.server.board_identity
+    original = api.path.read_bytes()
+    api.path.write_bytes(original.replace(b'"project": "API"', b'"project": "New"'))
+    second = request_json(api.base + API + "/board")[1]
+    status = request_json(api.base + API + "/status")[1]
+    assert first["revision"] == second["revision"]
+    assert second["project"] == "New"
+    assert second["sync"]["contentVersion"] != first["sync"]["contentVersion"]
+    assert second["sync"]["contentVersion"] == status["contentVersion"]
+    assert status["boardIdentity"] == second["sync"]["boardIdentity"]
+    assert 0 < status["sampledAt"] <= time.monotonic()
+
+
+def test_payload_content_marker_is_bound_before_concurrent_writer(
+    api: RunningApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = request_json(api.base + API + "/board")[1]
+    store = api_endpoint.STORE
+    assert store is not None
+    original_copy = api_endpoint.copy.deepcopy
+    copying, release, editing = threading.Event(), threading.Event(), threading.Event()
+
+    def copy_board[T](value: T) -> T:
+        if isinstance(value, board_state.Board):
+            copying.set()
+            assert release.wait(3)
+        return original_copy(value)
+
+    def rename(board: board_state.Board) -> str:
+        editing.set()
+        board.project = "Changed"
+        return "renamed"
+
+    monkeypatch.setattr(api_endpoint.copy, "deepcopy", copy_board)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        reader = workers.submit(api_endpoint.payload)
+        try:
+            assert copying.wait(3)
+            writer = workers.submit(store.execute, 0, rename)
+            assert not editing.wait(0.05)
+        finally:
+            release.set()
+        snapshot = json.loads(reader.result(3))
+        writer.result(3)
+    assert snapshot["project"] == initial["project"]
+    assert snapshot["sync"] == initial["sync"]
+    current = request_json(api.base + API + "/board")[1]
+    assert current["project"] == "Changed"
+    assert current["sync"]["contentVersion"] != snapshot["sync"]["contentVersion"]
