@@ -42,6 +42,15 @@ legacy watcher commands and their optional native watching dependency are remove
 - `src/localswim/vendor/typefaces/inter/` contains unmodified, licensed font binaries.
   Do not edit, re-subset, or rename them casually.
 
+## Human attention policy
+
+Terry engages with localswim when he has time and interest. Keep passive in-app
+information, the silent `(N)` browser-tab attention count, and feedback from
+user-initiated actions. Do not add unsolicited human notifications, sounds or
+desktop popups. Separately authorized board-to-agent owner notifications remain
+available under their existing opt-in configuration and delivery rules. See
+[Product intent](docs/PRODUCT_INTENT.md).
+
 ## Safety and product invariants
 
 - Keep the service bound to loopback. Do not add remote exposure, external runtime

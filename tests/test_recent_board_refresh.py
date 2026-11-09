@@ -160,7 +160,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
   context.document.createElement=()=>({style:{},attrs:{},children:[],
    setAttribute(name,value){this.attrs[name]=value},append(child){this.children.push(child)},remove(){this.removed=true}});
   context.window.matchMedia=()=>({matches:input.mode==='animation-reduced'});
-  section('let activeCacheTransition =','// **A card can ask');
+  section('let activeCacheTransition =','let boardTitle = document.title;');
   run('globalThis.before=captureCacheCards()');cards=[moved,added];
   const pending=run('settleCacheCards(before)');await flush();
   if(input.mode==='animation-reduced'){assert.equal(animations.length,0);assert.equal(overlays.length,0)}

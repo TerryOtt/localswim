@@ -135,29 +135,9 @@ if(input.mode==='card-focus'){
   await lane.listeners.drop({preventDefault(){},dataTransfer:{getData(){return input.payload}}});
   assert.equal(lane.classList.values.size,0);
   process.stdout.write(JSON.stringify({posts,refreshes,accepted,messages,seen:context.seen}));
-}else if(input.mode==='alerts'){
-  const assert=require('assert/strict');let permission=input.permission||'granted';
-  const messages=[],deliveries=[],listeners={};let requests=0,focus=0,closed=0;
-  for(const id of ['alerts','alerts-wrap'])element(id).addEventListener=(k,fn)=>listeners[k]=fn;
+}else if(input.mode==='attention-title'){
   context.document.title='Synthetic board';
-  function Notification(title,options){deliveries.push(options.body);
-    if(input.failure==='constructor')throw Error('delivery unavailable');
-    if(input.failure==='callback-set')Object.defineProperty(this,'onclick',{
-      set(){throw Error('callback unavailable')}});
-    this.close=()=>{closed++;if(input.failure==='close')throw Error('close unavailable')};
-    messages.push(this)}
-  Object.defineProperty(Notification,'permission',{get(){
-    if(input.failure==='permission')throw Error('permission unavailable');return permission}});
-  Notification.requestPermission=async()=>{requests++;
-    if(input.failure==='request')throw Error('permission rejected');permission='granted'};
-  if(!input.missing){window.Notification=Notification;context.Notification=Notification}
-  window.focus=()=>{focus++;if(input.failure==='focus')throw Error('focus unavailable')};
-  context.localStorage={getItem(){if(input.failure==='get')throw Error('read unavailable');
-    return input.optedOut?'0':'1'},setItem(){
-      if(input.failure==='set')throw Error('write unavailable')}};
-  vm.runInContext(section(input.page,'let lastCta = null;', '\n// **SEARCH.'),context);
-  // This marker must still execute after setup even under optional API failures.
-  vm.runInContext('globalThis.setupContinued=true',context);
+  vm.runInContext(section(input.page,'let boardTitle = document.title;', '\n// **SEARCH.'),context);
   for(const id of ['board','counts']){
     element(id).replaceChildren=()=>{};element(id).appendChild=()=>{};
   }
@@ -165,20 +145,14 @@ if(input.mode==='card-focus'){
     alignCardStarts(){},playFlip(){},applyFilter(){},focusedCardId:()=>null});
   context.document.createElement=()=>({});
   vm.runInContext(section(input.page,'function renderBoardBanner()', '\n// ---- connection health'),context);
-  if(input.gesture){element('alerts').checked=true;await listeners.change()}
-  for(const count of [0,1,1,2]){
-    context.data={project:'Synthetic board',browserUser:'reader',lanes:[],counts:{blocked:count}};
+  const titles=[];
+  for(const counts of input.counts){
+    context.data={project:'Synthetic board',browserUser:'reader',lanes:[],counts};
     vm.runInContext('paint()',context);
+    titles.push(context.document.title);
   }
-  for(const notification of messages)if(notification.onclick)notification.onclick();
-  if(input.optOutGesture){element('alerts').checked=false;await listeners.change()}
-  assert.equal(context.document.title,'(2) Synthetic board');
-  assert.equal(element('post').textContent,'Comment as Synthetic reader');
-  assert.equal(element('title').textContent,'Synthetic board');
-  assert.equal(vm.runInContext('lastCta',context),2);
-  process.stdout.write(JSON.stringify({deliveries,requests,focus,closed,continued:context.setupContinued,
-    checked:element('alerts').checked,disabled:element('alerts').disabled,
-    hidden:element('alerts-wrap').hidden,title:element('alerts-wrap').title}));
+  process.stdout.write(JSON.stringify({titles,commentLabel:element('post').textContent,
+    boardTitle:element('title').textContent}));
 }else if(input.mode==='drawer'){
   const assert=require('assert/strict');
   function node(tag){
@@ -469,57 +443,28 @@ def test_drop_permission_refusal_never_submits() -> None:
     assert "Not yours" in result["messages"][0]
 
 
-@pytest.mark.parametrize(
-    "failure",
-    ["get", "set", "permission", "request", "constructor", "callback-set", "focus", "close", None],
-)
-def test_optional_alert_failures_preserve_setup_title_and_baseline(failure: str | None) -> None:
+def test_attention_title_tracks_painted_counts_and_clears_when_resolved() -> None:
     result = browser_helpers(
-        mode="alerts",
-        failure=failure,
-        gesture=failure in {"get", "set", "request"},
-        permission="default" if failure == "request" else "granted",
+        mode="attention-title",
+        counts=[
+            {},
+            {"needs_terry_action": 1},
+            {"needs_terry_action": 1, "blocked": 2},
+            {"blocked": 2},
+            {"blocked": 2},
+            {},
+        ],
     )
-    assert result["continued"]
-    assert len(result["deliveries"]) <= 2
-    if failure in {"permission", "request"}:
-        assert result["deliveries"] == []
-        assert result["disabled"]
-        assert not result["checked"]
-        assert "unavailable" in result["title"]
-    elif failure in {"constructor", "callback-set"}:
-        assert len(result["deliveries"]) == 1
-        assert result["disabled"]
-        assert not result["checked"]
-    else:
-        assert len(result["deliveries"]) == 2
-    if failure in {"get", "set"}:
-        assert "this page only" in result["title"]
-
-
-@pytest.mark.parametrize("permission", ["default", "denied", "granted"])
-def test_alert_permission_and_preference_stay_distinct(permission: str) -> None:
-    result = browser_helpers(mode="alerts", permission=permission, optedOut=True)
-    assert result["deliveries"] == []
-    assert result["requests"] == 0
-    assert not result["checked"]
-    assert result["disabled"] == (permission == "denied")
-    opted_in = browser_helpers(
-        mode="alerts", permission=permission, gesture=True, optOutGesture=True
-    )
-    assert opted_in["requests"] == (1 if permission == "default" else 0)
-    assert not opted_in["checked"]
-    assert len(opted_in["deliveries"]) == (0 if permission == "denied" else 2)
-
-
-def test_unavailable_notifications_are_visible_and_do_not_interrupt_setup() -> None:
-    result = browser_helpers(mode="alerts", missing=True)
-    assert result["continued"]
-    assert result["disabled"]
-    assert not result["hidden"]
-    assert not result["checked"]
-    assert "unavailable" in result["title"]
-    assert result["deliveries"] == []
+    assert result["titles"] == [
+        "Synthetic board",
+        "(1) Synthetic board",
+        "(3) Synthetic board",
+        "(2) Synthetic board",
+        "(2) Synthetic board",
+        "Synthetic board",
+    ]
+    assert result["commentLabel"] == "Comment as Synthetic reader"
+    assert result["boardTitle"] == "Synthetic board"
 
 
 def test_subject_rename_uses_native_named_button_inside_heading() -> None:

@@ -2425,10 +2425,6 @@ PAGE = """<!doctype html>
          font: 14px/1.5 'Inter', 'Segoe UI', system-ui, sans-serif;
          font-feature-settings: 'cv05' 1, 'tnum' 1; }
 
-  /* **`color-scheme: dark` is load-bearing and is NOT decoration.** The alerts
-     control is a native `<input type="checkbox">`, and a native control paints
-     itself light-on-light against a dark parent unless the scheme is declared. **It
-     keeps WORKING, which is exactly why it would have shipped broken.** */
   #bar { position: sticky; top: 0; z-index: 20; display: flex; gap: 14px;
          flex: 0 0 auto; min-width: 0;
          align-items: center; padding: 9px 14px; background: var(--barbg);
@@ -2439,7 +2435,7 @@ PAGE = """<!doctype html>
      in this bar to go white; Claude's counter-argument is on that card and it is in
      Needs Terry. **The CTAs went white in #0054 and the metadata did not**, so the
      bar currently has two tiers on purpose rather than by omission. */
-  #bar #live, #bar #alerts-wrap, #bar .meta { color: var(--bardim); }
+  #bar #live, #bar .meta { color: var(--bardim); }
   /* Fixed proportions keep each status field anchored as its text changes. */
   #bar #live { flex: 0 1 34em; min-width: 0; display: grid; column-gap: .4em;
                grid-template-columns: minmax(0, 8fr) minmax(0, 17fr)
@@ -2484,14 +2480,6 @@ PAGE = """<!doctype html>
      a zero pill, so the all-quiet board is now a reachable state rather than a
      theoretical one. */
   #counts:empty { margin-left: 0; }
-  /* A persistent toggle rather than a button that vanishes. See the note on
-     `syncAlerts` for why the browser permission and this preference are two
-     different things. */
-  #alerts-wrap { font-size: 11px; font-weight: 600; color: var(--dim);
-                 display: flex; gap: 4px; align-items: center; cursor: pointer;
-                 user-select: none; white-space: nowrap; }
-  #alerts-wrap.blocked { cursor: not-allowed; opacity: .55; }
-  #alerts { margin: 0; cursor: inherit; }
   /* **A zero-state CTA is WHITE, not dim.** Terry, 2026-08-19: "CTA entries at 0
      should be rendered white to stand out against dark title bar." Card #0054.
 
@@ -3140,7 +3128,6 @@ PAGE = """<!doctype html>
       title="The server is preflighting changed Python and will restart itself. A broken
 edit leaves the current process running and reports the failing check here."></span>
     <span id="push"></span>
-    <label id="alerts-wrap"><input type="checkbox" id="alerts"> Alerts</label>
     <span id="badge-slot"><span id="badge"
       title="Green means the event stream is open or disconnected less than 10 seconds ago.">LIVE</span></span>
   </div>
@@ -5592,122 +5579,13 @@ async function settleCacheCards(before) {
   } finally { finish(); }
 }
 
-// **A card can ask for Terry and he can be in another window.** His words: "with no
-// email those could get missed." Three escalating tells, none of which needs a mail
-// server:
-//
-//   1. **The tab title.** Free, always on, survives a backgrounded tab. `(2) FGA
-//      board` is visible in the tab strip from any other window.
-//   2. **A desktop notification**, if he grants it once. Fires only when a count
-//      GOES UP, never on a repaint, so a board sitting at two does not nag.
-//   3. **A push to his phone**, which is Claude's job rather than the page's --
-//      Claude sends one when it moves a card to Needs Terry.
-//
-// **It fires on a RISE, not on a non-zero value.** A notification that repeats every
-// on each poll while a count sits at one is the boy-who-cried-wolf failure this project
-// keeps guarding against, and it would be worse than silence.
-let lastCta = null;
+// Keep attention counts visible in the tab title, including background tabs.
 let boardTitle = document.title;
 
 function announce(c) {
   const asking = (c.needs_terry_action || 0) + (c.blocked || 0);
   document.title = asking > 0 ? '(' + asking + ') ' + boardTitle : boardTitle;
-
-  const increased = lastCta !== null && asking > lastCta;
-  // Settle the count even when optional delivery fails; unchanged paints never retry.
-  lastCta = asking;
-  if (increased && alertsOn()) {
-    try {
-      const n = new Notification('FGA board needs you', {
-      body: (c.needs_terry_action || 0) + ' waiting for Terry, '
-          + (c.blocked || 0) + ' blocked',
-      tag: 'fga-cta',          // Replaces its predecessor rather than stacking.
-    });
-      n.onclick = () => { try { window.focus(); n.close(); } catch (e) {} };
-    } catch (e) {
-      alertsUnavailable = true;
-      syncAlerts();
-    }
-  }
 }
-
-// **THE BROWSER PERMISSION AND THIS PREFERENCE ARE TWO DIFFERENT THINGS**, and
-// conflating them is what made the old button vanish forever after one click.
-//
-// A permission is granted once and CANNOT be revoked from script. A preference is
-// ours, lives in `localStorage` beside `fga-hide-landed`, and can be turned off.
-// Terry asked for a checkbox precisely because the button gave him no way to see
-// whether alerts were on, or to switch them off again.
-//
-// **Three states, rendered honestly:**
-//   `default` -- unchecked; ticking it prompts.
-//   `granted` -- checked or not, per the stored preference.
-//   `denied`  -- unchecked and DISABLED. **A checkbox that silently does nothing
-//                is worse than one that admits it cannot.**
-const ALERTS_KEY = 'fga-alerts';
-const alertsBox = document.getElementById('alerts');
-const alertsWrap = document.getElementById('alerts-wrap');
-let alertsPreference = false;
-let alertsPersistent = true;
-let alertsUnavailable = false;
-try { alertsPreference = localStorage.getItem(ALERTS_KEY) === '1'; }
-catch (e) { alertsPersistent = false; }
-
-function alertsPermission() {
-  try {
-    if (!('Notification' in window)) return 'unavailable';
-    const permission = Notification.permission;
-    return ['default', 'granted', 'denied'].includes(permission) ? permission : 'unavailable';
-  } catch (e) { return 'unavailable'; }
-}
-
-function saveAlertsPreference(value) {
-  alertsPreference = value;
-  try { localStorage.setItem(ALERTS_KEY, value ? '1' : '0'); }
-  catch (e) { alertsPersistent = false; }
-}
-
-function alertsOn() {
-  return !alertsUnavailable && alertsPermission() === 'granted' && alertsPreference;
-}
-
-function syncAlerts() {
-  const permission = alertsPermission();
-  const unavailable = alertsUnavailable || permission === 'unavailable';
-  const denied = permission === 'denied';
-  alertsWrap.hidden = false;
-  alertsBox.disabled = denied || unavailable;
-  alertsWrap.classList.toggle('blocked', denied || unavailable);
-  alertsWrap.title = unavailable ? 'Desktop notifications are unavailable in this browser.' : denied
-    ? 'Your browser has blocked notifications for this site.'
-    : 'Desktop notification when a card starts waiting on you.';
-  if (!alertsPersistent)
-    alertsWrap.title += ' Preference applies to this page only; storage is unavailable.';
-  alertsBox.checked = alertsOn();
-}
-
-alertsBox.addEventListener('change', async () => {
-  if (!alertsBox.checked) {
-    saveAlertsPreference(false);
-    syncAlerts();
-    return;
-  }
-  // **The prompt only appears behind this gesture.** Chrome refuses
-  // `requestPermission` without one, and an auto-request on load is the pattern
-  // people reflexively deny -- which would leave the page permanently unable to
-  // ask again.
-  try {
-    if (alertsPermission() === 'default') await Notification.requestPermission();
-  } catch (e) {
-    alertsUnavailable = true;
-  }
-  // **Stored only if the browser actually said yes.** Otherwise the box unticks
-  // itself, which is the honest answer to "I asked and was refused".
-  saveAlertsPreference(!alertsUnavailable && alertsPermission() === 'granted');
-  syncAlerts();
-});
-
-syncAlerts();
 
 // **SEARCH. Card #0061.** Terry: "This board state will become my memory. 'Didn't we do
 // something like that before?' a search window to find substrings in other tickets would

@@ -1166,14 +1166,18 @@ Important UI mechanics:
 - Validate the actual drop callback's payload before submitting a move. Contain
   request/read errors, distinguish refusal from unknown outcome, always clear drag
   decoration, and contain the final authoritative refresh. Never replay the POST.
-- Treat browser alerts as optional: storage, permission and delivery failures cannot
-  stop setup, paint or title updates. Preserve gesture-based permission requests,
-  honest unavailable/page-only state and count-baseline progression after failure.
+- Respect Terry's time and interest. Keep passive in-app information, the silent
+  `(N)` browser-tab attention count and user-initiated action feedback. Do not add
+  unsolicited human notifications, sounds or desktop popups. Separately authorized
+  board-to-agent owner notifications retain their existing opt-in rules. See
+  [Product intent](PRODUCT_INTENT.md).
+- Keep the browser tab title synchronized with current attention counts, restoring
+  the board title when all attention counts clear.
 - PAGE declares English chrome language. Restart warnings and Add card, Save
   description and Comment action pairs meet 4.5:1 text contrast using their actual
   fills; configured decorative accents stay exact. Arithmetic, production-handler
-  tests and bounded real-browser computed styles have distinct roles. Synthetic
-  capability checks do not verify OS delivery or whole-site accessibility.
+  tests and bounded real-browser computed styles have distinct roles. These checks
+  do not establish whole-site accessibility.
 
 The build ID is the short Git commit. A dirty checkout appends a fingerprint of the
 loaded source files and `-dirty`; consequently, uncommitted source edits produce

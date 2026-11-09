@@ -285,7 +285,7 @@
     const entry = catalog.find(entry => entry.key === key);
     pending = state.records[key] || {};
     drafts = {...(pending.drafts || {})}; query = pending.query || ''; unhideOld = !!pending.unhideOld;
-    staleReloadState = null; HAY.clear(); seen = null; lastOk = 0; lastCta = null;
+    staleReloadState = null; HAY.clear(); seen = null; lastOk = 0;
     streamBoardError = false;
     data = {lanes: [], edges: [], counts: {}, actors: [], revision: 0};
     authoritativeData = null;

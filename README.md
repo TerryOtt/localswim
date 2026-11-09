@@ -5,6 +5,10 @@ lives in one JSON snapshot. Open an individual board or a workspace that switche
 boards with an Attention sidebar. It binds only to loopback and has no core runtime dependency
 beyond Click, the mature command-line parser used for its nested CLI.
 
+Localswim is a work dashboard the human chooses to consult. It stays quiet when
+he turns away and responds clearly to actions he initiates. See the
+[product intent](docs/PRODUCT_INTENT.md) for the human-attention policy.
+
 ## Quick start
 
 Requirements:
