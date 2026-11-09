@@ -2449,8 +2449,8 @@ PAGE = """<!doctype html>
                white-space: nowrap; }
   #live > span { overflow: hidden; text-overflow: ellipsis; }
   #live .age-slot { display: inline-grid; }
-  #live-card-reading { opacity: 1; transition: opacity .1s ease-in; }
-  #live-card-reading.fading { opacity: 0; transition: opacity .15s ease-out; }
+  #live-card-reading { opacity: 1; transition: opacity 75ms ease-in; }
+  #live-card-reading.fading { opacity: 0; transition: opacity 75ms ease-out; }
   @media (prefers-reduced-motion: reduce) { #live-card-reading { transition: none; } }
   #live .age-value { justify-items: end; }
   #live .age-slot > span, #live .age-slot::after { grid-area: 1 / 1; }
@@ -5948,7 +5948,7 @@ function beginCardAgeTransition() {
     if (window.cardAgeTransition !== transition) return;
     transition.ready = true;
     renderLive();
-  }, 150);
+  }, 75);
 }
 function renderLive() {
   const el = document.getElementById('live');

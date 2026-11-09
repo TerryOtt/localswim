@@ -309,7 +309,7 @@ if(input.mode==='card-focus'){
   const age=element('live-card-age'),reading=element('live-card-reading');
   assert.equal(age.hidden,false);assert.equal(element('live-card-value').textContent,1);
   vm.runInContext('beginCardAgeTransition()',context);
-  assert.equal(timers[0].ms,150);assert.ok(reading.classList.values.has('fading'));
+  assert.equal(timers[0].ms,75);assert.ok(reading.classList.values.has('fading'));
   // The board body can arrive before its timestamp-bearing status response.
   context.lastOk=1;context.fileMs=0;vm.runInContext('renderLive()',context);
   assert.equal(age.hidden,false);assert.equal(element('live-card-value').textContent,1);
@@ -404,8 +404,8 @@ def browser_helpers(**values: Any) -> Any:  # noqa: ANN401 - JSON browser test b
 
 def test_card_age_transition_waits_for_new_board_and_respects_reduced_motion() -> None:
     assert browser_helpers(mode="age-transition")["verified"] is True
-    assert "transition: opacity .15s ease-out" in api_endpoint.PAGE
-    assert "transition: opacity .1s ease-in" in api_endpoint.PAGE
+    assert "transition: opacity 75ms ease-out" in api_endpoint.PAGE
+    assert "transition: opacity 75ms ease-in" in api_endpoint.PAGE
     assert "prefers-reduced-motion: reduce" in api_endpoint.PAGE
 
 
